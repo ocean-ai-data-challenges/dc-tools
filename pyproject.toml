@@ -41,6 +41,7 @@ rootutils = "^1.0.7"
 numpy = "^1.25"
 tox = "^4.24.1"
 pydocstyle = "^6.3.0"
+argopy="*"
 
 
 [tool.poetry.group.dev.dependencies]
