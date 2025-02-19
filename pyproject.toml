@@ -37,7 +37,7 @@ numpy = "*"
 tox = "*"
 pydocstyle = "*"
 wget = "*"
-oceanbench = { git = "https://aitmohandk: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@github.com:mercator-ocean/oceanbench.git", branch = "main" }
+oceanbench = { git = "https://<github_username>:<github_password>@github.com:mercator-ocean/oceanbench.git", branch = "main" }
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"
