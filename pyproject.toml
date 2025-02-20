@@ -1,74 +1,53 @@
-[tool.poetry]
+[project]
 name = "dctools"
-version = "0.0.1"
 description = "Basic tools common to all data challenges."
-authors = ["Kamel Ait Mohand, Guillermo Cossio"]
-license = "MIT"
 readme = "README.md"
-repository = "https://github.com/jejjohnson/ocn-tools"
+authors = [
+    {name="Kamel Ait Mohand"},
+    {name="Guillermo Cossio"},
+    ]
+license = "GPL-3-only"
 keywords = ["xarray", "sea-surface-height", "ocean", "benchmark"]
-classifiers = [
-    "Topic :: Scientific/Engineering",
-    "Topic :: Software Development :: Libraries",
-    "Programming Language :: Python :: 3.13",
-    "Operating System :: MACOS/Linux",
-    "Natural Language :: English",
-    "License :: OSI Approved :: MIT License",
-    "Intended Audience :: Science/Research",
-    "Development Status :: 2 - Pre-Alpha copy",
+dynamic = [
+    "version",
+    "classifiers",
+    ]
+requires-python = ">=3.13.0,<3.14.0"
+dependencies = [
+    "xarray>=2024",
+    "zarr (>=2.14.2,<3.0.0)",
+    "dask (>=2023.4.0,<2024)",
+    "netcdf4 (>=1.6.3,<2.0.0)",
+    "numpy (>=1.25,<2.0.0)",
 ]
 
-[tool.poetry.dependencies]
-python = "3.13.*"
-pyinterp = "*"
-xarray = "*"
-zarr = "*"
-dask = "*"
-netcdf4 = "*"
-bottleneck = "*"
-scipy = "*"
-cmake = "*"
-numpy-groupies = "*"
-pint-xarray = "*"
-xrft = "*"
-metpy = "*"
-rootutils = "*"
-numpy = "*"
-tox = "*"
-pydocstyle = "*"
-wget = "*"
-oceanbench = { git = "https://<github_username>:<github_password>@github.com:mercator-ocean/oceanbench.git", branch = "main" }
+[project.urls]
+Repository = "https://github.com/ppr-ocean-ia/dc-tools/tree/main"
+
+[tool.poetry]
+version = "0.0.1"
+
+
+[tool.poetry.group.dev]
+optional = true
 
 [tool.poetry.group.dev.dependencies]
-pytest = "*"
-pytest-cov = "*"
-pre-commit = "*"
-beartype = "*"
-ruff = "*"
-black = "*"
-isort = "*"
+pytest = "^7.3.1"
+pytest-cov = "^4.0.0"
+pre-commit = "^3.2.2"
+beartype = "^0.13.1"
+ruff = "^0.0.263"
+black = "^23.3.0"
+isort = "^5.12.0"
+tox = "^4.24.1"
+pydocstyle = "^6.3.0"
 
+# Setting oceanbench as optional since it breaks the rest of the env
+[tool.poetry.group.oceanbench]
+optional = true
 
-[tool.poetry.group.exp.dependencies]
-wandb = "*"
-loguru = "*"
-hydra-core = "*"
-matplotlib = "*"
-seaborn = "*"
-autoroot = "*"
-omegaconf = "*"
-
-[tool.poetry.group.jlab.dependencies]
-ipykernel = "*"
-autoroot = "*"
-
-
-[tool.poetry.group.jbook.dependencies]
-jupyter-book = "*"
-ghp-import  = "*"
-sphinx-proof = "*"
-jupytext = "*"
-
+[tool.poetry.group.oceanbench.dependencies]
+oceanbench = {git = "ssh://git@github.com:mercator-ocean/oceanbench.git", branch = "main"}
 
 [build-system]
 requires = ["poetry-core", "cmake"]
