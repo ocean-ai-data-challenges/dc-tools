@@ -6,23 +6,23 @@
 from typing import List, Any, Optional
 
 import oceanbench
-from oceanbench.core import evaluate as mercator_eval
-from oceanbench.core import plot as mercator_plot
-from oceanbench.core import process as mercator_process
+from oceanbench.core import evaluate as oceanbench_eval
+from oceanbench.core import plot as oceanbench_plot
+from oceanbench.core import process as oceanbench_process
 import numpy as np
 import xarray
 
 
-class mercator_core_evaluate(object):
+class oceanbench_core_evaluate(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib.
     inside the oceanbench/core/evaluate folder.
     """
 
-    def __init__(self):
+    '''def __init__(self):
         """Init func."""
-        pass
+        pass'''
 
     def get_rmse_glonet(self, forecast, ref, var, lead, level):
         """Mercator's plot for temporal RMSE for depth.
@@ -34,7 +34,9 @@ class mercator_core_evaluate(object):
             lead:
             level:
         """
-        rmse = mercator_eval.rmse_core.get_rmse_glonet(forecast, ref, var, lead, level)
+        rmse = oceanbench_eval.rmse_core.get_rmse_glonet(
+            forecast, ref, var, lead, level
+        )
         return rmse
 
     def get_glonet_rmse_for_given_days(
@@ -52,7 +54,7 @@ class mercator_core_evaluate(object):
             glonet_datasets(List[xarray.Dataset]):
             glorys_datasets(List[xarray.Dataset]):
         """
-        rmse = mercator_eval.rmse_core.get_glonet_rmse_for_given_days(
+        rmse = oceanbench_eval.rmse_core.get_glonet_rmse_for_given_days(
             depthg, var, glonet_datasets, glorys_datasets
         )
         return rmse
@@ -68,7 +70,7 @@ class mercator_core_evaluate(object):
             glonet_datasets(List[xarray.Dataset])
             glorys_datasets(List[xarray.Dataset])
         """
-        gnet = mercator_eval.rmse_core.glonet_pointwise_evaluation_core(
+        gnet = oceanbench_eval.rmse_core.glonet_pointwise_evaluation_core(
             glonet_datasets, glorys_datasets
         )
         return gnet
@@ -92,7 +94,7 @@ class mercator_core_evaluate(object):
             minimum_longitude(float):
             maximum_longitude(float):
         """
-        distance = mercator_eval.rmse_core.get_euclidean_distance_core(
+        distance = oceanbench_eval.rmse_core.get_euclidean_distance_core(
             first_dataset,
             second_dataset,
             minimum_latitude,
@@ -123,14 +125,14 @@ class mercator_core_evaluate(object):
             small_scale_fraction:
         """
         time_spectra, small_scale_fraction = (
-            mercator_eval.rmse_core.analyze_energy_cascade_core(
+            oceanbench_eval.rmse_core.analyze_energy_cascade_core(
                 glonet, var, depth, spatial_resolution, small_scale_cutoff_km
             )
         )
         return (time_spectra, small_scale_fraction)
 
 
-class mercator_core_plot(object):
+class oceanbench_core_plot(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -148,7 +150,7 @@ class mercator_core_plot(object):
             rmse_dataarray(np.ndarray[Any]):
             depth(int):
         """
-        rmse = mercator_plot.rmse_core.plot_temporal_rmse_for_depth(
+        rmse = oceanbench_plot.rmse_core.plot_temporal_rmse_for_depth(
             rmse_dataarray, depth
         )
 
@@ -158,7 +160,7 @@ class mercator_core_plot(object):
         Args:
             rmse_dataarray(np.ndarray[Any]):
         """
-        mercator_plot.rmse_core.plot_temporal_rmse_for_average_depth(rmse_dataarray)
+        oceanbench_plot.rmse_core.plot_temporal_rmse_for_average_depth(rmse_dataarray)
 
     def plot_depth_rmse_average_on_time(
         rmse_dataarray: np.ndarray[Any],
@@ -170,7 +172,7 @@ class mercator_core_plot(object):
             rmse_dataarray(np.ndarray[Any]):
             dataset_depth_values(np.ndarray):
         """
-        mercator_plot.rmse_core.plot_depth_rmse_average_on_time(
+        oceanbench_plot.rmse_core.plot_depth_rmse_average_on_time(
             rmse_dataarray, dataset_depth_values
         )
 
@@ -180,7 +182,7 @@ class mercator_core_plot(object):
         Args:
             e_d: euclidian distance array
         """
-        mercator_plot.rmse_core.plot_euclidean_distance_core(e_d)
+        oceanbench_plot.rmse_core.plot_euclidean_distance_core(e_d)
 
     def plot_energy_cascade_core(gglonet_sc):
         """Plot Energy cascade.
@@ -188,10 +190,10 @@ class mercator_core_plot(object):
         Args:
             gglonet_sc:
         """
-        mercator_plot.rmse_core.plot_energy_cascade_core(gglonet_sc)
+        oceanbench_plot.rmse_core.plot_energy_cascade_core(gglonet_sc)
 
 
-class mercator_core_process(object):
+class oceanbench_core_process(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -222,7 +224,7 @@ class mercator_core_process(object):
         Returns:
             xarray.Dataset
         """
-        density = mercator_process.calc_density_core.calc_density_core(
+        density = oceanbench_process.calc_density_core.calc_density_core(
             dataset,
             lead,
             minimum_latitude,
@@ -242,7 +244,7 @@ class mercator_core_process(object):
         Returns:
             xarray.Dataset
         """
-        dataset = mercator_process.calc_geo_core.calc_geo_core(dataset, var, lead)
+        dataset = oceanbench_process.calc_geo_core.calc_geo_core(dataset, var, lead)
         return dataset
 
     def calc_mld_core(dataset: xarray.Dataset, lead: int) -> xarray.Dataset:
@@ -254,7 +256,7 @@ class mercator_core_process(object):
         Returns:
             xarray.Dataset
         """
-        dataset = mercator_process.calc_mld_core.calc_mld_core(dataset, lead)
+        dataset = oceanbench_process.calc_mld_core.calc_mld_core(dataset, lead)
         return dataset
 
     def get_particle_file_core(
@@ -269,13 +271,13 @@ class mercator_core_process(object):
         Returns:
             xarray.Dataset
         """
-        ds = mercator_process.lagrangian_analysis.get_particle_file_core(
+        ds = oceanbench_process.lagrangian_analysis.get_particle_file_core(
             dataset, latzone, lonzone
         )
         return ds
 
 
-class mercator_core_process_utils(object):
+class oceanbench_core_process_utils(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -294,7 +296,7 @@ class mercator_core_process_utils(object):
         Returns:
             xarray.Dataset
         """
-        KE = mercator_process.utils.compute_kinetic_energy_core(dataset)
+        KE = oceanbench_process.utils.compute_kinetic_energy_core(dataset)
         return KE
 
     def compute_vorticity_core(dataset: xarray.Dataset) -> xarray.Dataset:
@@ -305,7 +307,7 @@ class mercator_core_process_utils(object):
         Returns:
             xarray.Dataset
         """
-        vorticity = mercator_process.utils.compute_vorticity_core(dataset)
+        vorticity = oceanbench_process.utils.compute_vorticity_core(dataset)
         return vorticity
 
     def mass_conservation_core(
@@ -320,13 +322,13 @@ class mercator_core_process_utils(object):
         Returns:
             xarray.Dataset
         """
-        mean_divergence_time_series = mercator_process.utils.mass_conservation_core(
+        mean_divergence_time_series = oceanbench_process.utils.mass_conservation_core(
             dataset, depth, deg_resolution
         )
         return mean_divergence_time_series
 
 
-class mercator_bench_evaluate(object):
+class oceanbench_bench_evaluate(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -406,7 +408,7 @@ class mercator_bench_evaluate(object):
         return (time_spectra, small_scale_fraction)
 
 
-class mercator_plot(object):
+class oceanbench_plotting(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -505,7 +507,7 @@ class mercator_plot(object):
         oceanbench.plot.plot_vortocity(dataset)
 
 
-class mercator_process(object):
+class oceanbench_process(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
