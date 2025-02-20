@@ -12,6 +12,7 @@ dynamic = [
     "version",
     "classifiers",
     ]
+# Too restrictive due to oceanbench
 requires-python = ">=3.13.0,<3.14.0"
 dependencies = [
     "xarray>=2024",
@@ -41,13 +42,16 @@ black = "^23.3.0"
 isort = "^5.12.0"
 tox = "^4.24.1"
 pydocstyle = "^6.3.0"
+copernicusmarine = "^2.0.0"
+argopy = "*" # TODO: change to "^1.0.0" when possible
 
-# Setting oceanbench as optional since it breaks the rest of the env
+# Even if optional oceanbench still limits argopy
 [tool.poetry.group.oceanbench]
 optional = true
 
 [tool.poetry.group.oceanbench.dependencies]
 oceanbench = {git = "ssh://git@github.com:mercator-ocean/oceanbench.git", branch = "main"}
+
 
 [build-system]
 requires = ["poetry-core", "cmake"]
