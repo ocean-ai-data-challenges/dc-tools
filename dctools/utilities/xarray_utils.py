@@ -8,7 +8,7 @@ import xarray as xr
 # Possible names of coordinates that we want to check for
 LATITUDE_NAMES = ["lat", "latitude", "LAT", "LATITUDE"]
 LONGITUDE_NAMES = ["lon", "longitude", "LON", "LONGITUDE"]
-DEPTH_NAMES = ["depth", "DEPTH"]
+DEPTH_NAMES = ["depth", "DEPTH", "height", "HEIGHT"]
 TIME_NAMES = ["time", "TIME"]
 
 

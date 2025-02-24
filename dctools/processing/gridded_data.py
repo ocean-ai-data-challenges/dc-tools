@@ -16,6 +16,7 @@ class GriddedDataProcessor:
         data: xr.Dataset | xr.DataArray,
         lat_range: Tuple[float, float] = None,
         lon_range: Tuple[float, float] = None,
+        vert_range: Tuple[float, float] = None,
         time_range: Tuple[np.datetime64, np.datetime64] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
@@ -27,6 +28,8 @@ class GriddedDataProcessor:
                 bounds
             `lon_range` (Tuple of two floats): lower and upper longitude
                 bounds
+            `vert_range` (Tuple of two floats): lower and upper vertical
+                bounds, either depth or height depending on the dataset
             `time_range` (Tuple of two datetimes): start and end of
                 selected period
 
@@ -35,7 +38,6 @@ class GriddedDataProcessor:
                 specified range
         """
         # TODO: Check that `data` is actually gridded in lat/lon
-        # TODO: Add depth
 
         sel_dict = {}
         # check coordinate names
@@ -45,6 +47,8 @@ class GriddedDataProcessor:
             sel_dict[coord_name_dict["lat"]] = slice(lat_range[0], lat_range[1])
         if lon_range is not None:
             sel_dict[coord_name_dict["lon"]] = slice(lon_range[0], lon_range[1])
+        if vert_range is not None:
+            sel_dict[coord_name_dict["depth"]] = slice(vert_range[0], vert_range[1])
         if time_range is not None:
             sel_dict[coord_name_dict["time"]] = slice(time_range[0], time_range[1])
 
