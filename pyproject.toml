@@ -21,7 +21,7 @@ dependencies = [
     "netcdf4 (>=1.6.3,<2.0.0)",
     "numpy (>=1.25,<2.0.0)",
     "copernicusmarine (>=2.0.0)",
-    "argopy>=0.1.14", # TODO: change to "^1.0.0" when possible
+    "argopy>=1.0.0",
     "pyunpack>=0.3",
     "patool>=3.1.3",
     "wget>=3.2",
@@ -46,12 +46,12 @@ ruff = "^0.9.6"
 pydocstyle = "^6.3.0"
 mypy = "*"
 
-# Even if optional oceanbench still limits argopy
+
 [tool.poetry.group.oceanbench]
 optional = false
 
 [tool.poetry.group.oceanbench.dependencies]
-oceanbench = {git = "ssh://git@github.com:mercator-ocean/oceanbench.git", branch = "main"}
+oceanbench = {git = "ssh://git@github.com:Articoking/oceanbench.git", branch = "main"}
 
 
 [build-system]
