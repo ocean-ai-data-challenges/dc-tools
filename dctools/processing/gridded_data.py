@@ -14,10 +14,10 @@ class GriddedDataProcessor:
     @staticmethod
     def subset_grid(
         data: xr.Dataset | xr.DataArray,
-        lat_range: Tuple[float, float] = None,
-        lon_range: Tuple[float, float] = None,
-        vert_range: Tuple[float, float] = None,
-        time_range: Tuple[np.datetime64, np.datetime64] = None,
+        lat_range: Tuple[float, float] | None = None,
+        lon_range: Tuple[float, float] | None = None,
+        vert_range: Tuple[float, float] | None = None,
+        time_range: Tuple[np.datetime64, np.datetime64] | None = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.
@@ -57,9 +57,9 @@ class GriddedDataProcessor:
     @staticmethod
     def coarsen_grid(
         data: xr.Dataset | xr.DataArray,
-        horizontal_window: int = None,
-        vertical_window: int = None,
-        time_window: int | str = None,
+        horizontal_window: int | None = None,
+        vertical_window: int | None = None,
+        time_window: int | str | None = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Coarsens the grid's resolution by applyin *mean* along some dimension(s).

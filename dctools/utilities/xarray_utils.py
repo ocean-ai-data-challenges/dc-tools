@@ -14,7 +14,7 @@ TIME_NAMES = ["time", "TIME"]
 
 def get_grid_coord_names(
     data: xr.Dataset | xr.DataArray,
-) -> Dict[str, str]:
+) -> Dict[str, str | None]:
     """
     Get the names of the coordinates in `data`.
 
@@ -41,7 +41,7 @@ def get_grid_coord_names(
 
 def get_grid_dim_names(
     data: xr.Dataset | xr.DataArray,
-) -> Dict[str, str]:
+) -> Dict[str, str] | None:
     """
     Get the names of the dimensions in `data`.
 

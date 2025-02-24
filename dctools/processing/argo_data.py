@@ -13,9 +13,9 @@ class ArgoDataProcessor:
     @staticmethod
     def subset_argo(
         data: xr.Dataset | xr.DataArray,
-        lat_range: Tuple[float, float] = None,
-        lon_range: Tuple[float, float] = None,
-        time_range: Tuple[np.datetime64, np.datetime64] = None,
+        lat_range: Tuple[float, float] | None = None,
+        lon_range: Tuple[float, float] | None = None,
+        time_range: Tuple[np.datetime64, np.datetime64] | None = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.
