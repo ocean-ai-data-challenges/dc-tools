@@ -7,7 +7,7 @@ import xarray as xr
 from dctools.dcio.loader import DataLoader
 from dctools.dcio.saver import DataSaver
 from dctools.processing.gridder import DataGridder
-from dctools.utils.file_utils import empty_folder
+from dctools.utilities.file_utils import empty_folder
 
 
 class TestDCTools(unittest.TestCase):
