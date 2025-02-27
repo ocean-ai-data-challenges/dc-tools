@@ -90,7 +90,7 @@ class GriddedDataProcessor:
         temp = data
         if horizontal_window is not None:
             coarsen_dict[dim_name_dict["lat"]] = horizontal_window
-            dim_name_dict["lon"] = horizontal_window
+            coarsen_dict[dim_name_dict["lon"]] = horizontal_window
         if vertical_window is not None:
             coarsen_dict[dim_name_dict["depth"]] = vertical_window
         if time_window is int:
