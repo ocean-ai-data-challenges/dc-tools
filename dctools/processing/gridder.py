@@ -15,7 +15,7 @@ class DataGridder:
     @staticmethod
     def interpolate_to_2dgrid(
         ds_in: xr.Dataset, lon_res: float = 1, lat_res: float = 1
-    ) -> xr.Dataset:
+    ) -> xr.Dataset | None:
         """
         Interpolate data on a regular 2d-grid (lon-lat).
 
@@ -82,5 +82,6 @@ class DataGridder:
         except Exception:
             # import traceback
             # print(traceback.format_exc())
-            print(f"Error while interpolating data : {e}")
+            # print(f"Error while interpolating data : {e}")
+            print("Error while interpolating data")
             return None

@@ -5,7 +5,7 @@ from typing import Tuple
 import numpy as np
 import xarray as xr
 
-from ..utilities.xarray_utils import get_grid_coord_names
+from dctools.utilities.xarray_utils import get_grid_coord_names
 
 
 class NadirDataProcessor:
@@ -44,7 +44,7 @@ class NadirDataProcessor:
             )
 
         # Create mask for .where
-        mask = np.ones_like(data[coord_name_dict["lat"]])
+        mask = xr.ones_like(data[coord_name_dict["lat"]])
         if lat_range is not None:
             mask = np.logical_and(
                 mask,

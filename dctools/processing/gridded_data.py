@@ -5,7 +5,7 @@ from typing import Tuple
 import numpy as np
 import xarray as xr
 
-from ..utilities.xarray_utils import get_grid_coord_names, get_grid_dim_names
+from dctools.utilities.xarray_utils import get_grid_coord_names, get_grid_dim_names
 
 
 class GriddedDataProcessor:
@@ -93,9 +93,9 @@ class GriddedDataProcessor:
             dim_name_dict["lon"] = horizontal_window
         if vertical_window is not None:
             coarsen_dict[dim_name_dict["depth"]] = vertical_window
-        if type(time_window) == int:
+        if time_window is int:
             coarsen_dict[dim_name_dict["time"]] = time_window
-        elif type(time_window) == str:
+        elif time_window is str:
             temp = temp.resample({dim_name_dict["time"]: time_window}).mean()
 
         return temp.coarsen(coarsen_dict, boundary="pad").mean()

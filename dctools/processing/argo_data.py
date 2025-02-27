@@ -5,7 +5,7 @@ from typing import Tuple
 import numpy as np
 import xarray as xr
 
-from ..utilities.xarray_utils import get_grid_coord_names
+from dctools.utilities.xarray_utils import get_grid_coord_names
 
 class ArgoDataProcessor:
     """Processor for argo data."""
