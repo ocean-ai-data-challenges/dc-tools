@@ -93,9 +93,10 @@ class GriddedDataProcessor:
             coarsen_dict[dim_name_dict["lon"]] = horizontal_window
         if vertical_window is not None:
             coarsen_dict[dim_name_dict["depth"]] = vertical_window
-        if time_window is int:
+        if type(time_window) is int:
             coarsen_dict[dim_name_dict["time"]] = time_window
-        elif time_window is str:
-            temp = temp.resample({dim_name_dict["time"]: time_window}).mean()
+        elif type(time_window) is str:
+            temp = temp.resample({
+                dim_name_dict["time"]: time_window}).mean()
 
         return temp.coarsen(coarsen_dict, boundary="pad").mean()

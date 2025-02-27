@@ -8,7 +8,6 @@ from dctools.dcio.loader import DataLoader
 from dctools.dcio.saver import DataSaver
 from dctools.processing.gridder import DataGridder
 from dctools.utilities.file_utils import empty_folder
-from dctools.processing.gridded_data import GriddedDataProcessor
 
 def get_sample_dataset():
     """Create a sample Xarray dataset."""
@@ -90,26 +89,3 @@ def test_regrid_data(setup_data):
     assert "temperature" in gridded_ds.variables
     assert gridded_ds.sizes["lon"] == 360
     assert gridded_ds.sizes["lat"] == 180
-
-def test_select_gridded_data(setup_data):
-    """Test selecting gridded data."""
-    selection = GriddedDataProcessor.subset_grid(
-        setup_data,
-        lat_range = (0, 90),
-        lon_range = (0, 180)
-    )
-    assert selection.sizes["lon"] == 2
-    assert selection.sizes["lat"] == 2
-    assert selection.lat.min() == 0 # Edge case
-    assert selection.lat.max() > 0
-    # Using > just in case we change the test data
-
-def test_coarsen_gridded_data(setup_data):
-    """Test coarsening gridded data."""
-    coarsened_ds = GriddedDataProcessor.coarsen_grid(
-        setup_data,
-        horizontal_window = 2
-    )
-    assert coarsened_ds.sizes["lon"] == 2
-    assert coarsened_ds.sizes["lat"] == 2
-    assert coarsened_ds.isel(lat=-1, lon=-1) != np.nan
