@@ -26,5 +26,5 @@ class DataLoader:
                 return xr.open_zarr(file_path)
             raise ValueError("Unsupported file format.")
         except Exception as error:
-            print(f"Error when loading file : {error}")
+            print(f"Error when loading file: {error}")
             return None

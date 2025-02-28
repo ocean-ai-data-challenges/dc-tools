@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
@@ -81,6 +82,13 @@ def test_save_load_dataset(
     loaded_ds = DataLoader.load_dataset(setup_filepath)
     assert isinstance(loaded_ds, xr.Dataset)
     assert "temperature" in loaded_ds.variables
+
+def test_load_error(setup_filepath):
+    """Test trying to load a non-existent file."""
+
+    # Shouldn't this raise an error instead of returning `None`?
+    assert DataLoader.load_dataset(Path(setup_filepath).stem) is None
+
 
 def test_regrid_data(setup_data):
     """Test regridding data."""
