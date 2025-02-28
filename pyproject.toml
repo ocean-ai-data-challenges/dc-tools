@@ -60,6 +60,7 @@ xrpatcher = {git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "ma
 requires = ["poetry-core", "cmake"]
 build-backend = "poetry.core.masonry.api"
 
+# Omitting all mercator_oceanbench tests until their library is finished
 [tool.mypy]
 disable_error_code = ["import-untyped"]
 exclude = [
@@ -69,4 +70,9 @@ exclude = [
 [tool.ruff]
 exclude = [
     "dctools/third_party"
+]
+
+[tool.coverage.run]
+omit = [
+    "dctools/third_party/*"
 ]
