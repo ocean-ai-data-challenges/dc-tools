@@ -30,7 +30,7 @@ def get_4D_gridded_dataset():
             "lat": lat,
             "lon": lon,
             "depth": depth,
-
+            "time": time
         },
     )
     # define dataset attributes
@@ -58,10 +58,12 @@ def test_select_gridded_data(setup_data):
         lat_range = (0, 90),
         lon_range = (0, 180),
         vert_range=(0, 300),
+        time_range=("2025-01-01", "2025-12-31")
     )
     assert selection.sizes["lon"] == 2
     assert selection.sizes["lat"] == 2
     assert selection.sizes["depth"] == 2
+    assert selection.sizes["time"] == 12
     assert selection.lat.min() == 0 # Edge case
     assert selection.lat.max() > 0
     # Using > just in case we change the test data
