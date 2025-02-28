@@ -56,6 +56,13 @@ oceanbench = {git = "ssh://git@github.com:Articoking/oceanbench.git", branch = "
 xrpatcher = {git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "main"}
 
 
+[tool.poetry.group.docs]
+optional = true
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^8.2.1"
+sphinx-rtd-theme = "^3.0.2"
+
 [build-system]
 requires = ["poetry-core", "cmake"]
 build-backend = "poetry.core.masonry.api"
