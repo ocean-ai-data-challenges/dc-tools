@@ -50,7 +50,7 @@ class GriddedDataProcessor:
         if vert_range is not None:
             sel_dict[coord_name_dict["depth"]] = slice(vert_range[0], vert_range[1])
         if time_range is not None:
-            sel_dict[coord_name_dict["time"]] = slice(time_range[0], time_range[1])
+            sel_dict[coord_name_dict["time"]] = slice(time_range[0], time_range[1])  # type: ignore
 
         return data.sel(sel_dict)
 
@@ -99,4 +99,4 @@ class GriddedDataProcessor:
             temp = temp.resample({
                 dim_name_dict["time"]: time_window}).mean()
 
-        return temp.coarsen(coarsen_dict, boundary="pad").mean()
+        return temp.coarsen(coarsen_dict, boundary="pad").mean() # type: ignore

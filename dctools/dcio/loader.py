@@ -10,7 +10,7 @@ class DataLoader:
     """Loading NetCDF or Zarr files."""
 
     @staticmethod
-    def load_dataset(file_path: str) -> xr.Dataset:
+    def load_dataset(file_path: str) -> xr.Dataset | None:
         """Load a dataset from NetCDF or Zarr file.
 
         Args:
