@@ -46,21 +46,21 @@ class NadirDataProcessor:
         # Create mask for .where
         mask = xr.ones_like(data[coord_name_dict["lat"]])
         if lat_range is not None:
-            mask = np.logical_and(
+            mask = xr.DataArray(np.logical_and(
                 mask,
                 np.logical_and(
-                    data[coord_name_dict["lat"]] > lat_range[0],
-                    data[coord_name_dict["lat"]] < lat_range[1],
+                    data[coord_name_dict["lat"]] >= lat_range[0],
+                    data[coord_name_dict["lat"]] <= lat_range[1],
                 ),
-            )
+            ))
         if lon_range is not None:
-            mask = np.logical_and(
+            mask = xr.DataArray(np.logical_and(
                 mask,
                 np.logical_and(
-                    data[coord_name_dict["lon"]] > lon_range[0],
-                    data[coord_name_dict["lon"]] < lon_range[1],
+                    data[coord_name_dict["lon"]] >= lon_range[0],
+                    data[coord_name_dict["lon"]] <= lon_range[1],
                 ),
-            )
+            ))
 
         # .compute() needed if data is a dask array
         # https://github.com/hainegroup/oceanspy/issues/332

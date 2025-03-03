@@ -41,7 +41,7 @@ def get_grid_coord_names(
 
 def get_grid_dim_names(
     data: xr.Dataset | xr.DataArray,
-) -> Dict[str, str] | None:
+) -> Dict[str, str | None]:
     """
     Get the names of the dimensions in `data`.
 
