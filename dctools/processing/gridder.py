@@ -4,6 +4,7 @@
 """Classes and functions for processing xarray datasets."""
 
 import datetime
+from typing import Optional
 
 import numpy as np
 import xarray as xr
@@ -15,7 +16,7 @@ class DataGridder:
     @staticmethod
     def interpolate_to_2dgrid(
         ds_in: xr.Dataset, lon_res: float = 1, lat_res: float = 1
-    ) -> xr.Dataset | None:
+    ) -> Optional[xr.Dataset]:
         """
         Interpolate data on a regular 2d-grid (lon-lat).
 
@@ -79,9 +80,6 @@ class DataGridder:
                 datetime.timezone.utc
             ).isoformat()
             return ds_grid
-        except Exception:
-            # import traceback
-            # print(traceback.format_exc())
-            # print(f"Error while interpolating data : {e}")
-            print("Error while interpolating data")
+        except Exception as exc:
+            print(f"Error while interpolating data : {exc}")
             return None

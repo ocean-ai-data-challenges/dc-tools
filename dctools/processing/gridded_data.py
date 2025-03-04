@@ -1,6 +1,6 @@
 """Classes and functions for processing gridded Xarray objects."""
 
-from typing import Tuple
+from typing import Tuple, Optional
 
 import numpy as np
 import xarray as xr
@@ -14,10 +14,10 @@ class GriddedDataProcessor:
     @staticmethod
     def subset_grid(
         data: xr.Dataset | xr.DataArray,
-        lat_range: Tuple[float, float] | None = None,
-        lon_range: Tuple[float, float] | None = None,
-        vert_range: Tuple[float, float] | None = None,
-        time_range: Tuple[np.datetime64, np.datetime64] | None = None,
+        lat_range: Optional[Tuple[float, float]] = None,
+        lon_range: Optional[Tuple[float, float]] = None,
+        vert_range: Optional[Tuple[float, float]] = None,
+        time_range: Optional[Tuple[np.datetime64, np.datetime64]] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.
@@ -50,16 +50,18 @@ class GriddedDataProcessor:
         if vert_range is not None:
             sel_dict[coord_name_dict["depth"]] = slice(vert_range[0], vert_range[1])
         if time_range is not None:
-            sel_dict[coord_name_dict["time"]] = slice(time_range[0], time_range[1])  # type: ignore
+            sel_dict[coord_name_dict["time"]] = slice(
+                time_range[0], time_range[1]
+            )  # type: ignore
 
         return data.sel(sel_dict)
 
     @staticmethod
     def coarsen_grid(
         data: xr.Dataset | xr.DataArray,
-        horizontal_window: int | None = None,
-        vertical_window: int | None = None,
-        time_window: int | str | None = None,
+        horizontal_window: Optional[int] = None,
+        vertical_window: Optional[int] = None,
+        time_window: Optional[int | str] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Coarsens the grid's resolution by applyin *mean* along some dimension(s).
@@ -97,6 +99,22 @@ class GriddedDataProcessor:
             coarsen_dict[dim_name_dict["time"]] = time_window
         elif type(time_window) is str:
             temp = temp.resample({
-                dim_name_dict["time"]: time_window}).mean()
+                dim_name_dict["time"]: time_window
+            }).mean()
 
-        return temp.coarsen(coarsen_dict, boundary="pad").mean() # type: ignore
+        return temp.coarsen(coarsen_dict, boundary="pad").mean()  # type: ignore
+
+    @staticmethod
+    def concatenate(
+        ds1: xr.Dataset, ds2: xr.Dataset, dim: str
+    ) -> xr.Dataset:
+        """Concatenates two datasets according to the specified dimension.
+    
+        Args:
+            ds1(xr.Dataset): first xarray dataset
+            ds2(xr.Dataset): second dataset
+        Return:
+            (xr.Dataset): concatenated dataset
+        """
+        return xr.concat([ds1, ds2], dim)
+

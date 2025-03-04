@@ -18,6 +18,6 @@ class DataSaver:
             file_path (str): path to output file.
         """
         try:
-            ds.to_netcdf(file_path)
+            ds.to_netcdf(file_path, format="NETCDF4", engine="netcdf4")
         except Exception as error:
-            print(f"Error when saving dataset : {error}")
+            print(f"Error when saving dataset to {file_path}: {error}")
