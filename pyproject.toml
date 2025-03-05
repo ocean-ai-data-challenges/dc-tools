@@ -84,7 +84,6 @@ omit = [
 types = "mypy --install-types --non-interactive dctools"
 lint = "ruff check 'dctools' 'tests'"
 docstyle = "pydocstyle dctools"
-test = "pytest --capture=no  tests/"
-coverage = "pytest --cov=dctools --cov-fail-under=80 tests/"
+test = "pytest --capture=no --cov=dctools --cov-fail-under=80 tests/"
 # run all
-all = [ {ref="lint"}, {ref="docstyle"}, {ref="test"}, {ref="coverage"}, {ref="types"} ]
+all = [ {ref="lint"}, {ref="docstyle"}, {ref="test"}, {ref="types"} ]
