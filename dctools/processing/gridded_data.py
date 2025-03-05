@@ -50,9 +50,13 @@ class GriddedDataProcessor:
         if vert_range is not None:
             sel_dict[coord_name_dict["depth"]] = slice(vert_range[0], vert_range[1])
         if time_range is not None:
+<<<<<<< HEAD
             sel_dict[coord_name_dict["time"]] = slice(
                 time_range[0], time_range[1]
             )  # type: ignore
+=======
+            sel_dict[coord_name_dict["time"]] = slice(time_range[0], time_range[1])  # type: ignore
+>>>>>>> add_tests
 
         return data.sel(sel_dict)
 
