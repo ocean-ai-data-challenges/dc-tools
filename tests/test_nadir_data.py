@@ -48,13 +48,11 @@ def create_nadir_dataset(
 @pytest.fixture(scope='module')
 def setup_data():
     """Setup test data."""
-    print("Setting up Argo data")
     data = create_nadir_dataset(
         19,
         "2025-01-01",
         "2026-01-01"
     )
-    print(data)
     yield data
 
 def test_subset_nadir(setup_data):

@@ -9,7 +9,6 @@ import oceanbench
 from oceanbench.core import evaluate as oceanbench_eval
 from oceanbench.core import plot as oceanbench_plot
 from oceanbench.core import process as oceanbench_process
-import numpy as np
 import numpy.typing as npt
 import xarray
 

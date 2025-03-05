@@ -49,13 +49,11 @@ def create_argo_dataset(
 @pytest.fixture(scope='module')
 def setup_data():
     """Setup test data."""
-    print("Setting up Argo data")
     data = create_argo_dataset(
         19,
         "2025-01-01",
         "2026-01-01"
     )
-    print(data)
     yield data
 
 def test_subset_argo(setup_data):
