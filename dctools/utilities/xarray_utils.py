@@ -1,6 +1,6 @@
 """Misc. functions to aid in the processing xr.Datasets and DataArrays."""
 
-from typing import Dict
+from typing import Dict, Optional
 
 import xarray as xr
 
@@ -10,7 +10,7 @@ LATITUDE_NAMES = ["lat", "latitude", "LAT", "LATITUDE"]
 LONGITUDE_NAMES = ["lon", "longitude", "LON", "LONGITUDE"]
 DEPTH_NAMES = ["depth", "DEPTH", "height", "HEIGHT"]
 TIME_NAMES = ["time", "TIME"]
-
+DICT_RENAME_CMEMS = dict(longitude="lon", latitude="lat")
 
 def get_grid_coord_names(
     data: xr.Dataset | xr.DataArray,
@@ -38,10 +38,9 @@ def get_grid_coord_names(
 
     return coord_name_dict
 
-
 def get_grid_dim_names(
     data: xr.Dataset | xr.DataArray,
-) -> Dict[str, str] | None:
+) -> Dict[str, Optional[str]]:
     """
     Get the names of the dimensions in `data`.
 
@@ -64,3 +63,11 @@ def get_grid_dim_names(
     dim_name_dict["time"] = None if len(time_set) == 0 else next(iter(time_set))
 
     return dim_name_dict
+
+def rename_coordinates(ds: xr.Dataset, rename_dict):
+    """Rename coordinates according to a given dictionary."""
+    return ds.rename(rename_dict)
+
+def rename_variables(ds: xr.Dataset, rename_dict):
+    """Rename variables according to a given dictionary."""
+    return ds.rename_vars(rename_dict)

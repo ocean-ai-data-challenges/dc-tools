@@ -9,7 +9,7 @@ import oceanbench
 from oceanbench.core import evaluate as oceanbench_eval
 from oceanbench.core import plot as oceanbench_plot
 from oceanbench.core import process as oceanbench_process
-import numpy as np
+import numpy.typing as npt
 import xarray
 
 
@@ -143,18 +143,18 @@ class oceanbench_core_plot(object):
         """Init func."""
         pass
 
-    def plot_temporal_rmse_for_depth(rmse_dataarray: np.ndarray[Any], depth: int):
+    def plot_temporal_rmse_for_depth(self, rmse_dataarray: npt.NDArray[Any], depth: int):
         """Plot temporal RMSE for depth GLONET.
 
         Args:
             rmse_dataarray(np.ndarray[Any]):
             depth(int):
         """
-        rmse = oceanbench_plot.rmse_core.plot_temporal_rmse_for_depth(
+        oceanbench_plot.rmse_core.plot_temporal_rmse_for_depth(
             rmse_dataarray, depth
         )
 
-    def plot_temporal_rmse_for_average_depth(rmse_dataarray: np.ndarray[Any]):
+    def plot_temporal_rmse_for_average_depth(self, rmse_dataarray: npt.NDArray[Any]):
         """Plot temporal RMSE for average depth.
 
         Args:
@@ -163,8 +163,9 @@ class oceanbench_core_plot(object):
         oceanbench_plot.rmse_core.plot_temporal_rmse_for_average_depth(rmse_dataarray)
 
     def plot_depth_rmse_average_on_time(
-        rmse_dataarray: np.ndarray[Any],
-        dataset_depth_values: np.ndarray,
+        self,
+        rmse_dataarray: npt.NDArray[Any],
+        dataset_depth_values: npt.NDArray,
     ):
         """Plot depth RMSE average on time.
 
@@ -176,7 +177,7 @@ class oceanbench_core_plot(object):
             rmse_dataarray, dataset_depth_values
         )
 
-    def plot_euclidean_distance_core(e_d):
+    def plot_euclidean_distance_core(self, e_d):
         """Plot Euclidian distance.
 
         Args:
@@ -184,7 +185,7 @@ class oceanbench_core_plot(object):
         """
         oceanbench_plot.rmse_core.plot_euclidean_distance_core(e_d)
 
-    def plot_energy_cascade_core(gglonet_sc):
+    def plot_energy_cascade_core(self, gglonet_sc):
         """Plot Energy cascade.
 
         Args:
@@ -205,6 +206,7 @@ class oceanbench_core_process(object):
         pass
 
     def calc_density_core(
+        self,
         dataset: xarray.Dataset,
         lead: int,
         minimum_latitude: float,
@@ -234,7 +236,7 @@ class oceanbench_core_process(object):
         )
         return density
 
-    def calc_geo_core(dataset: xarray.Dataset, var: str, lead: int) -> xarray.Dataset:
+    def calc_geo_core(self, dataset: xarray.Dataset, var: str, lead: int) -> xarray.Dataset:
         """Compute geo.
 
         Args:
@@ -247,7 +249,7 @@ class oceanbench_core_process(object):
         dataset = oceanbench_process.calc_geo_core.calc_geo_core(dataset, var, lead)
         return dataset
 
-    def calc_mld_core(dataset: xarray.Dataset, lead: int) -> xarray.Dataset:
+    def calc_mld_core(self, dataset: xarray.Dataset, lead: int) -> xarray.Dataset:
         """Compute MLD.
 
         Args:
@@ -260,6 +262,7 @@ class oceanbench_core_process(object):
         return dataset
 
     def get_particle_file_core(
+        self,
         dataset: xarray.Dataset, latzone, lonzone
     ) -> xarray.Dataset:
         """Get particle file.
@@ -288,7 +291,7 @@ class oceanbench_core_process_utils(object):
         """Init func."""
         pass
 
-    def compute_kinetic_energy_core(dataset: xarray.Dataset) -> xarray.Dataset:
+    def compute_kinetic_energy_core(self, dataset: xarray.Dataset) -> xarray.Dataset:
         """Compute kinetic energy.
 
         Args:
@@ -299,7 +302,7 @@ class oceanbench_core_process_utils(object):
         KE = oceanbench_process.utils.compute_kinetic_energy_core(dataset)
         return KE
 
-    def compute_vorticity_core(dataset: xarray.Dataset) -> xarray.Dataset:
+    def compute_vorticity_core(self, dataset: xarray.Dataset) -> xarray.Dataset:
         """Compute vorticity.
 
         Args:
@@ -311,6 +314,7 @@ class oceanbench_core_process_utils(object):
         return vorticity
 
     def mass_conservation_core(
+        self,
         dataset: xarray.Dataset, depth, deg_resolution
     ) -> xarray.Dataset:
         """Compute mass conservation.
@@ -328,7 +332,7 @@ class oceanbench_core_process_utils(object):
         return mean_divergence_time_series
 
 
-class oceanbench_bench_evaluate(object):
+class oceanbench_evaluate_funcs(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -340,8 +344,9 @@ class oceanbench_bench_evaluate(object):
         pass
 
     def pointwise_evaluation(
+        self,
         glonet_datasets: List[xarray.Dataset], glorys_datasets: List[xarray.Dataset]
-    ) -> np.ndarray[Any]:
+    ) -> npt.NDArray[Any]:
         """Compute pointwise evaluation.
 
         Args:
@@ -356,6 +361,7 @@ class oceanbench_bench_evaluate(object):
         return gnet
 
     def get_euclidean_distance(
+        self,
         first_dataset: xarray.Dataset,
         second_dataset: xarray.Dataset,
         minimum_latitude: float,
@@ -384,6 +390,7 @@ class oceanbench_bench_evaluate(object):
         return distance
 
     def analyze_energy_cascade(
+        self,
         dataset: xarray.Dataset,
         var: str,
         depth: float,
@@ -408,7 +415,7 @@ class oceanbench_bench_evaluate(object):
         return (time_spectra, small_scale_fraction)
 
 
-class oceanbench_plotting(object):
+class oceanbench_plotting_funcs(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -419,7 +426,7 @@ class oceanbench_plotting(object):
         """Init func."""
         pass
 
-    def plot_density(dataset: xarray.Dataset):
+    def plot_density(self, dataset: xarray.Dataset):
         """Plot density.
 
         Args:
@@ -427,7 +434,7 @@ class oceanbench_plotting(object):
         """
         oceanbench.plot.plot_density(dataset)
 
-    def plot_geo(dataset: xarray.Dataset):
+    def plot_geo(self, dataset: xarray.Dataset):
         """Plot geo.
 
         Args:
@@ -435,7 +442,7 @@ class oceanbench_plotting(object):
         """
         oceanbench.plot.plot_geo(dataset)
 
-    def plot_mld(dataset: xarray.Dataset):
+    def plot_mld(self, dataset: xarray.Dataset):
         """Plot mld.
 
         Args:
@@ -443,16 +450,20 @@ class oceanbench_plotting(object):
         """
         oceanbench.plot.plot_mld(dataset)
 
-    def plot_pointwise_evaluation(rmse_dataarray: np.ndarray[Any], depth: int):
+    def plot_pointwise_evaluation(
+        self, rmse_dataarray: npt.NDArray[Any], depth: int
+    ):
         """Plot pointwise evaluation.
 
         Args:
-            rmse_dataarray(numpy.ndarray[Any]):
+            rmse_dataarray(np.ndarray[Any]):
             depth(int):
         """
         oceanbench.plot.plot_pointwise_evaluation(rmse_dataarray, depth)
 
-    def plot_pointwise_evaluation_for_average_depth(rmse_dataarray: np.ndarray[Any]):
+    def plot_pointwise_evaluation_for_average_depth(
+        self, rmse_dataarray: npt.NDArray[Any]
+    ):
         """Plot pointwise evaluation for average depth.
 
         Args:
@@ -461,8 +472,9 @@ class oceanbench_plotting(object):
         oceanbench.plot.plot_pointwise_evaluation_for_average_depth(rmse_dataarray)
 
     def plot_pointwise_evaluation_depth_for_average_time(
-        rmse_dataarray: np.ndarray[Any],
-        dataset_depth_values: np.ndarray,
+        self,
+        rmse_dataarray: npt.NDArray[Any],
+        dataset_depth_values: npt.NDArray,
     ):
         """Plot pointwise evaluation  depth for average time.
 
@@ -474,7 +486,7 @@ class oceanbench_plotting(object):
             rmse_dataarray, dataset_depth_values
         )
 
-    def plot_euclidean_distance(euclidean_distance):
+    def plot_euclidean_distance(self, euclidean_distance):
         """Plot euclidean_distance.
 
         Args:
@@ -482,7 +494,7 @@ class oceanbench_plotting(object):
         """
         oceanbench.plot.plot_euclidean_distance(euclidean_distance)
 
-    def plot_energy_cascade(euclidean_distance):
+    def plot_energy_cascade(self, gglonet_sc):
         """Plot energy cascade.
 
         Args:
@@ -490,7 +502,7 @@ class oceanbench_plotting(object):
         """
         oceanbench.plot.plot_energy_cascade(gglonet_sc)
 
-    def plot_kinetic_energy(dataset: xarray.Dataset):
+    def plot_kinetic_energy(self, dataset: xarray.Dataset):
         """Plot euclidean_distance.
 
         Args:
@@ -498,7 +510,7 @@ class oceanbench_plotting(object):
         """
         oceanbench.plot.plot_kinetic_energy(dataset)
 
-    def plot_vorticity(dataset: xarray.Dataset):
+    def plot_vorticity(self, dataset: xarray.Dataset):
         """Plot euclidean_distance.
 
         Args:
@@ -507,7 +519,7 @@ class oceanbench_plotting(object):
         oceanbench.plot.plot_vortocity(dataset)
 
 
-class oceanbench_process(object):
+class oceanbench_processing_funcs(object):
     """Wrapper class.
 
     Wraps functions in Mercator's oceanbench lib
@@ -519,6 +531,7 @@ class oceanbench_process(object):
         pass
 
     def calc_density(
+        self,
         dataset: xarray.Dataset,
         lead: int,
         minimum_latitude: float,
@@ -548,7 +561,7 @@ class oceanbench_process(object):
         )
         return density
 
-    def calc_geo(dataset: xarray.Dataset, lead: int, variable: str) -> xarray.Dataset:
+    def calc_geo(self, dataset: xarray.Dataset, lead: int, variable: str) -> xarray.Dataset:
         """Compute geo.
 
         Args:
@@ -565,7 +578,7 @@ class oceanbench_process(object):
         )
         return dataset
 
-    def calc_mld(dataset: xarray.Dataset, lead: int, variable: str) -> xarray.Dataset:
+    def calc_mld(self, dataset: xarray.Dataset, lead: int) -> xarray.Dataset:
         """Compute geo.
 
         Args:
@@ -581,6 +594,7 @@ class oceanbench_process(object):
         return dataset
 
     def get_particle_file(
+        self,
         dataset: xarray.Dataset,
         minimum_latitude: float,
         maximum_latitude: float,
@@ -608,6 +622,7 @@ class oceanbench_process(object):
         return dataset
 
     def mass_conservation(
+        self,
         dataset: xarray.Dataset, depth: float, deg_resolution: float = 0.25
     ) -> xarray.DataArray:
         """Compute geo.

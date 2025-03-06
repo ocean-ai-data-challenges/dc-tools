@@ -1,6 +1,6 @@
 """Classes and functions for processing Argo float data."""
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import xarray as xr
@@ -13,9 +13,9 @@ class ArgoDataProcessor:
     @staticmethod
     def subset_argo(
         data: xr.Dataset | xr.DataArray,
-        lat_range: Tuple[float, float] | None = None,
-        lon_range: Tuple[float, float] | None = None,
-        time_range: Tuple[np.datetime64, np.datetime64] | None = None,
+        lat_range: Optional[Tuple[float, float]] = None,
+        lon_range: Optional[Tuple[float, float]] = None,
+        time_range: Optional[Tuple[np.datetime64, np.datetime64]] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.
@@ -38,31 +38,31 @@ class ArgoDataProcessor:
         coord_name_dict = get_grid_coord_names(data)
 
         # Create mask for .where
-        mask = np.ones_like(data[coord_name_dict["lat"]])
+        mask = xr.ones_like(data[coord_name_dict["lat"]])
         if lat_range is not None:
-            mask = np.logical_and(
+            mask = xr.DataArray(np.logical_and(
                 mask,
                 np.logical_and(
-                    data[coord_name_dict["lat"]] > lat_range[0],
-                    data[coord_name_dict["lat"]] < lat_range[1],
+                    data[coord_name_dict["lat"]] >= lat_range[0],
+                    data[coord_name_dict["lat"]] <= lat_range[1],
                 ),
-            )
+            ))
         if lon_range is not None:
-            mask = np.logical_and(
+            mask = xr.DataArray(np.logical_and(
                 mask,
                 np.logical_and(
-                    data[coord_name_dict["lon"]] > lon_range[0],
-                    data[coord_name_dict["lon"]] < lon_range[1],
+                    data[coord_name_dict["lon"]] >= lon_range[0],
+                    data[coord_name_dict["lon"]] <= lon_range[1],
                 ),
-            )
+            ))
         if time_range is not None:
-            mask = np.logical_and(
+            mask = xr.DataArray(np.logical_and(
                 mask,
                 np.logical_and(
-                    data[coord_name_dict["time"]] > time_range[0],
-                    data[coord_name_dict["time"]] < time_range[1],
+                    data[coord_name_dict["time"]] >= time_range[0],
+                    data[coord_name_dict["time"]] <= time_range[1],
                 ),
-            )
+            ))
         
         # .compute() needed if data is a dask array
         # https://github.com/hainegroup/oceanspy/issues/332
