@@ -1,6 +1,9 @@
 data/*
 tst.zarr
 
+# Specific to our docs
+docs/source/_autosummary
+
 # Generated automatically
 # https://getgitignore.com/Python
 

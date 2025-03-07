@@ -27,4 +27,5 @@ contribute to the project.
 
    usage/installation
    usage/quickstart
+   api
 
