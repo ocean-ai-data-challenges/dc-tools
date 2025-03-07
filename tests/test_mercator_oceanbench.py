@@ -150,7 +150,7 @@ class TestOceanBench:
             test_vars.glorys_file_path, test_vars.exception_handler
         )
 
-    '''def test_oceanbench_rmse_evaluation(self, test_vars):
+    def test_oceanbench_rmse_evaluation(self, test_vars):
         """Test RMSE."""
         test_vars.dclogger.info("Run RMSE Evaluation.")
         try:
@@ -233,7 +233,7 @@ class TestOceanBench:
     def test_oceanbench_vorticity_analysis(self, test_vars):
         """Test vorticity."""
         test_vars.dclogger.info("Run Test vorticity.")
-        test_vars.oceanbench_plotting_funcs.plot_vorticity(test_vars.glonet_data)'''
+        test_vars.oceanbench_plotting_funcs.plot_vorticity(test_vars.glonet_data)
 
     def test_oceanbench_mass_conservation_analysis(self, test_vars):
         """Test mass conservation."""
