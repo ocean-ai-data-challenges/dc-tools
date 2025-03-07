@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+
 """Classes and functions for processing nadir altimetry data."""
 
 from typing import Tuple, Optional

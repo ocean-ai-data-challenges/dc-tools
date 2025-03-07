@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+
 """Misc. functions to aid in the processing xr.Datasets and DataArrays."""
 
 from typing import Dict, Optional

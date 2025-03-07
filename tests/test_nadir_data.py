@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+
+"""Test Nadir data."""
+
 import numpy as np
 import pandas as pd
 import xarray as xr

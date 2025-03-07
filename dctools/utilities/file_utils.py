@@ -31,11 +31,13 @@ def list_files_with_extension(directory: str, extension: str):
         directory(str): path to directory
         extension(str): file extension to look for
     """
-    return [fname for fname in sorted(os.listdir(directory)) if Path(fname).suffix == extension]
+    return [fname for fname in sorted(
+        os.listdir(directory)
+    ) if Path(fname).suffix == extension]
 
 def delete_files_from_list(directory: str, list_files: List[str]):
     """Remove a list of files in a given directory.
-    
+
     directory(str): directory
     list_files(List[str]): list of files to delete
     """
@@ -43,7 +45,6 @@ def delete_files_from_list(directory: str, list_files: List[str]):
         fpath = os.path.join(directory, fname)
         if os.path.isfile(fpath):
             os.remove(fpath)
-    
 
 def run_command(command: str):
     """Run and wait till the end of the given command.

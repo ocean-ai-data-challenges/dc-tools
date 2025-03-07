@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+
 """Classes and functions for processing Argo float data."""
 
 from typing import Optional, Tuple
@@ -63,7 +66,7 @@ class ArgoDataProcessor:
                     data[coord_name_dict["time"]] <= time_range[1],
                 ),
             ))
-        
+
         # .compute() needed if data is a dask array
         # https://github.com/hainegroup/oceanspy/issues/332
         result = result.where(mask.compute(), drop=True)
@@ -72,5 +75,3 @@ class ArgoDataProcessor:
         # variable that's a proxy)
 
         return result
-
-        
