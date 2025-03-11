@@ -18,11 +18,18 @@ extensions = [
     'myst_parser',
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
+    'sphinx.ext.napoleon',
 ]
-autosummary_generate = True
 
 templates_path = ['_templates']
 exclude_patterns = []
+
+# Autodocs/Autosummary config
+autodoc_typehints = 'description'
+
+# Stolen from weatherbench2:
+# https://stackoverflow.com/a/66295922/809705
+autosummary_generate = True
 
 # MyST Options
 # https://myst-parser.readthedocs.io/en/latest/configuration.html
@@ -35,3 +42,4 @@ myst_links_external_new_tab = True
 
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
+# html_logo = "_static/wb2-logo-wide.png" # TODO: draw a logo for the DCs
