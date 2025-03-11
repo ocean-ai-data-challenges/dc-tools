@@ -1,3 +1,4 @@
+tests/test.log*
 data/*
 tst.zarr
 
