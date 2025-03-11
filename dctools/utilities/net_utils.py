@@ -3,9 +3,10 @@
 
 """NET Utilities functions."""
 
+import datetime
 import logging
 import os
-from typing import Optional
+from typing import List, Optional
 
 import copernicusmarine
 from mypy_boto3_s3.client import S3Client
@@ -13,32 +14,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from dctools.utilities.errors import DCExceptionHandler
-
-def download_s3_file(
-    s3_client: S3Client,
-    bucket_name: str,
-    file_name: str,
-    local_file_path: str,
-    dclogger: logging.Logger,
-    exception_handler: DCExceptionHandler,
-) -> None:
-    """Download a file from s3 server.
-
-    Args:
-        s3_client: (S3Client) boto3 S3 client
-        bucket_name(str): name of s3 bucket
-        filename(str): file to download from bucket
-        outpath(str): path where to save the downloaded file
-    """
-    dclogger.info(f"Downloading from s3 bucket: {bucket_name}.")
-    try:
-        s3_client.download_file(
-            Bucket=bucket_name,
-            Key=file_name,
-            Filename=local_file_path,
-        )
-    except Exception as exc:
-        exception_handler.handle_exception(exc, "S3 download failed.")
 
 
 class S3Url(object):
@@ -81,6 +56,53 @@ class S3Url(object):
             (str): url
         """
         return self._parsed.geturl()
+
+def download_s3_file(
+    s3_client: S3Client,
+    bucket_name: str,
+    file_name: str,
+    local_file_path: str,
+    dclogger: logging.Logger,
+    exception_handler: DCExceptionHandler,
+) -> None:
+    """Download a file from s3 server.
+
+    Args:
+        s3_client: (S3Client) boto3 S3 client
+        bucket_name(str): name of s3 bucket
+        filename(str): file to download from bucket
+        outpath(str): path where to save the downloaded file
+    """
+    dclogger.info(f"Downloading from s3 bucket: {bucket_name}.")
+    try:
+        s3_client.download_file(
+            Bucket=bucket_name,
+            Key=file_name,
+            Filename=local_file_path,
+        )
+    except Exception as exc:
+        exception_handler.handle_exception(exc, "S3 download failed.")
+
+def list_files_in_s3bucket_folder(
+        s3_client: S3Client, bucket_name: str, s3_folder_name: str
+    ) -> List[str]:
+    """
+    List all files in a S3 bucket folder.
+
+    Args:
+        s3_client: (S3Client) boto3 S3 client
+        bucket_name(str): name of s3 bucket
+        s3_folder_name(str): bucket folder to list files from
+    """
+    list_files = []
+    response = s3_client.list_objects_v2(
+        Bucket=bucket_name, Prefix=s3_folder_name
+    )
+    files = response.get("Contents")
+    for file in files:
+        list_files.append(file)
+    return sorted(list_files)
+
 
 class CMEMSManager:
     """Class to manage Copernicus Marine downloads."""
@@ -200,3 +222,17 @@ class CMEMSManager:
         except Exception as exc:
             self.exception_handler.handle_exception(exc, "download from CMEMS failed.")
         return None
+
+    def get_cmems_filter_from_date(self, date:datetime.datetime) -> str:
+        """Give a filter to select correct file when downloading from CMEMS.
+
+        Args:
+            date (datetime.datetime): date of file to download.
+
+        Returns:
+            str: filter string
+        """
+
+        filter = f"*/{date.strftime('%Y')}/{date.strftime('%m')}/*_{date.strftime('%Y')}{date.strftime('%m')}{date.strftime('%d')}_*.nc"
+        print(f"date: {date}     filter: {filter}")
+        return filter

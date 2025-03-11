@@ -9,6 +9,7 @@ from typing import List
 
 from pathlib import Path
 
+from dctools.utilities.errors import DCExceptionHandler
 
 def empty_folder(folder_path: str):
     """Remove all files in given folder.
@@ -56,3 +57,46 @@ def run_command(command: str):
     p = subprocess.Popen(cmd)
     p.wait()
     return p.returncode
+
+def remove_listof_files(
+    list_files:List[str], dir: str, exc_handler: DCExceptionHandler
+) -> None:
+    """removes a list of files from a given folder.
+
+    Args:
+        list_files (List[str]): list of the files to remove
+        dir (str): directory where to remove files
+        exc_handler (DCExceptionHandler): exception handler
+    """
+    try:
+        for filename in list_files:
+            filepath = os.path.join(dir, filename)
+            if os.path.isfile(filepath):
+                print(f"removing: {filepath}")
+                os.remove(filepath)
+    except Exception as exc:
+        exc_handler.handle_exception(exc, "Failed to remove files.")
+
+def get_list_filter_files(directory: str, extension: str, regex: str, prefix: bool = False) -> List[str]:
+    """_summary_
+
+    Args:
+        directory (str): _description_
+        extension (str): _description_
+        regex (str): _description_
+        prefix (bool, optional): _description_. Defaults to False.
+
+    Returns:
+        List[str]: _description_
+    """
+    list_files = list_files_with_extension(directory,  extension)
+    list_filter_files = []
+    if prefix:
+        list_filter_files = [
+            ncf for ncf in list_files if ncf.startswith(regex)
+        ]
+    else:
+        list_filter_files = [
+            ncf for ncf in list_files if regex in ncf
+        ]
+    return list_filter_files
