@@ -6,12 +6,9 @@
 import logging
 from typing import List, Any, Optional
 
-import oceanbench
-from oceanbench.core import evaluate as oceanbench_eval
-from oceanbench.core import plot as oceanbench_plot
-from oceanbench.core import process as oceanbench_process
 import numpy.typing as npt
 from numpy import ndarray
+import oceanbench
 import xarray
 
 from dctools.utilities.errors import DCExceptionHandler
@@ -344,16 +341,19 @@ class OceanbenchMetrics:
         ref_dataset: Optional[xarray.Dataset]=None,
         plot_result: Optional[bool]=False
     ) -> Optional[ndarray]:
-        """_summary_
+        """Compute a given metric.
 
         Args:
-            metric_name (str): _description_
-            eval_dataset (xarray.Dataset): _description_
-            ref_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            metric_name (str): name of metric : ['rmse', 'mld', geo', density',
+                'euclid_dist', 'energy_cascad', 'kinetic_energy', 'vorticity'
+                'mass_conservation']
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            ref_dataset (xarray.Dataset): reference dataset
+            plot_result (bool, optional): whether to display figures or not.
+                Defaults to False.
 
         Returns:
-            Optional[ndarray]: _description_
+            ndarray, optional: computed metric (if any)
         """
         self.dc_logger.info(f"Run {metric_name} Evaluation.")
         result = None
@@ -374,17 +374,17 @@ class OceanbenchMetrics:
                 if plot_result:
                     result = self.kinetic_energy_analysis(eval_dataset)
                 else:
-                    self.dc_logger.info(f"Kinetic energy: Nothing to do (plotting disabled).")
+                    self.dc_logger.info("Kinetic energy: Nothing to do (plotting disabled).")
             case 'vorticity':
                 if plot_result:
                     self.vorticity_analysis(eval_dataset)
                 else:
-                    self.dc_logger.info(f"Vorticity: Nothing to do (plotting disabled).")
+                    self.dc_logger.info("Vorticity: Nothing to do (plotting disabled).")
             case 'mass_conservation':
                 if plot_result:
                     self.mass_conservation_analysis(eval_dataset)
                 else:
-                    self.dc_logger.info(f"Mass_conservation: Nothing to do (plotting disabled).")
+                    self.dc_logger.info("Mass_conservation: Nothing to do (plotting disabled).")
             case _:
                 self.dc_logger.warning("Unknown metric_name.")
         return result
@@ -393,49 +393,54 @@ class OceanbenchMetrics:
     def rmse_evaluation(
         self,
         eval_dataset: xarray.Dataset,
-        ref_dataset: xarray.Dataset,
-        plot_result: bool=False
+        ref_dataset: Optional[xarray.Dataset],
+        plot_result: Optional[bool]=False
     ):
-        """"""
         """Compute RMSE metric.
 
         Args:
-            dataset (xarray.Dataset): _description_
-            ref_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            dataset (xarray.Dataset): dataset to evaluate
+            ref_dataset (xarray.Dataset): reference dataset
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
         """
         self.dc_logger.info("Compute RMSE metric.")
         try:
-            nparray = self.oceanbench_eval.pointwise_evaluation(
-                glonet_datasets=[eval_dataset],
-                glorys_datasets=[ref_dataset],
-            )
-            if plot_result:
-                self.oceanbench_plot.plot_pointwise_evaluation(
-                    rmse_dataarray=nparray, depth=2
+            if ref_dataset:
+                nparray = self.oceanbench_eval.pointwise_evaluation(
+                    glonet_datasets=[eval_dataset],
+                    glorys_datasets=[ref_dataset],
                 )
-                self.oceanbench_plot.plot_pointwise_evaluation_for_average_depth(
-                    rmse_dataarray=nparray
-                )
-                self.oceanbench_plot.plot_pointwise_evaluation_depth_for_average_time(
-                    rmse_dataarray=nparray, dataset_depth_values=eval_dataset.depth.values
-                )
-            return nparray
+                if plot_result:
+                    self.oceanbench_plot.plot_pointwise_evaluation(
+                        rmse_dataarray=nparray, depth=2
+                    )
+                    self.oceanbench_plot.plot_pointwise_evaluation_for_average_depth(
+                        rmse_dataarray=nparray
+                    )
+                    self.oceanbench_plot.plot_pointwise_evaluation_depth_for_average_time(
+                        rmse_dataarray=nparray, dataset_depth_values=eval_dataset.depth.values
+                    )
+                return nparray
+            else:
+                self.dc_logger.warning("Empty reference dataset.")
+
         except Exception as exc:
             self.exc_handler.handle_exception(exc, "Compute RMSE metric error.")
 
     def mld_analysis(self,
         eval_dataset: xarray.Dataset,
-        plot_result: bool=False
+        plot_result: Optional[bool]=False
     ):
         """MLD analysis.
 
         Args:
-            eval_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
@@ -455,13 +460,14 @@ class OceanbenchMetrics:
     def geo_analysis(
         self,
         eval_dataset: xarray.Dataset,
-        plot_result: bool=False
+        plot_result: Optional[bool]=False
     ):
         """Geo analysis.
 
         Args:
-            dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            dataset (xarray.Dataset): dataset to evaluate
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
@@ -482,13 +488,14 @@ class OceanbenchMetrics:
     def density_analysis(
         self,
         eval_dataset: xarray.Dataset,
-        plot_result: bool=False
+        plot_result: Optional[bool]=False
     ):
         """Density analysis.
 
         Args:
-            eval_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
@@ -512,45 +519,50 @@ class OceanbenchMetrics:
     def euclid_dist_analysis(
         self,
         eval_dataset: xarray.Dataset,
-        ref_dataset: xarray.Dataset,
-        plot_result: bool=False
+        ref_dataset: Optional[xarray.Dataset],
+        plot_result: Optional[bool]=False
     ):
         """Euclidian distance analysis.
 
         Args:
-            eval_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            ref_dataset (xarray.Dataset): reference dataset
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
         """
         self.dc_logger.info("Run Euclidian distance analysis.")
         try:
-            euclidean_distance = self.oceanbench_eval.get_euclidean_distance(
-                first_dataset=eval_dataset,
-                second_dataset=ref_dataset,
-                minimum_latitude=466,
-                maximum_latitude=633,
-                minimum_longitude=400,
-                maximum_longitude=466,
-            )
-            if plot_result:
-                self.oceanbench_plot.plot_euclidean_distance(euclidean_distance)
-            return euclidean_distance
+            if ref_dataset:
+                euclidean_distance = self.oceanbench_eval.get_euclidean_distance(
+                    first_dataset=eval_dataset,
+                    second_dataset=ref_dataset,
+                    minimum_latitude=466,
+                    maximum_latitude=633,
+                    minimum_longitude=400,
+                    maximum_longitude=466,
+                )
+                if plot_result:
+                    self.oceanbench_plot.plot_euclidean_distance(euclidean_distance)
+                return euclidean_distance
+            else:
+                self.dc_logger.warning("Empty reference dataset.")
         except Exception as exc:
             self.exc_handler.handle_exception(exc, "Euclidian distance analysis error.")
 
     def energy_cascad_analysis(
         self,
         eval_dataset: xarray.Dataset,
-        plot_result: bool=False
+        plot_result: Optional[bool]=False
     ):
         """Energy cascad analysis.
 
         Args:
-            metric_name (str): _description_
-            eval_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
@@ -570,11 +582,12 @@ class OceanbenchMetrics:
         self,
         eval_dataset: xarray.Dataset,
     ):
-        """kinetic energy analysis.
+        """Kinetic energy analysis.
 
         Args:
-            eval_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
@@ -592,8 +605,9 @@ class OceanbenchMetrics:
         """Vorticity analysis.
 
         Args:
-            eval_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_
@@ -608,11 +622,12 @@ class OceanbenchMetrics:
         self,
         eval_dataset: xarray.Dataset
     ):
-        """mass conservation.
+        """Mass conservation.
 
         Args:
-            eval_dataset (xarray.Dataset): _description_
-            plot_result (bool, optional): _description_. Defaults to False.
+            eval_dataset (xarray.Dataset): dataset to evaluate
+            plot_result (bool, optional): display figures ?
+                Defaults to False.
 
         Returns:
             Optional[ndarray]: _description_

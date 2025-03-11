@@ -61,7 +61,7 @@ def run_command(command: str):
 def remove_listof_files(
     list_files:List[str], dir: str, exc_handler: DCExceptionHandler
 ) -> None:
-    """removes a list of files from a given folder.
+    """Remove a list of files from a given folder.
 
     Args:
         list_files (List[str]): list of the files to remove
@@ -77,14 +77,17 @@ def remove_listof_files(
     except Exception as exc:
         exc_handler.handle_exception(exc, "Failed to remove files.")
 
-def get_list_filter_files(directory: str, extension: str, regex: str, prefix: bool = False) -> List[str]:
-    """_summary_
+def get_list_filter_files(
+        directory: str, extension: str, regex: str, prefix: bool = False
+    ) -> List[str]:
+    """Return a list of files that match some conditions.
 
     Args:
-        directory (str): _description_
-        extension (str): _description_
-        regex (str): _description_
-        prefix (bool, optional): _description_. Defaults to False.
+        directory (str): directory where to look for files
+        extension (str): file extension
+        regex (str): pattern to match on filenames
+        prefix (bool, optional): whether the filename starts with the pattern.
+            Defaults to False.
 
     Returns:
         List[str]: _description_
