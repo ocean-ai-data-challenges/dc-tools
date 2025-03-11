@@ -9,6 +9,7 @@ from typing import List
 
 from pathlib import Path
 
+from dctools.utilities.errors import DCExceptionHandler
 
 def empty_folder(folder_path: str):
     """Remove all files in given folder.
@@ -31,11 +32,13 @@ def list_files_with_extension(directory: str, extension: str):
         directory(str): path to directory
         extension(str): file extension to look for
     """
-    return [fname for fname in sorted(os.listdir(directory)) if Path(fname).suffix == extension]
+    return [fname for fname in sorted(
+        os.listdir(directory)
+    ) if Path(fname).suffix == extension]
 
 def delete_files_from_list(directory: str, list_files: List[str]):
     """Remove a list of files in a given directory.
-    
+
     directory(str): directory
     list_files(List[str]): list of files to delete
     """
@@ -43,7 +46,6 @@ def delete_files_from_list(directory: str, list_files: List[str]):
         fpath = os.path.join(directory, fname)
         if os.path.isfile(fpath):
             os.remove(fpath)
-    
 
 def run_command(command: str):
     """Run and wait till the end of the given command.
@@ -55,3 +57,46 @@ def run_command(command: str):
     p = subprocess.Popen(cmd)
     p.wait()
     return p.returncode
+
+def remove_listof_files(
+    list_files:List[str], dir: str, exc_handler: DCExceptionHandler
+) -> None:
+    """removes a list of files from a given folder.
+
+    Args:
+        list_files (List[str]): list of the files to remove
+        dir (str): directory where to remove files
+        exc_handler (DCExceptionHandler): exception handler
+    """
+    try:
+        for filename in list_files:
+            filepath = os.path.join(dir, filename)
+            if os.path.isfile(filepath):
+                print(f"removing: {filepath}")
+                os.remove(filepath)
+    except Exception as exc:
+        exc_handler.handle_exception(exc, "Failed to remove files.")
+
+def get_list_filter_files(directory: str, extension: str, regex: str, prefix: bool = False) -> List[str]:
+    """_summary_
+
+    Args:
+        directory (str): _description_
+        extension (str): _description_
+        regex (str): _description_
+        prefix (bool, optional): _description_. Defaults to False.
+
+    Returns:
+        List[str]: _description_
+    """
+    list_files = list_files_with_extension(directory,  extension)
+    list_filter_files = []
+    if prefix:
+        list_filter_files = [
+            ncf for ncf in list_files if ncf.startswith(regex)
+        ]
+    else:
+        list_filter_files = [
+            ncf for ncf in list_files if regex in ncf
+        ]
+    return list_filter_files

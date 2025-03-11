@@ -7,12 +7,15 @@ from typing import Optional
 
 import xarray as xr
 
+from dctools.utilities.errors import DCExceptionHandler
 
 class DataLoader:
     """Loading NetCDF or Zarr files."""
 
     @staticmethod
-    def load_dataset(file_path: str) -> Optional[xr.Dataset]:
+    def load_dataset(
+        file_path: str, exc_handler: DCExceptionHandler, fail_on_error=True
+    ) -> Optional[xr.Dataset]:
         """Load a dataset from NetCDF or Zarr file.
 
         Args:
@@ -28,11 +31,13 @@ class DataLoader:
                 return xr.open_zarr(file_path)
             raise ValueError("Unsupported file format.")
         except Exception as error:
-            print(f"Error when loading file {file_path} : {error}")
+            exc_handler.handle_exception(
+                error, f"Error while loading file: {file_path}", fail_on_error=fail_on_error
+            )
             return None
 
     @staticmethod
-    def lazy_load_dataset(file_path: str) -> Optional[xr.Dataset]:
+    def lazy_load_dataset(file_path: str, exc_handler: DCExceptionHandler) -> Optional[xr.Dataset]:
         """Load a dataset from NetCDF or Zarr file.
 
         Args:
@@ -50,5 +55,7 @@ class DataLoader:
             #ds = xr.open_dataset(file_path, chunks='auto')
             return ds
         except Exception as error:
-            print(f"Error when loading file {file_path} : {error}")
+            exc_handler.handle_exception(
+                error, f"Error when loading file {file_path}"
+            )
             return None

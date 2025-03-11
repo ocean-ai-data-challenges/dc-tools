@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+
 """Classes and functions for processing gridded Xarray objects."""
 
 from typing import Tuple, Optional
@@ -107,7 +110,7 @@ class GriddedDataProcessor:
         ds1: xr.Dataset, ds2: xr.Dataset, dim: str
     ) -> xr.Dataset:
         """Concatenates two datasets according to the specified dimension.
-    
+
         Args:
             ds1(xr.Dataset): first xarray dataset
             ds2(xr.Dataset): second dataset

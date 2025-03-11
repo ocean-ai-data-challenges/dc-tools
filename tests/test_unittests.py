@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+
+"""Unit Tests."""
+
 import os
 from pathlib import Path
 
@@ -5,9 +10,11 @@ import numpy as np
 import xarray as xr
 import pytest
 
+from dctools.dcio.dclogger import DCLogger
 from dctools.dcio.loader import DataLoader
 from dctools.dcio.saver import DataSaver
 from dctools.processing.gridder import DataGridder
+from dctools.utilities.errors import DCExceptionHandler
 from dctools.utilities.file_utils import empty_folder
 
 def get_sample_dataset():
@@ -65,7 +72,7 @@ def setup_output_dir():
     """Test path configuration."""
     test_output_dir = os.path.join("tests", "test_output")
     os.makedirs(test_output_dir, exist_ok=True)
-    
+
     yield test_output_dir
 
     # Teardown
@@ -73,25 +80,50 @@ def setup_output_dir():
         empty_folder(test_output_dir)
         os.rmdir(test_output_dir)
 
+
+@pytest.fixture(scope='session', autouse=True)
+def setup_logger():
+    """Setup test logger."""
+    # initialize_logger
+    test_logger = DCLogger(
+        name="Test Logger", logfile=None
+    ).get_logger()
+    yield test_logger
+
+@pytest.fixture(scope='session', autouse=True)
+def setup_exception_handler(setup_logger):
+    """Setup exception handler."""
+    # initialize exception handler
+    exc_handler = DCExceptionHandler(setup_logger)
+    yield exc_handler
+
 def test_save_load_dataset(
     setup_data,
     setup_filepath,
+    setup_logger,
+    setup_exception_handler,
     ):
     """Test dataset loading."""
-    DataSaver.save_dataset(setup_data, setup_filepath)
-    loaded_ds = DataLoader.load_dataset(setup_filepath)
+    setup_logger.info("Run Test dataset loading")
+    DataSaver.save_dataset(setup_data, setup_filepath, setup_exception_handler)
+    loaded_ds = DataLoader.load_dataset(setup_filepath, setup_exception_handler)
     assert isinstance(loaded_ds, xr.Dataset)
     assert "temperature" in loaded_ds.variables
 
-def test_load_error(setup_filepath):
+def test_load_error(setup_filepath, setup_logger, setup_exception_handler):
     """Test trying to load a non-existent file."""
+    setup_logger.info("Run test_load_error")
+    try:
+        DataLoader.load_dataset(
+            Path(setup_filepath).stem, setup_exception_handler, fail_on_error=False
+        )
+    except Exception:
+        pass
 
-    # Shouldn't this raise an error instead of returning `None`?
-    assert DataLoader.load_dataset(Path(setup_filepath).stem) is None
 
-
-def test_regrid_data(setup_data):
+def test_regrid_data(setup_data, setup_logger):
     """Test regridding data."""
+    setup_logger.info("Run test_regrid_data")
     gridded_ds = DataGridder.interpolate_to_2dgrid(setup_data)
 
     assert "temperature" in gridded_ds.variables

@@ -24,6 +24,9 @@ dependencies = [
     "argopy>=1.0.0",
     "h5py>=3.13.0",
     "xesmf (>=0.8.8,<0.9.0)",
+    "rich>=13.9.4",
+    "torch (>=2.6.0,<3.0.0)",
+    "torchvision (>=0.21.0,<0.22.0)",
 ]
 
 [project.urls]
@@ -41,13 +44,10 @@ poethepoet = "^0.33.0"
 pytest = "^7.3.1"
 pytest-cov = "^6.0.0"
 ruff = "^0.9.6"
-pydocstyle = "^6.3.0"
 mypy = "*"
 mypy-boto3-s3 =  "^1.37.0"
 wget = "^3.2"
-pyunpack = "^0.3"
 patool = "^3.1.3"
-
 
 [tool.poetry.group.custom]
 optional = false
@@ -70,14 +70,64 @@ pygments = "^2.19.1"
 requires = ["poetry-core", "cmake"]
 build-backend = "poetry.core.masonry.api"
 
-# Omitting all mercator_oceanbench tests until their library is finished
+[tool.ruff]
+line-length = 100
+indent-width = 4
+exclude = [
+    "dctools/third_party", # Omitting all mercator_oceanbench tests until their library is finished
+    ".eggs",
+    ".git",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "docs",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+
+[tool.ruff.lint]
+# E - pycodestyle subsets:
+		# E4 - whitespace
+		# E7 - multiple-statements
+		# E9 - trailing-whitespace
+# F - Enable Pyflakes
+# B - Enable flake8-bugbear
+# W - Enable pycodestyle
+# C901 - complex-structure
+# D - Enable flake8-docstrings
+# E501 - line-too-long
+select = ["D", "W", "F", "E", "B"]
+ignore = ["D401", "D406", "D407"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"  # Accepts: "google", "numpy", or "pep257".
+
 [tool.mypy]
+python_version = "3.13"
 disable_error_code = ["import-untyped"]
+check_untyped_defs = true
+ignore_missing_imports = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
 
 [tool.poe.tasks]
 types = "mypy --install-types --non-interactive dctools"
 lint = "ruff check 'dctools' 'tests'"
-docstyle = "pydocstyle dctools"
 test = "pytest --capture=no --cov=dctools --cov-fail-under=80 tests/"
 # run all
-all = [ {ref="lint"}, {ref="docstyle"}, {ref="test"}, {ref="types"} ]
+all = [ {ref="lint"}, {ref="types"}, {ref="test"} ]
+
