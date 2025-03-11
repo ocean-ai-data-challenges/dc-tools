@@ -24,7 +24,11 @@ autosummary_generate = True
 templates_path = ['_templates']
 exclude_patterns = []
 
+# MyST Options
+# https://myst-parser.readthedocs.io/en/latest/configuration.html
 
+myst_heading_anchors = 2
+myst_links_external_new_tab = True
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
