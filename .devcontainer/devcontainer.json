@@ -1,0 +1,38 @@
+{
+	"name": "dctools.dev-container",
+	"containerEnv": {
+	 // "DISPLAY": "${localEnv:DISPLAY}",
+	    "DISPLAY": ":0"
+	},
+	"postCreateCommand": "sudo chown -R dctools /workspace",
+	"remoteEnv": {
+		"DOCKER_BUILDKIT": "0"
+	},
+	"dockerComposeFile": [
+		"./docker-compose.yml"
+	  ], 
+	"service": "debug_app",
+	"runServices": ["debug_app"],
+	"workspaceFolder": "/workspace",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-azuretools.vscode-docker",
+				"ms-toolsai.jupyter",
+				"zainchen.json",
+				"tomoki1207.pdf",
+				"grapecity.gc-excelviewer"
+			],
+			"settings": { 
+				"terminal.integrated.inheritEnv": true,
+				"terminal.integrated.profiles.linux": {
+					"bash": {
+						"path": "/bin/bash"
+					}
+				}
+			}
+		}
+	}
+}

@@ -339,7 +339,7 @@ class OceanbenchMetrics:
         self, metric_name: str,
         eval_dataset: xarray.Dataset,
         ref_dataset: Optional[xarray.Dataset]=None,
-        plot_result: Optional[bool]=False
+        plot_result: bool=False
     ) -> Optional[ndarray]:
         """Compute a given metric.
 
@@ -394,7 +394,7 @@ class OceanbenchMetrics:
         self,
         eval_dataset: xarray.Dataset,
         ref_dataset: Optional[xarray.Dataset],
-        plot_result: Optional[bool]=False
+        plot_result: bool
     ):
         """Compute RMSE metric.
 
@@ -433,7 +433,7 @@ class OceanbenchMetrics:
 
     def mld_analysis(self,
         eval_dataset: xarray.Dataset,
-        plot_result: Optional[bool]=False
+        plot_result: bool
     ):
         """MLD analysis.
 
@@ -460,7 +460,7 @@ class OceanbenchMetrics:
     def geo_analysis(
         self,
         eval_dataset: xarray.Dataset,
-        plot_result: Optional[bool]=False
+        plot_result: bool
     ):
         """Geo analysis.
 
@@ -488,7 +488,7 @@ class OceanbenchMetrics:
     def density_analysis(
         self,
         eval_dataset: xarray.Dataset,
-        plot_result: Optional[bool]=False
+        plot_result: bool
     ):
         """Density analysis.
 
@@ -520,7 +520,7 @@ class OceanbenchMetrics:
         self,
         eval_dataset: xarray.Dataset,
         ref_dataset: Optional[xarray.Dataset],
-        plot_result: Optional[bool]=False
+        plot_result: bool
     ):
         """Euclidian distance analysis.
 
@@ -555,7 +555,7 @@ class OceanbenchMetrics:
     def energy_cascad_analysis(
         self,
         eval_dataset: xarray.Dataset,
-        plot_result: Optional[bool]=False
+        plot_result: bool
     ):
         """Energy cascad analysis.
 
