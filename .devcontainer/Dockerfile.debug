@@ -19,7 +19,7 @@ COPY ./environment.yml ${HOME_PREFIX}
 # install packages
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
-    build-essential ssh-client sudo
+    build-essential ssh-client sudo git
 
 # user permissions
 RUN echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
@@ -38,7 +38,6 @@ RUN micromamba env create --file ${HOME_PREFIX}/environment.yml -y --root-prefix
 # Set up environment
 RUN echo "eval $(micromamba shell hook --shell bash)" >> ${HOME_PREFIX}.bashrc
 RUN echo "micromamba activate ${HOME_PREFIX}/envs/${ENV_NAME}" >> ${HOME_PREFIX}.bashrc
-
 RUN chown "$USER":"$USER" /home/"$USER"/ -R
 
 USER ${USER}
