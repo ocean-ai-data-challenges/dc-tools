@@ -1,7 +1,9 @@
 # `dc-tools` documentation
 
+![Logo du PPR Océan & Climat](_static/Logo_PPR.jpg)
+
 Welcome! Here you will find all the documentation about the `dc-tools` Python
-package, developed as part of the P[PR Océan & Climat](https://www.ocean-climat.fr/).
+package, developed as part of the [PPR Océan & Climat](https://www.ocean-climat.fr/).
 This package contains code used by all Ocean Data Challenges of the PPR.
 
 Check out the [GitHub repository](https://github.com/ppr-ocean-ia/dc-tools) if

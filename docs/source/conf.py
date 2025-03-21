@@ -42,4 +42,4 @@ myst_links_external_new_tab = True
 
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
-# html_logo = "_static/wb2-logo-wide.png" # TODO: draw a logo for the DCs
+#html_logo = "_static/Logo_PPR.jpg" # TODO: draw a logo for the DCs
