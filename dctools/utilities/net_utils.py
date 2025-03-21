@@ -98,9 +98,10 @@ def list_files_in_s3bucket_folder(
     response = s3_client.list_objects_v2(
         Bucket=bucket_name, Prefix=s3_folder_name
     )
-    files = response.get("Contents")
-    for file in files:
-        list_files.append(file)
+    # files = [file.Key for file in response.get("Contents")]
+    # assert(len(files) > 0)
+    for content in response.get('Contents', []):
+        list_files.append(content['Key'])
     return sorted(list_files)
 
 
@@ -232,7 +233,7 @@ class CMEMSManager:
         Returns:
             str: filter string
         """
-
-        filter = f"*/{date.strftime('%Y')}/{date.strftime('%m')}/*_{date.strftime('%Y')}{date.strftime('%m')}{date.strftime('%d')}_*.nc"
+        filter = f"*/{date.strftime('%Y')}/{date.strftime('%m')}/*_\
+            {date.strftime('%Y')}{date.strftime('%m')}{date.strftime('%d')}_*.nc"
         print(f"date: {date}     filter: {filter}")
         return filter

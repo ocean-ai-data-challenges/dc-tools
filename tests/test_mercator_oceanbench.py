@@ -37,7 +37,8 @@ class TestVars:
     test_url = "s3://project-glonet/public/glonet_reforecast_2024/2024-05-01.nc"
     edito_url = "https://minio.dive.edito.eu"
     dclogger = None
-    logfile = os.path.join("tests", "test.log")
+    logfile = os.path.join("tests", "logs", "test.log")
+    os.makedirs(os.path.join("tests", "logs"), exist_ok=True)
 
 
 class TestOceanBench:
@@ -155,56 +156,56 @@ class TestOceanBench:
     def test_oceanbench_rmse_evaluation(self, test_vars):
         """Test RMSE."""
         test_vars.oceanbench_metrics.compute_metric(
-            'rmse', test_vars.glonet_data, test_vars.glorys_data, True
+            'rmse', test_vars.glonet_data, test_vars.glorys_data, plot_result=True
         )
 
     def test_oceanbench_mld_analysis(self, test_vars):
         """Test MLD."""
         test_vars.oceanbench_metrics.compute_metric(
-            'mld', test_vars.glonet_data, True
+            'mld', test_vars.glonet_data, plot_result=True
         )
 
     def test_oceanbench_geo_analysis(self, test_vars):
         """Geo analysis."""
         test_vars.oceanbench_metrics.compute_metric(
-            'geo', test_vars.glonet_data, True
+            'geo', test_vars.glonet_data, plot_result=True
         )
 
     def test_oceanbench_density_analysis(self, test_vars):
         """Test density."""
         test_vars.oceanbench_metrics.compute_metric(
-            'density', test_vars.glonet_data, True
+            'density', test_vars.glonet_data, plot_result=True
         )
 
     def test_oceanbench_euclid_dist_analysis(self, test_vars):
         """Euclid dist analysis."""
         test_vars.oceanbench_metrics.compute_metric(
-            'euclid_dist', test_vars.glonet_data, test_vars.glorys_data, True
+            'euclid_dist', test_vars.glonet_data, test_vars.glorys_data, plot_result=True
         )
 
     def test_oceanbench_energy_cascad_analysis(self, test_vars):
         """Test energy cascading."""
         test_vars.oceanbench_metrics.compute_metric(
-            'energy_cascad', test_vars.glonet_data, True
+            'energy_cascad', test_vars.glonet_data, plot_result=True
         )
 
 
     def test_oceanbench_kinetic_energy_analysis(self, test_vars):
         """Test kinetic energy."""
         test_vars.oceanbench_metrics.compute_metric(
-            'kinetic_energy', test_vars.glonet_data, True
+            'kinetic_energy', test_vars.glonet_data, plot_result=True
         )
 
 
     def test_oceanbench_vorticity_analysis(self, test_vars):
         """Test vorticity."""
         test_vars.oceanbench_metrics.compute_metric(
-            'vorticity', test_vars.glonet_data
+            'vorticity', test_vars.glonet_data, plot_result=True
         )
 
     def test_oceanbench_mass_conservation_analysis(self, test_vars):
         """Test mass conservation."""
         test_vars.oceanbench_metrics.compute_metric(
-            'mass_conservation', test_vars.glonet_data
+            'mass_conservation', test_vars.glonet_data, plot_result=True
         )
 

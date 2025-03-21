@@ -7,7 +7,7 @@ from typing import List
 
 import pandas as pd
 
-def get_dates_from_startdate(start_date: str, ndays: int) -> List[str]:
+def get_dates_from_startdate(start_date: str, ndays: int) -> List[pd.Timestamp]:
     """Get dates of n days after start_date.
 
     Args:
