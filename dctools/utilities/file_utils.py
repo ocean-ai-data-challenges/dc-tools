@@ -103,3 +103,18 @@ def get_list_filter_files(
             ncf for ncf in list_files if regex in ncf
         ]
     return list_filter_files
+
+def read_file_tolist(filepath: str) -> List[str]:
+    with open(filepath) as file:
+        lines = []
+        for line in file:
+            lines.append(line.strip())
+        return lines
+
+
+def check_valid_files(list_files: List[str]) -> List[str]:
+    list_valid_files = []
+    for file_path in list_files:
+        if os.path.isfile(file_path):
+            list_valid_files.append(file_path)
+    return list_valid_files

@@ -3,42 +3,24 @@
 
 """Tests for the Mercator Oceanbench library."""
 
+from types import SimpleNamespace
 import os
 
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
-from pathlib import Path
+#import numpy as np
 import pytest
 
-from dctools.dcio.loader import DataLoader
-from dctools.dcio.saver import DataSaver
+from dctools.data.dataloader import DatasetLoader
+from dctools.data.dataset import CmemsGlorysDataset, GlonetDataset
+#from dctools.dcio.loader import FileLoader
+#from dctools.dcio.saver import DataSaver
 from dctools.dcio.dclogger import DCLogger
-from dctools.metrics.oceanbench_metrics import OceanbenchMetrics
+from dctools.metrics.evaluator import Evaluator
+from dctools.metrics.metrics import MetricComputer
+from dctools.data.transforms import CustomTransforms
+from dctools.utilities.init import setup_dask
 from dctools.utilities.errors import DCExceptionHandler
-from dctools.utilities.file_utils import get_list_filter_files
-from dctools.utilities.net_utils import download_s3_file, S3Url, CMEMSManager
-from dctools.processing.cmems_data import create_glorys_ndays_forecast
-
-
-class TestVars:
-    """Class with variables for testing."""
-
-    glonet_dir = os.path.join("tests", "data", "glonet")
-    glorys_dir = os.path.join("tests", "data", "glorys")
-    glonet_data = None
-    glorys_data = None
-
-    start_date = "2024-05-01"
-    filename = start_date + '.nc'
-    test_file_path = os.path.join(glonet_dir, filename)
-    glorys_file_path = os.path.join(glorys_dir, filename)
-
-    test_url = "s3://project-glonet/public/glonet_reforecast_2024/2024-05-01.nc"
-    edito_url = "https://minio.dive.edito.eu"
-    dclogger = None
-    logfile = os.path.join("tests", "logs", "test.log")
-    os.makedirs(os.path.join("tests", "logs"), exist_ok=True)
+from dctools.utilities.xarray_utils import DICT_RENAME_CMEMS,\
+    LIST_VARS_GLONET, RANGES_GLONET, GLONET_DEPTH_VALS
 
 
 class TestOceanBench:
@@ -47,165 +29,138 @@ class TestOceanBench:
     def init_log_exc(self, test_vars):
         """Initialize logger and exception handler."""
         # initialize_logger
-        test_vars.dclogger = DCLogger(
-            name="Test Logger", logfile=test_vars.logfile
-        ).get_logger()
+        test_vars.logger_instance = DCLogger(
+            name="Test Logger", logfile=test_vars.logfile,
+            jsonfile=test_vars.jsonfile
+        )
+        test_vars.dclogger = test_vars.logger_instance.get_logger()
+        test_vars.json_logger = test_vars.logger_instance.get_json_logger()
         # initialize exception handler
         test_vars.exception_handler = DCExceptionHandler(test_vars.dclogger)
         test_vars.dclogger.info("Tests started.")
-        test_vars.oceanbench_metrics = OceanbenchMetrics(
-            test_vars.dclogger, test_vars.exception_handler
-        )
 
     @pytest.fixture(scope="class")
     def test_vars(self):
         """Get test variables."""
-        c_v = TestVars()
+        startdate = "2024-05-01"
+        list_dates = []
+        list_dates.append(startdate)
+        params_dir = os.path.join("weights")
+        glonetdir = os.path.join("tests", "data", "glonet")
+        glorysdir = os.path.join("tests", "data", "glorys")
+        glonet_file_name = startdate + '.nc'
+        glorys_file_name = startdate + '.zarr'
+        c_v = SimpleNamespace(
+            glonet_data_dir = glonetdir,
+            glorys_data_dir = glorysdir,
+            glonet_data = None,
+            glorys_data = None,
+            model_name = "glonet",
+            start_date = startdate,
+            #filename = file_name,
+            regridder_weights = os.path.join(params_dir, "weights"),
+            test_file_path = os.path.join(glonetdir, glonet_file_name),
+            glorys_file_path = os.path.join(glorysdir, glorys_file_name),
+
+            # test_url = "s3://project-glonet/public/glonet_reforecast_2024/2024-05-01.nc",
+            glonet_base_url = "https://minio.dive.edito.eu",
+            glonet_s3_bucket = "project-glonet",
+            s3_glonet_folder = "public/glonet_reforecast_2024",
+            glorys_cmems_product_name = "cmems_mod_glo_phy_myint_0.083deg_P1D-m",
+            glonet_n_days_forecast = 10,
+            list_glonet_start_dates = list_dates,
+            logger_instance=None,
+            dclogger = None,
+            json_logger = None,
+            logfile = os.path.join("tests", "logs", "test.log"),
+            jsonfile = os.path.join("tests", "logs", "results2.json"),
+        )
         yield c_v
 
     @pytest.fixture(autouse=True, scope="class")
     def create_datasets(self, test_vars):
+        os.makedirs(os.path.join("tests", "logs"), exist_ok=True)
         """Create Glorys and Glonet datasets for testing."""
         self.init_log_exc(test_vars)
         test_vars.dclogger.info("Creating tests datasets.")
-        os.makedirs(test_vars.glonet_dir, exist_ok=True)
-        os.makedirs(test_vars.glorys_dir, exist_ok=True)
-        n_days_forecast = 10
 
-        if not (Path(test_vars.test_file_path).is_file() and \
-                Path(test_vars.glorys_file_path).is_file()):
-            cmems_manager = CMEMSManager(
-                test_vars.dclogger, test_vars.exception_handler
-            )
-            s3_client = boto3.client(
-                "s3",
-                config=Config(signature_version=UNSIGNED),
-                endpoint_url=test_vars.edito_url,
-            )
-
-        if not (Path(test_vars.test_file_path).is_file()):
-            test_vars.dclogger.info("No Glonet forecast available." \
-                "Starting download from CMEMS.")
-            cmems_manager.cmems_login()
-            s3_test_url = S3Url(test_vars.test_url)
-            # equivalent to: aws  --no-sign-request  s3 \
-            #      cp  s3://project-glonet/public/glonet_reforecast_2024/2024-01-03.nc \
-            #     /home/k24aitmo/IMT/software/dc-tools/data/glonet/2024-01-03.nc
-            download_s3_file(
-                s3_client=s3_client,
-                bucket_name=s3_test_url.bucket,
-                file_name=s3_test_url.key,
-                local_file_path=test_vars.test_file_path,
-                dclogger=test_vars.dclogger,
-                exception_handler=test_vars.exception_handler,
-            )
-
-        assert(Path(test_vars.test_file_path).is_file())
-        test_vars.glonet_data = DataLoader.lazy_load_dataset(
-            test_vars.test_file_path, test_vars.exception_handler
+    @pytest.fixture(autouse=True, scope="class")
+    def setup_evaluator(self, test_vars):
+        dask_client = setup_dask(test_vars)
+        glonet_data_dir = test_vars.glonet_data_dir
+        glorys_data_dir = test_vars.glorys_data_dir
+ 
+        transf_glorys = CustomTransforms(
+            transform_name="glorys_to_glonet",
+            dict_rename=DICT_RENAME_CMEMS,
+            list_vars=LIST_VARS_GLONET,
+            depth_coord_vals=GLONET_DEPTH_VALS,
+            interp_ranges = RANGES_GLONET,
+            weights_path=test_vars.regridder_weights,
         )
 
-        if not (Path(test_vars.glorys_file_path).is_file()):
-            cmems_manager.cmems_login()
-            list_mercator_files = get_list_filter_files(
-                test_vars.glorys_dir,
-                extension='.nc',
-                regex="mercatorglorys",
-                prefix=True,
-            )
-            if len(list_mercator_files) != n_days_forecast:
-                test_vars.dclogger.info(
-                    "Missing Glorys data. Starting download from CMEMS."
-                )
-                cmems_manager.cmems_download(
-                    product_id="cmems_mod_glo_phy_myint_0.083deg_P1D-m",
-                    output_dir=test_vars.glorys_dir,
-                    filter="*/2024/05/*_2024050[1-9]_*.nc",
-                )
-                cmems_manager.cmems_download(
-                    product_id="cmems_mod_glo_phy_myint_0.083deg_P1D-m",
-                    output_dir=test_vars.glorys_dir,
-                    filter="*/2024/05/*_20240510_*.nc",
-                )
-                list_mercator_files = get_list_filter_files(
-                    test_vars.glorys_dir,
-                    extension='.nc',
-                    regex="mercatorglorys",
-                    prefix=True,
-                )
-            glorys_data = create_glorys_ndays_forecast(
-                test_vars.glorys_dir,
-                list_mercator_files,
-                test_vars.glonet_data,
-                test_vars.start_date,
-                test_vars.dclogger,
-                test_vars.exception_handler
-            )
-
-            test_vars.dclogger.info("Save Glorys data on disk")
-            DataSaver.save_dataset(
-                glorys_data, test_vars.glorys_file_path, test_vars.exception_handler
-            )
-            glorys_data.close()
-
-        assert(Path(test_vars.glorys_file_path).is_file())
-        test_vars.glorys_data = DataLoader.lazy_load_dataset(
-            test_vars.glorys_file_path, test_vars.exception_handler
+        dataset_glonet = GlonetDataset(
+            conf_args=test_vars,
+            root_data_dir= glonet_data_dir,
+            list_dates=test_vars.list_glonet_start_dates,
+            transform_fct=None,
         )
 
-    def test_oceanbench_rmse_evaluation(self, test_vars):
-        """Test RMSE."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'rmse', test_vars.glonet_data, test_vars.glorys_data, plot_result=True
+        dataset_glorys = CmemsGlorysDataset(
+            conf_args=test_vars,
+            root_data_dir= glorys_data_dir,
+            cmems_product_name=test_vars.glorys_cmems_product_name,
+            cmems_file_prefix="mercatorglorys",
+            list_dates=test_vars.list_glonet_start_dates,
+            transform_fct=transf_glorys,
+            save_after_preprocess=False,
+            file_format="zarr",
+        )
+        # 1. Chargement des données de référence et des prédictions avec DatasetLoader
+        glonet_vs_glorys_loader = DatasetLoader(
+            pred_dataset=dataset_glonet,
+            ref_dataset=dataset_glorys
         )
 
-    def test_oceanbench_mld_analysis(self, test_vars):
+        # 3. Exécution de l’évaluation sur plusieurs modèles
+        evaluator = Evaluator(
+            test_vars, 
+            dask_client=dask_client, metrics=None,
+            data_container={'glonet': glonet_vs_glorys_loader},
+        )
+        vars(test_vars)['evaluator'] = evaluator
+        vars(test_vars)['dataloader'] = glonet_vs_glorys_loader
+
+    def test_oceanbench_metrics(self, test_vars):
         """Test MLD."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'mld', test_vars.glonet_data, plot_result=True
-        )
+        test_vars.dclogger.info("Test Mercator's Oceanbench Metrics.")
 
-    def test_oceanbench_geo_analysis(self, test_vars):
-        """Geo analysis."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'geo', test_vars.glonet_data, plot_result=True
-        )
+        metrics = [
+            MetricComputer(
+                dc_logger=test_vars.dclogger,
+                exc_handler=test_vars.exception_handler,
+                metric_name='rmse', plot_result=True,
+            ),
 
-    def test_oceanbench_density_analysis(self, test_vars):
-        """Test density."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'density', test_vars.glonet_data, plot_result=True
-        )
-
-    def test_oceanbench_euclid_dist_analysis(self, test_vars):
-        """Euclid dist analysis."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'euclid_dist', test_vars.glonet_data, test_vars.glorys_data, plot_result=True
-        )
-
-    def test_oceanbench_energy_cascad_analysis(self, test_vars):
-        """Test energy cascading."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'energy_cascad', test_vars.glonet_data, plot_result=True
-        )
-
-
-    def test_oceanbench_kinetic_energy_analysis(self, test_vars):
-        """Test kinetic energy."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'kinetic_energy', test_vars.glonet_data, plot_result=True
-        )
-
-
-    def test_oceanbench_vorticity_analysis(self, test_vars):
-        """Test vorticity."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'vorticity', test_vars.glonet_data, plot_result=True
-        )
-
-    def test_oceanbench_mass_conservation_analysis(self, test_vars):
-        """Test mass conservation."""
-        test_vars.oceanbench_metrics.compute_metric(
-            'mass_conservation', test_vars.glonet_data, plot_result=True
-        )
+            MetricComputer(
+                dc_logger=test_vars.dclogger,
+                exc_handler=test_vars.exception_handler,
+                metric_name='energy_cascad',
+                plot_result=True,
+                var="uo", depth=2,
+            ),
+        ]
+        ''' TODO : check error on oceanbench : why depth = 0 ? -> crash
+            MetricComputer(
+                dc_logger=test_vars.dclogger,
+                exc_handler=test_vars.exception_handler,
+                metric_name='euclid_dist',
+                plot_result=True,
+                minimum_latitude=0,
+                maximum_latitude=10,
+                minimum_longitude=0,
+                maximum_longitude=10,
+            ),'''
+        test_vars.evaluator.set_metrics(metrics)
+        test_vars.evaluator.evaluate()
 
