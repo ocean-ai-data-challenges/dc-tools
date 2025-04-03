@@ -11,5 +11,5 @@ services:
       - app-net
     volumes:
       - ../:/workspace
-    #post_start:
-    #  - command: [/home/appuser/entrypoint.sh]
+    post_start:
+      - command: [sudo chown -R dctools /workspace]

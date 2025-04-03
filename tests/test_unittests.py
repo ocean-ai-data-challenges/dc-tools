@@ -11,7 +11,7 @@ import xarray as xr
 import pytest
 
 from dctools.dcio.dclogger import DCLogger
-from dctools.dcio.loader import DataLoader
+from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
 from dctools.processing.gridder import DataGridder
 from dctools.utilities.errors import DCExceptionHandler
@@ -106,7 +106,7 @@ def test_save_load_dataset(
     """Test dataset loading."""
     setup_logger.info("Run Test dataset loading")
     DataSaver.save_dataset(setup_data, setup_filepath, setup_exception_handler)
-    loaded_ds = DataLoader.load_dataset(setup_filepath, setup_exception_handler)
+    loaded_ds = FileLoader.load_dataset(setup_filepath, setup_exception_handler)
     assert isinstance(loaded_ds, xr.Dataset)
     assert "temperature" in loaded_ds.variables
 
@@ -114,7 +114,7 @@ def test_load_error(setup_filepath, setup_logger, setup_exception_handler):
     """Test trying to load a non-existent file."""
     setup_logger.info("Run test_load_error")
     try:
-        DataLoader.load_dataset(
+        FileLoader.load_dataset(
             Path(setup_filepath).stem, setup_exception_handler, fail_on_error=False
         )
     except Exception:

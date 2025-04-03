@@ -32,9 +32,7 @@ class DCExceptionHandler:
         Returns:
             str: A formatted error message string.
         """
-        error_message = f"{custom_message}\nException: { \
-            str(exception) \
-        }\n{traceback.format_stack(limit=5)}"
+        error_message = f"{custom_message}\nException: {str(exception)}\n{traceback.format_stack(limit=5)}"
         if fail_on_error:
             self.logger.error(error_message)
             raise(exception)

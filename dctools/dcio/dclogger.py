@@ -7,6 +7,8 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 from typing import Optional
 
+from json_handler import JsonHandler
+from pythonjsonlogger.json import JsonFormatter
 from rich.logging import RichHandler
 
 class DCLogger(logging.Logger):
@@ -16,7 +18,9 @@ class DCLogger(logging.Logger):
     """
 
     def __init__(
-            self, name: str, logfile: Optional[str] = None, log_level: int = logging.DEBUG
+            self, name: str, logfile: Optional[str] = None,
+            log_level: int = logging.DEBUG,
+            jsonfile: Optional[str] = None,
         ) -> None:
         """
         Initialize a logger with console and file handlers.
@@ -38,16 +42,24 @@ class DCLogger(logging.Logger):
 
         # File handler
         if logfile is not None:
-            # file_handler = logging.FileHandler(logfile, 'w+')
             file_handler = TimedRotatingFileHandler(
                 filename=logfile, when='midnight', backupCount=7
             )
-
             file_format = '%(levelname)s %(asctime)s [%(filename)s:' \
                 '%(funcName)s:%(lineno)d] %(message)s'
             file_formatter = logging.Formatter(file_format)
             file_handler.setFormatter(file_formatter)
             self.logger.addHandler(file_handler)
+
+        # JSON handler
+        if jsonfile is not None:
+            self.json_logger = logging.getLogger()
+            self.json_logger.setLevel(logging.WARNING)
+            self.jsonhandler = logging.FileHandler(jsonfile)
+            json_formatter = JsonFormatter()
+            self.jsonhandler.setFormatter(json_formatter)
+            self.json_logger.addHandler(self.jsonhandler)
+
 
     def get_logger(self) -> logging.Logger:
         """
@@ -58,42 +70,11 @@ class DCLogger(logging.Logger):
         """
         return self.logger
 
-    '''@staticmethod
-    def info(message: str, stacklevel=2, *args, **kwargs) -> None:
+    def get_json_logger(self) -> logging.Logger:
         """
-        Log an informational message with blue color.
+        Return the json handler instance.
 
-        Args:
-            message (str): The message to log.
+        Returns:
+            JsonHandler: The json handler instance.
         """
-        logging.info(message)
-
-    #@staticmethod
-    def warning(self, message: str, stacklevel=2, *args, **kwargs) -> None:
-        """
-        Log a warning message with yellow color.
-
-        Args:
-            message (str): The message to log.
-        """
-        logging.warning(message)
-
-    #@staticmethod
-    def error(self, message: str, stacklevel=2, *args, **kwargs) -> None:
-        """
-        Log an error message with red color.
-
-        Args:
-            message (str): The message to log.
-        """
-        logging.error(message)
-
-    #@staticmethod
-    def debug(self, message: str, stacklevel=2, *args, **kwargs) -> None:
-        """
-        Log a debug message with green color.
-
-        Args:
-            message (str): The message to log.
-        """
-        logging.debug(message)'''
+        return self.json_logger

@@ -6,6 +6,8 @@
 import datetime
 import logging
 import os
+import random
+import string
 from typing import List, Optional
 
 import copernicusmarine
@@ -14,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from dctools.utilities.errors import DCExceptionHandler
+from dctools.utilities.file_utils import read_file_tolist, check_valid_files
 
 
 class S3Url(object):
@@ -203,23 +206,42 @@ class CMEMSManager:
             self.exception_handler.handle_exception(exc, "logout from CMEMS failed.")
         return None
 
-    def cmems_download(self, product_id: str, output_dir: str, filter: str) -> None:
+
+    def cmems_download(
+        self, product_id: str, output_dir: str, name_filter: str, tmp_dir:str
+    ) -> None:
         """Download a Copernicus Marine product.
 
         Args:
             product_id(str): product id
             output_dir(str): output directory
-            filter(str): filter to apply to filenames
+            name_filter(str): filter to apply to filenames
         """
         self.dclogger.info(f"Downloading product {product_id} from Copernicus Marine.")
         try:
+            rnd_str = ''.join(random.choice(string.ascii_uppercase) for _ in range(8))
+            #list_files_path = os.path.join(tmp_dir, f"files_to_download_{rnd_str}.txt")
+            self.dclogger.info(f"product_id: {product_id}  name_filter: {name_filter}")
+            """copernicusmarine.get(
+                dataset_id=product_id,
+                filter=name_filter,
+                create_file_list=list_files_path,
+            )
             copernicusmarine.get(
                 dataset_id=product_id,
-                filter=filter,
+                output_directory=output_dir,
+                no_directories = True,
+                credentials_file=self.cmems_credentials,
+                file_list=list_files_path,
+            )"""
+            copernicusmarine.get(
+                dataset_id=product_id,
+                filter=name_filter,
                 output_directory=output_dir,
                 no_directories = True,
                 credentials_file=self.cmems_credentials,
             )
+
         except Exception as exc:
             self.exception_handler.handle_exception(exc, "download from CMEMS failed.")
         return None
@@ -233,7 +255,6 @@ class CMEMSManager:
         Returns:
             str: filter string
         """
-        filter = f"*/{date.strftime('%Y')}/{date.strftime('%m')}/*_\
-            {date.strftime('%Y')}{date.strftime('%m')}{date.strftime('%d')}_*.nc"
-        print(f"date: {date}     filter: {filter}")
+        date = datetime.datetime.strptime(date, '%Y-%m-%d')
+        filter = f"*/{date.strftime('%Y')}/{date.strftime('%m')}/*_{date.strftime('%Y')}{date.strftime('%m')}{date.strftime('%d')}_*.nc"
         return filter
