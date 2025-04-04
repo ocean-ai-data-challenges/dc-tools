@@ -83,13 +83,18 @@ class Evaluator(ABC):
                     futures = self.dask_client.compute(tasks_list)  # Envoi au cluster
                     results = self.dask_client.gather(futures)  # Récupération des résultats
 
-                    i = 0
-                    for model_name in self._tasks:
-                        for date in self._tasks[model_name]:
-                            for metric_name in self._tasks[model_name][date]:
-                                self.results[model_name][date][metric_name] = results[i]
-                                i += 1
-                    self.args.json_logger.info(self.results)
+            i = 0
+            for model_name in self._tasks:
+                for date in self._tasks[model_name]:
+                    for metric_name in self._tasks[model_name][date]:
+                        self.results[model_name][date][metric_name] = results[i]
+                        i += 1
+                #self.args.json_logger.info(self.results)
 
-                    self.args.dclogger.info(f"WORKERS RESULTS: {self.results}")
+            # self.args.dclogger.info(f"WORKERS RESULTS: {self.results}")
+            return self.results
+        else:
+            self.args.dclogger.error("No metrics or data container set.")
+            return None
+
 

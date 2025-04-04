@@ -15,10 +15,6 @@ RUN useradd -ms /bin/bash $USER
 
 # copy env list file
 COPY ./environment.yml ${HOME_PREFIX}
-COPY ./home_ed25519 ${HOME_PREFIX}
-COPY ./home_ed25519.pub ${HOME_PREFIX}
-COPY ./id_ed25519 ${HOME_PREFIX}
-COPY ./id_ed25519.pub ${HOME_PREFIX}
 
 # install packages
 RUN apt-get update -y && \
