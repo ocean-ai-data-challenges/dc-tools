@@ -90,7 +90,7 @@ def load_configs(args: Namespace, exception_handler: DCExceptionHandler) -> Dict
     return config
 
 
-def generic_main(args: Namespace = parse_arguments()) -> int:
+def load_args_and_config(args: Namespace = parse_arguments()) -> Optional[Namespace]:
     """Main function.
 
     Args:
@@ -103,7 +103,7 @@ def generic_main(args: Namespace = parse_arguments()) -> int:
         # init logger and exception handler
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger_instance = DCLogger(
-            name="DC1 Logger", logfile=args.logfile, jsonfile=args.jsonfile
+            name="DCLogger", logfile=args.logfile, jsonfile=args.jsonfile
         )
         dclogger = logger_instance.get_logger()
         json_logger = logger_instance.get_json_logger()
@@ -127,3 +127,4 @@ def generic_main(args: Namespace = parse_arguments()) -> int:
         return args
     except Exception as err:
         exception_handler.handle_exception(err, "App configuration has failed.")
+        return None
