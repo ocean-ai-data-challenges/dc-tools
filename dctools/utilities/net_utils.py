@@ -77,6 +77,8 @@ def download_s3_file(
         outpath(str): path where to save the downloaded file
     """
     dclogger.info(f"Downloading from s3 bucket: {bucket_name}.")
+    dclogger.info(f"Downloading file_name: {file_name}.")
+    dclogger.info(f"Downloading local_file_path: {local_file_path}.")
     try:
         s3_client.download_file(
             Bucket=bucket_name,

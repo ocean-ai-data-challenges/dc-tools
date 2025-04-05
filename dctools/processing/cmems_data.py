@@ -70,12 +70,15 @@ def create_glorys_ndays_forecast(
     dclogger.info(f"Concatenate {len(list_nc_files)} Glorys forecast files.")
     time_step = 0
     try:
+        #print('list_nc_files:', list_nc_files)
         # concatenate downloaded files from CMEMS
         for fname in list_nc_files:
+            #print('File name Mercator:', fname)
             fpath = os.path.join(nc_path, fname)
             tmp_ds = FileLoader.lazy_load_dataset(fpath, exception_handler)
+            #print('File path Mercator:', fpath)
             tmp_ds = transform_fct(tmp_ds)
-
+            #print(f"assigning coordinate time: {tmp_ds}")
             tmp_ds = assign_coordinate(
                 tmp_ds, "time", coord_vals=[time_step],
                 #tmp_ds, "time", coord_vals=[times[time_step]],
@@ -84,6 +87,7 @@ def create_glorys_ndays_forecast(
             assert tmp_ds is not None, f"Error while loading dataset: {tmp_ds}."
 
             if time_step == 0:
+                #print('First time step:', time_step, '   zarr_path: ', zarr_path)
                 DataSaver.save_dataset(
                     tmp_ds, zarr_path, exception_handler,
                     #file_format="zarr", mode="r+",
@@ -91,12 +95,14 @@ def create_glorys_ndays_forecast(
                     compute=True,
                 )
             else:
+                #print("Appending time step:", time_step, '   zarr_path: ', zarr_path)
                 DataSaver.save_dataset(
                     tmp_ds, zarr_path, exception_handler,
                     file_format="zarr", mode="a", append_dim='time',
                     compute=True,
                 )
-            tmp_ds.close()
+            #tmp_ds.close()
+            #print("Closing dataset")
             time_step += 1
 
         glorys_data = FileLoader.lazy_load_dataset(zarr_path, exception_handler)

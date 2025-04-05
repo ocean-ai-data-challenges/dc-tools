@@ -5,10 +5,11 @@
 
 from typing import Optional
 
-from tqdm import tqdm
+from dask.diagnostics import ProgressBar
 import xarray as xr
 import zarr
 
+from dctools.dcio.dclogger import DCLogger
 from dctools.utilities.errors import DCExceptionHandler
 
 class FileLoader:
@@ -16,7 +17,8 @@ class FileLoader:
 
     @staticmethod
     def load_dataset(
-        file_path: str, exc_handler: DCExceptionHandler, fail_on_error=True
+        file_path: str, exc_handler: DCExceptionHandler,
+        dclogger: DCLogger, fail_on_error=True
     ) -> Optional[xr.Dataset]:
         """Load a dataset from NetCDF or Zarr file.
 
@@ -28,19 +30,35 @@ class FileLoader:
         """
         try:
             if file_path.endswith(".nc"):
-                return xr.open_dataset(file_path)
+                dclogger.info(
+                    f"Loading dataset from NetCDF file: {file_path}"
+                )
+                #with ProgressBar():
+                ds = xr.open_dataset(file_path)
+                return ds
             elif file_path.endswith(".zarr"):
-                return xr.open_zarr(file_path)
+                dclogger.info(
+                    f"Loading dataset from Zarr file: {file_path}"
+                )
+                #with ProgressBar():
+                ds = xr.open_zarr(file_path)
+                #ds = xr.open_zarr(file_path, chunks='auto')
+                return ds
             else:
                 raise ValueError("Unsupported file format.")
         except Exception as error:
             exc_handler.handle_exception(
-                error, f"Error while loading file: {file_path}", fail_on_error=fail_on_error
+                error, f"Error while loading file: {file_path}",
+                fail_on_error=fail_on_error,
             )
             return None
 
     @staticmethod
-    def lazy_load_dataset(file_path: str, exc_handler: DCExceptionHandler) -> Optional[xr.Dataset]:
+    def lazy_load_dataset(
+        file_path: str, exc_handler: DCExceptionHandler,
+        dclogger: DCLogger,
+        fail_on_error=True,
+    ) -> Optional[xr.Dataset]:
         """Load a dataset from NetCDF or Zarr file.
 
         Args:
@@ -51,7 +69,15 @@ class FileLoader:
         """
         try:
             if file_path.endswith(".nc"):
-                ds = xr.open_mfdataset(file_path, parallel=True)
+                dclogger.info(
+                    f"Loading dataset from NetCDF file: {file_path}"
+                )
+                #with ProgressBar():
+                ds = xr.open_mfdataset(
+                    file_path, parallel=True
+                )
+                #ds = xr.open_dataset(file_path, chunks='auto')
+                # ds = xr.open_mfdataset(file_path, parallel=True)
                 #ds = ds.chunk(chunks={})
                 if "longitude" in ds.variables:
                     # TODO: adapt chunking for each dataset
@@ -67,14 +93,23 @@ class FileLoader:
             elif file_path.endswith(".zarr"):
                 #ds = xr.open_zarr(file_path, chunks='auto')
                 #ds = xr.open_dataset(file_path, engine="zarr", chunks='auto')
+                # use tqdm to show progress bar
+                #dclogger.info(
+                #    f"Loading dataset from Zarr file: {file_path}"
+                #)
+                #with ProgressBar():
+                #ds = xr.open_zarr(file_path)
+                #ds = xr.open_zarr(file_path, chunks='auto')
+                #ds = xr.open_dataset(file_path, engine="zarr") #, chunks='auto')
                 ds = xr.open_zarr(file_path)
-                #ds = ds.chunk(chunks='auto')
+                ds = ds.chunk(chunks='auto')
                 return ds
             else:
                 raise ValueError(f"Unsupported file format {file_path}.")
 
         except Exception as error:
             exc_handler.handle_exception(
-                error, f"Error when loading file {file_path}"
+                error, f"Error when loading file {file_path}",
+                fail_on_error=fail_on_error,
             )
             return None

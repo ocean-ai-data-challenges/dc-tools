@@ -105,8 +105,13 @@ def test_save_load_dataset(
     ):
     """Test dataset loading."""
     setup_logger.info("Run Test dataset loading")
-    DataSaver.save_dataset(setup_data, setup_filepath, setup_exception_handler)
-    loaded_ds = FileLoader.load_dataset(setup_filepath, setup_exception_handler)
+    DataSaver.save_dataset(
+        setup_data, setup_filepath,
+        setup_exception_handler, setup_logger,
+    )
+    loaded_ds = FileLoader.load_dataset(
+        setup_filepath, setup_exception_handler, setup_logger
+    )
     assert isinstance(loaded_ds, xr.Dataset)
     assert "temperature" in loaded_ds.variables
 
@@ -115,7 +120,9 @@ def test_load_error(setup_filepath, setup_logger, setup_exception_handler):
     setup_logger.info("Run test_load_error")
     try:
         FileLoader.load_dataset(
-            Path(setup_filepath).stem, setup_exception_handler, fail_on_error=False
+            Path(setup_filepath).stem,
+            setup_exception_handler, setup_logger,
+            fail_on_error=False,
         )
     except Exception:
         pass

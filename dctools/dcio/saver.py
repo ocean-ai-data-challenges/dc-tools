@@ -3,8 +3,10 @@
 
 """Classes and functions for saving xarray datasets."""
 from typing import Any, Dict, Optional
+
 import xarray as xr
 
+from dctools.dcio.dclogger import DCLogger
 from dctools.utilities.errors import DCExceptionHandler
 
 class DataSaver:
@@ -15,6 +17,7 @@ class DataSaver:
         ds: xr.Dataset,
         file_path: str,
         exception_handler: DCExceptionHandler,
+        dclogger: DCLogger,
         file_format: Optional[str] = "netcdf",
         mode: Optional[str] = "w",
         append_dim: Optional[str] = None,
@@ -28,16 +31,23 @@ class DataSaver:
         """
         try:
             if file_format == "netcdf":
+                dclogger.info(
+                    f"Saving dataset in netcdf format: {file_path}"
+                )
                 ds.to_netcdf(file_path, format="NETCDF4", engine="netcdf4")
             elif file_format == "zarr":
-                #print(f"Saving dataset in zarr format: {file_path}")
+                dclogger.info(
+                    f"Saving dataset in zarr format: {file_path}"
+                )
                 if append_dim:
+                    # Append to existing zarr file
                     ds.to_zarr(
                         store=file_path,
                         compute=compute,
                         append_dim=append_dim,
                     )
                 else:
+                    # Create new zarr file
                     ds.to_zarr(
                         store=file_path, compute=compute, mode=mode,
                     )

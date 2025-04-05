@@ -48,7 +48,7 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
         help="File where to store log info.",
     ),
     parser.add_argument(
-        '-l', '--jsonfile', type=str,
+        '-j', '--jsonfile', type=str,
         help="File where to store results.",
         default=os.path.join(folder_base, "tests", "logs", "result_logs.json")
     ),
@@ -62,7 +62,9 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     return parser.parse_args(args=cli_args)  # None defaults to sys.argv[1:]
 
 
-def load_configs(args: Namespace, exception_handler: DCExceptionHandler) -> Dict:
+def load_configs(
+    config_filepath: str, exception_handler: DCExceptionHandler
+) -> Dict:
     """Load configuration from yaml file.
 
     Args:
@@ -76,22 +78,25 @@ def load_configs(args: Namespace, exception_handler: DCExceptionHandler) -> Dict
         Dict: Dict of cofig elements.
     """
     try:
-        config_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            'config',
-            f"{args.config_name}.yaml",
-        )
-        with open(config_path, 'r') as file_pointer:
-            config = yaml.safe_load(file_pointer)
+        with open(config_filepath, 'r') as fp:
+            #print(f"OPEN FILE: {config_filepath}")
+            config = yaml.safe_load(fp)
+            if('list_glonet_start_dates' in config.keys()):
+                list_dates = config['list_glonet_start_dates'].split(',')
+                config['list_glonet_start_dates'] = list_dates
+            #print(f"CONFIG: {config}")
     except Exception as err:
         exception_handler.handle_exception(
-            err, f"Error while loading config from: {config_path}."
+            err,
+            f"Error while loading config from: {config_filepath}."
         )
     return config
 
 
-def load_args_and_config(args: Namespace = parse_arguments()) -> Optional[Namespace]:
-    """Main function.
+def load_args_and_config(
+    config_filepath: str, args: Namespace = parse_arguments()
+) -> Optional[Namespace]:
+    """Load config file and parsing comman-line arguments.
 
     Args:
         args (Namespace, optional): Namespace of parsed arguments.
@@ -100,6 +105,7 @@ def load_args_and_config(args: Namespace = parse_arguments()) -> Optional[Namesp
         args(Namespace): a Namespace with variables from config file and command-line 
     """
     try:
+        #print("ENTER CONF")
         # init logger and exception handler
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger_instance = DCLogger(
@@ -120,11 +126,12 @@ def load_args_and_config(args: Namespace = parse_arguments()) -> Optional[Namesp
         vars(args)['patch_size'] = patch_size
         vars(args)['stride_size'] = stride_size
 
-        if args.config_name:
-            config = load_configs(args, exception_handler)
+        if config_filepath:
+            config = load_configs(config_filepath, exception_handler)
             for key, value in config.items():
                 vars(args)[key] = value
+        #print('LOAD CONF OK')
         return args
     except Exception as err:
-        exception_handler.handle_exception(err, "App configuration has failed.")
+        print(f"App configuration has failed with error: {err}.")
         return None
