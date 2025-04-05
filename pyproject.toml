@@ -63,7 +63,7 @@ xrpatcher = {git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "ma
 xesmf = {git = "git+https://github.com/pangeo-data/xESMF.git"}
 
 [build-system]
-build-backend = "poetry.masonry.api"
+build-backend = "poetry.core.masonry.api"
 requires = ["poetry-core", "setuptools", "wheel", "cmake"]
 
 [tool.ruff]
