@@ -186,6 +186,10 @@ class CmemsGlorysDataset(CmemsDataset):
     def get_data(
         self, index: int,
     ) -> Tuple[str, xr.Dataset]:
+            self.args.dclogger.info(
+                f"Get data for date: {self.list_dates[index]}"
+            )
+            # get the start date of the forecast
             start_date = self.list_dates[index]
             list_dates = get_dates_from_startdate(
                 start_date, self.args.glonet_n_days_forecast
@@ -193,6 +197,7 @@ class CmemsGlorysDataset(CmemsDataset):
             first_date = list_dates[0]
             glorys_filename = first_date + self.file_extension
             glorys_filepath = os.path.join(self.root_data_dir, glorys_filename)
+            self.args.dclogger.info(f"glorys_filepath0: {glorys_filepath}")
             if not (os.path.exists(glorys_filepath)):
                 list_mercator_files = get_list_filter_files(
                     self.root_data_dir,
@@ -209,7 +214,7 @@ class CmemsGlorysDataset(CmemsDataset):
                         regex=self.cmems_file_prefix,
                         prefix=True,
                     )
-
+                self.args.dclogger.info(f"glorys_filepath1: {glorys_filepath}")
                 glorys_data = create_glorys_ndays_forecast(
                     nc_path=self.root_data_dir,
                     list_nc_files=list_mercator_files,
@@ -246,11 +251,13 @@ class CmemsGlorysDataset(CmemsDataset):
             else:
                 if self.lazy_load:
                     glorys_data = FileLoader.lazy_load_dataset(
-                        glorys_filepath, self.exception_handler
+                        glorys_filepath, self.exception_handler,
+                        self.dclogger,
                     )
                 else:
                     glorys_data = FileLoader.load_dataset(
-                        glorys_filepath, self.exception_handler
+                        glorys_filepath, self.exception_handler,
+                        self.dclogger,
                     )
                 return glorys_data
 
@@ -296,9 +303,17 @@ class GlonetDataset(DCDataset):
         Args:
             filename (str): name of the file to download.
         """
+        self.args.dclogger.info(
+            f"Get data for date: {self.list_dates[index]}"
+        )
+        # get the start date of the forecast
         start_date = self.list_dates[index]
         glonet_filename = start_date + '.nc'
         local_file_path = os.path.join(self.args.glonet_data_dir, glonet_filename)
+        """print(f"start_date: {start_date}")
+        print(f"local_file_path: {local_file_path}")
+        print(f"glonet_filename: {glonet_filename}")
+        print(f"self.list_dates: {self.list_dates}")"""
         glonet_s3_filepath = os.path.join(
             self.args.s3_glonet_folder,
             glonet_filename
@@ -315,7 +330,8 @@ class GlonetDataset(DCDataset):
         assert(Path(local_file_path).is_file())
         if self.lazy_load:
             glonet_data = FileLoader.lazy_load_dataset(
-                local_file_path, self.args.exception_handler
+                local_file_path, self.args.exception_handler,
+                self.args.dclogger,
             )
         else:
             glonet_data = FileLoader.load_dataset(

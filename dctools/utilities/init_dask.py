@@ -1,6 +1,7 @@
 from argparse import Namespace
 import json
 import multiprocessing
+import os
 import psutil
 
 import dask
@@ -44,13 +45,16 @@ def setup_dask(args: Namespace):
     num_workers = get_optimal_workers()
     memory_limit = get_optimal_memory_limit()
 
+    os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+    #dask.config.set(get=dask.async.get_sync())
+    dask.config.set(scheduler='threads')
+
     cluster = LocalCluster(n_workers=num_workers,
                         threads_per_worker=1,
                         #memory_target_fraction=0.5,
                         memory_limit=memory_limit)
     
-    client = Client(cluster)
     args.dclogger.info(f"Dask tourne sur CPU avec {num_workers} workers et {memory_limit} de mémoire")
 
 
-    return client
+    return cluster

@@ -86,7 +86,7 @@ class TestOceanBench:
 
     @pytest.fixture(autouse=True, scope="class")
     def setup_evaluator(self, test_vars):
-        dask_client = setup_dask(test_vars)
+        dask_cluster = setup_dask(test_vars)
         glonet_data_dir = test_vars.glonet_data_dir
         glorys_data_dir = test_vars.glorys_data_dir
  
@@ -124,8 +124,9 @@ class TestOceanBench:
 
         # 3. Exécution de l’évaluation sur plusieurs modèles
         evaluator = Evaluator(
-            test_vars, 
-            dask_client=dask_client, metrics=None,
+            test_vars,
+            dask_cluster,
+            metrics=None,
             data_container={'glonet': glonet_vs_glorys_loader},
         )
         vars(test_vars)['evaluator'] = evaluator

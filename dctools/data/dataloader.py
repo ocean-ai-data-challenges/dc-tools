@@ -63,12 +63,12 @@ class DatasetLoader(ABC):
             except IndexError:
                 return None
 
-    def get_date(self):
+    '''def get_date(self):
         for index in range(self.pred_dataset.__len__()):
             try:
                 return self.pred_dataset.get_date(index)
             except IndexError:
-                return None
+                return None'''
 
     def get_pred_data(self):
         for index in range(self.pred_dataset.__len__()):
@@ -90,11 +90,11 @@ class DatasetLoader(ABC):
     def reset(self):                                                                                                                                                                           
         self.__init__()
 
-    def load_ref(self) -> Generator[int, Any, DCDataset]:
+    """def load_ref(self) -> Generator[int, Any, DCDataset]:
         if self.ref_dataset:
             assert(self.ref_dataset.__len__() == self.pred_dataset.__len__())
         # assert(self.dataset.__len__() == self.dataset.__len__())
-        #yield(dask.delayed(self.get_data()))
+        #yield(dask.delayed(self.get_ref_data()))
         yield(self.get_ref_data())
 
 
@@ -102,11 +102,36 @@ class DatasetLoader(ABC):
         if self.ref_dataset:
             assert(self.ref_dataset.__len__() == self.pred_dataset.__len__())
         # assert(self.dataset.__len__() == self.dataset.__len__())
-        #yield(dask.delayed(self.get_data()))
+        #yield(dask.delayed(self.get_pred_data()))
         yield(self.get_pred_data())
 
     def load_date(self) -> Generator[int, Any, str]:
-        yield(self.get_date())
+        yield(self.get_date())"""
+
+    def load(self) -> Generator[int, Any, DCDataset]:
+        if self.ref_dataset:
+            assert(self.ref_dataset.__len__() == self.pred_dataset.__len__())
+        for index in range(self.pred_dataset.__len__()):
+            try:
+                pred_sample = self.pred_dataset.__getitem__(index)
+                if self.ref_dataset:
+                    ref_sample = self.ref_dataset.__getitem__(index)
+                else:
+                    ref_sample = None
+                date = self.pred_dataset.get_date(index)
+            except IndexError:
+                pred_sample = None
+                ref_sample = None
+                date = None
+            yield (date, pred_sample, ref_sample)
+        '''# assert(self.dataset.__len__() == self.dataset.__len__())
+        #yield(dask.delayed(self.get_ref_data()))
+        yield((self.get_date(), self.get_pred_data(), self.get_ref_data()))'''
+
+    '''def load(self) -> Generator[Any, Any]:
+        assert(self.ref_dataset.__len__() == self.pred_dataset.__len__())
+        #yield((self.load_pred, self.load_ref))
+        yield((self.load_date, self.load_pred, self.load_ref))'''
 
     '''def get_predict(self):
         for index in range(self.dataset_glorys.__len__()):
