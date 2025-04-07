@@ -298,7 +298,7 @@ class CmemsGlorysDataset(CmemsDataset):
 class GlonetDataset(DCDataset):
     """Class to manage forecasts from Glonet models."""
     def __init__(
-            self,
+        self,
         conf_args: Namespace,
         root_data_dir: str,
         list_dates: List[str],
