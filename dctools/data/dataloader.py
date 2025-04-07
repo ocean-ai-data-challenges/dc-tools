@@ -3,7 +3,7 @@
 
 """Dataloder."""
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from argparse import Namespace
 import multiprocessing as mp
 import os
@@ -108,7 +108,9 @@ class DatasetLoader(ABC):
     def load_date(self) -> Generator[int, Any, str]:
         yield(self.get_date())"""
 
-    def load(self) -> Generator[int, Any, DCDataset]:
+    def load(
+        self
+    ) -> Generator[Tuple[str, Optional[DCDataset], Optional[DCDataset]]]:
         if self.ref_dataset:
             assert(self.ref_dataset.__len__() == self.pred_dataset.__len__())
         for index in range(self.pred_dataset.__len__()):
@@ -118,7 +120,7 @@ class DatasetLoader(ABC):
                     ref_sample = self.ref_dataset.__getitem__(index)
                 else:
                     ref_sample = None
-                date = self.pred_dataset.get_date(index)
+                date: str = self.pred_dataset.get_date(index)
             except IndexError:
                 pred_sample = None
                 ref_sample = None

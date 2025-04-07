@@ -72,7 +72,7 @@ class DCDataset(ABC):
             dataset = self.transform_fct(dataset)
         return dataset
 
-    def __getitem__(self, index: int) -> xr.Dataset:
+    def __getitem__(self, index: int) -> Optional[xr.Dataset]:
         if index < self.__len__():
             dataset = self.get_data(index)
             # labels = self.get_labels(index)
@@ -87,6 +87,7 @@ class DCDataset(ABC):
                         dataset,
                         dataset_filepath,
                         self.exception_handler,
+                        self.dclogger,
                         file_format=self.file_format,
                     )
             return dataset
@@ -94,7 +95,38 @@ class DCDataset(ABC):
             raise(IndexError)
 
 
-class CmemsDataset(DCDataset, ABC):
+class DCEmptyDataset(DCDataset):
+    """Empty dataset."""
+
+    def __init__(
+        self,
+        conf_args: Namespace,
+        root_data_dir: str,
+        list_dates: List[str],
+        transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+        save_after_preprocess: bool = False,
+        lazy_load: bool = True,
+        file_format: Optional[str] = 'netcdf',
+    ):
+        super().__init__(
+            conf_args, root_data_dir,
+            transform_fct, save_after_preprocess,
+            lazy_load, file_format,
+        )
+        self.list_dates = list_dates
+
+    def __len__(self):
+        return 0
+
+    def get_data(self, index: int):
+        return None
+
+    def get_date(self, index: int):
+        return(self.list_dates[index])
+
+
+
+class CmemsDataset(DCDataset):
     """Class to manage data from Copernicus Marine service."""
     def __init__(
         self,
@@ -115,6 +147,7 @@ class CmemsDataset(DCDataset, ABC):
         self.cmems_manager = CMEMSManager(
             conf_args.dclogger, conf_args.exception_handler
         )
+        self.root_data_dir = root_data_dir
         self.list_dates = list_dates
         self.logged: bool = False
         self.cmems_product_name = cmems_product_name
@@ -185,7 +218,7 @@ class CmemsGlorysDataset(CmemsDataset):
  
     def get_data(
         self, index: int,
-    ) -> Tuple[str, xr.Dataset]:
+    ) -> xr.Dataset:
             self.args.dclogger.info(
                 f"Get data for date: {self.list_dates[index]}"
             )
@@ -265,7 +298,7 @@ class CmemsGlorysDataset(CmemsDataset):
 class GlonetDataset(DCDataset):
     """Class to manage forecasts from Glonet models."""
     def __init__(
-            self,
+        self,
         conf_args: Namespace,
         root_data_dir: str,
         list_dates: List[str],
@@ -335,7 +368,8 @@ class GlonetDataset(DCDataset):
             )
         else:
             glonet_data = FileLoader.load_dataset(
-                local_file_path, self.args.exception_handler
+                local_file_path, self.args.exception_handler,
+                self.args.dclogger,
             )
         return glonet_data
 

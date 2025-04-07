@@ -5,6 +5,7 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+from typing_extensions import Unpack
 
 #import numpy.typing as npt
 from numpy import ndarray
@@ -22,6 +23,8 @@ class DCMetric(ABC):
             dc_logger (logging.logger): _description_
             exc_handler (DCExceptionHandler): _description_
         """
+
+        self.metric_name = None
         no_default_attrs = ['dc_logger', 'exc_handler', 'metric_name', 'var', 'depth']
         class_default_attrs = ['dc_logger', 'exc_handler', 'metric_name']
         default_attrs = dict(
@@ -81,7 +84,6 @@ class OceanbenchMetrics(DCMetric):
         """
         self.dc_logger.info(f"Run {self.metric_name} Evaluation.")
         result = None
-
         match self.metric_name:
             case 'rmse':
                 result = self.rmse_evaluation(eval_dataset, ref_dataset)
@@ -111,8 +113,6 @@ class OceanbenchMetrics(DCMetric):
         """
         self.dc_logger.info("Compute RMSE metric.")
         try:
-            #self.dc_logger.info(f"eval_dataset: {eval_dataset}")
-            #self.dc_logger.info(f"ref_dataset: {ref_dataset}")
             if ref_dataset:
                 nparray = rmse_metrics._pointwise_evaluation_core(
                     candidate_datasets=[eval_dataset],
@@ -132,10 +132,10 @@ class OceanbenchMetrics(DCMetric):
                 oceanbench_plot.plot_rmse_depth_for_average_time(
                     rmse_dataarray=nparray, dataset_depth_values=eval_dataset.depth.values
                 )
-            return nparray
-
         except Exception as exc:
             self.exc_handler.handle_exception(exc, "Compute RMSE metric error.")
+
+        return nparray
 
     def euclid_dist_analysis(
         self,
@@ -152,11 +152,16 @@ class OceanbenchMetrics(DCMetric):
             Optional[ndarray]: _description_
         """
         self.dc_logger.info("Run Euclidian distance analysis.")
+        """assert(hasattr(self, 'minimum_latitude'))
+        assert(hasattr(self, 'maximum_latitude'))
+        assert(hasattr(self, 'minimum_longitude'))
+        assert(hasattr(self, 'maximum_longitude'))"""
+
         try:
-            if self.minimum_latitude is None or self.maximum_latitude is None:
+            if not hasattr(self, 'minimum_latitude') or not hasattr(self, 'maximum_latitude'):
                 self.minimum_latitude = min(eval_dataset.lat.values)
                 self.maximum_latitude = max(eval_dataset.lat.values)
-            if self.minimum_longitude is None or self.maximum_longitude is None:
+            if not hasattr(self, 'minimum_longitude') or not hasattr(self, 'maximum_longitude'):
                 self.minimum_longitude = min(eval_dataset.lon.values)
                 self.maximum_longitude = max(eval_dataset.lon.values)
 
