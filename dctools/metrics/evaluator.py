@@ -1,11 +1,12 @@
 from abc import ABC
 from argparse import Namespace
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import dask
 from dask.distributed import Client
 
 from dctools.data.dataloader import DatasetLoader
+from dctools.data.dataset import DCDataset
 from dctools.metrics.oceanbench_metrics import DCMetric
 
 
@@ -30,25 +31,19 @@ class Evaluator(ABC):
         self._metrics = metrics
 
         self._plot = False
-        self._tasks = {}
-        self.results = {}
-        if metrics and data_container:
-            self.set_tasks()
+        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self.results: Dict[str, Dict[str, Any]] = {}
 
     def reset_tasks(self):
         self._tasks = {}
         self.results = {}
 
-    def set_data_container(self, data_container: Dict[str, DatasetLoader]):
-        self._data_container = data_container
-        self._model_name = list(self._data_container.keys())[0]
-
-    def reset_data_container(self, model_name: str):
-        """Reset data container."""
-        self._data_container[model_name].reset()
-
     def set_metrics(self, metrics: List[DCMetric]):
+        """
+        :param metrics: Liste d'instances de métriques.
+        """
         self._metrics = metrics
+        self.args.dclogger.info(f"Metrics set: {self._metrics}")
 
     def evaluate(self):
         if self._data_container and self._metrics:
@@ -61,6 +56,7 @@ class Evaluator(ABC):
                         #print('Data loader:', data_loader)
                         self._tasks[model_name] = {}
                         self.results[model_name] = {}
+                        date: str = str()
                         for date, pred_dataset, ref_dataset in data_loader.load():
                             #self._model_name = model_name
                             # Chargement des datasets de prédiction
@@ -81,12 +77,14 @@ class Evaluator(ABC):
                             for metric in self._metrics:
                                 metric_name = metric.get_metric_name()
                                 self._tasks[self._model_name][date][metric_name] = dask.delayed(metric.compute)(
-                                    pred_dataset_future, ref_dataset_future,
+                                    pred_dataset_future, ref_dataset_future
                                 )
                             self.args.dclogger.info(f"Run set of tasks: {self._tasks[model_name]}")
 
                     # Convertir tout le dictionnaire en liste de tâches
-                    tasks_list = [task for model in self._tasks.values() for date in model.values() for task in date.values()]
+                    tasks_list = [
+                        task for model in self._tasks.values() for date in model.values() for task in date.values()
+                    ]
 
                     # Envoyer les tâches aux workers et récupérer les résultats
                     futures = dask_client.compute(tasks_list)  # Envoi au cluster

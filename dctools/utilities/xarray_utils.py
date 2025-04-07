@@ -121,7 +121,7 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
     return ds[list_vars]
 
 def interpolate_dataset(
-        ds: xr.Dataset, ranges: Dict[str, np.arange],
+        ds: xr.Dataset, ranges: Dict[str, np.ndarray],
         weights_filepath: Optional[str] = None,
     ) -> xr.Dataset:
     for key in ranges.keys():

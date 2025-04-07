@@ -25,7 +25,7 @@ def create_glorys_ndays_forecast(
     nc_path: str,
     list_nc_files: List[str],
     # ref_data: xr.Dataset,
-    start_date: datetime.datetime,
+    start_date: str,
     zarr_path: str,
     transform_fct: Optional[callable],
     dclogger: logging.Logger,
@@ -90,6 +90,7 @@ def create_glorys_ndays_forecast(
                 #print('First time step:', time_step, '   zarr_path: ', zarr_path)
                 DataSaver.save_dataset(
                     tmp_ds, zarr_path, exception_handler,
+                    dclogger=dclogger,
                     #file_format="zarr", mode="r+",
                     file_format="zarr", mode="w",
                     compute=True,
@@ -98,6 +99,7 @@ def create_glorys_ndays_forecast(
                 #print("Appending time step:", time_step, '   zarr_path: ', zarr_path)
                 DataSaver.save_dataset(
                     tmp_ds, zarr_path, exception_handler,
+                    dclogger=dclogger,
                     file_format="zarr", mode="a", append_dim='time',
                     compute=True,
                 )

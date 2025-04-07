@@ -248,7 +248,7 @@ class CMEMSManager:
             self.exception_handler.handle_exception(exc, "download from CMEMS failed.")
         return None
 
-    def get_cmems_filter_from_date(self, date:datetime.datetime) -> str:
+    def get_cmems_filter_from_date(self, date: str) -> str:
         """Give a filter to select correct file when downloading from CMEMS.
 
         Args:
@@ -257,6 +257,6 @@ class CMEMSManager:
         Returns:
             str: filter string
         """
-        date = datetime.datetime.strptime(date, '%Y-%m-%d')
-        filter = f"*/{date.strftime('%Y')}/{date.strftime('%m')}/*_{date.strftime('%Y')}{date.strftime('%m')}{date.strftime('%d')}_*.nc"
+        dt = datetime.datetime.strptime(date, '%Y-%m-%d')
+        filter = f"*/{dt.strftime('%Y')}/{dt.strftime('%m')}/*_{dt.strftime('%Y')}{dt.strftime('%m')}{dt.strftime('%d')}_*.nc"
         return filter

@@ -5,20 +5,13 @@
 
 from argparse import ArgumentParser, Namespace
 import os
-import sys
 from typing import Dict, List, Optional, Tuple
 
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
-import dask
 import torch
 import yaml
 
 from dctools.dcio.dclogger import DCLogger
-from dctools.metrics.oceanbench_metrics import OceanbenchMetrics
 from dctools.utilities.errors import DCExceptionHandler
-from dctools.utilities.net_utils import CMEMSManager
 
 
 def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
