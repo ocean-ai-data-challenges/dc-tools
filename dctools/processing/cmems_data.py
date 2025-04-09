@@ -11,7 +11,6 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 import xarray as xr
-import xesmf as xe
 
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver

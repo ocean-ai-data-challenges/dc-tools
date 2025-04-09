@@ -9,9 +9,11 @@ import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
 import dask
+import numpy as np
 
 # from torchgeo.datasets import Landsat
 import xarray as xr
+import argopy
 
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
@@ -340,3 +342,76 @@ class GlonetDataset(DCDataset):
         return glonet_data
 
             
+class ArgoDataset(DCDataset):
+    """Class to manage Argo float data."""
+    def __init__(
+        self,
+        conf_args: Namespace,
+        root_data_dir: str,
+        list_dates: List[str | np.datetime64],
+        transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+        save_after_preprocess: bool = False,
+        lazy_load: bool = True,
+        file_format: Optional[str] = 'netcdf',
+        min_latitude: float = -90,
+        max_latitude: float = 90,
+        min_longitude: float = -180,
+        max_longitude: float = 180,
+        max_depth: float = 10, # TODO: set this value once we know the vert resolution
+    ):
+        """TODO: Write docstring."""
+
+        super().__init__(
+            conf_args, root_data_dir,
+            transform_fct, save_after_preprocess,
+            lazy_load, file_format,
+        )
+        
+        self.list_dates = list_dates
+
+        # Argopy-specific config
+        self.min_longitude = min_longitude
+        self.max_longitude = max_longitude
+        self.min_latitude = min_latitude
+        self.max_latitude = max_latitude
+        self.max_depth = max_depth
+    
+    def __len__(self):
+        return len(self.list_dates)
+
+    def get_data(self, index: int):
+        min_date = self.list_dates[index]
+
+        argo_region = [
+            self.min_longitude,
+            self.max_longitude,
+            self.min_latitude,
+            self.max_latitude,
+            0,
+            self.max_depth,
+            np.datetime_as_string(min_date, unit="s"),
+            np.datetime_as_string(min_date + np.timedelta64(1, "D"), unit="s")
+        ]
+
+        if not isinstance(min_date, np.datetime64):
+            min_date = np.datetime64(min_date, "s")
+
+        day_dfetcher = argopy.DataFetcher(mode='research').region(argo_region)
+        
+        try:
+            with argopy.set_options(src='erddap'):
+                
+                argo_data = day_dfetcher.load().data
+            return argo_data
+        except:
+            print("Ifremer ERDDAP server problem encountered.")
+            print("Switching to Argovis server...")
+        
+        with argopy.set_options(src='argovis'):
+            day_dfetcher = argopy.DataFetcher(mode='standard').region(argo_region)
+            argo_data = day_dfetcher.load().data
+            return argo_data
+        
+
+    def get_date(self, index: int):
+        return self.list_dates[index]
