@@ -343,12 +343,16 @@ class GlonetDataset(DCDataset):
 
             
 class ArgoDataset(DCDataset):
-    """Class to manage Argo float data."""
+    """Class to manage Argo float data.
+    
+    Provides a way of loading all available argo data for a day into a sample
+    that can be easily retrieved later.
+    """
     def __init__(
         self,
         conf_args: Namespace,
-        root_data_dir: str,
         list_dates: List[str | np.datetime64],
+        root_data_dir: str | None = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
         lazy_load: bool = True,
@@ -359,7 +363,40 @@ class ArgoDataset(DCDataset):
         max_longitude: float = 180,
         max_depth: float = 10, # TODO: set this value once we know the vert resolution
     ):
-        """TODO: Write docstring."""
+        """
+        Init method for the ArgoDataset class.
+
+        Parameters
+        ----------
+        conf_args : Namespace
+            Configuration arguments coming from either the command line or the
+            specific DC's YAML configuration file.
+        list_dates : List[str  |  np.datetime64]
+            List of dates to use as samples.
+        root_data_dir : str | None, optional
+            Not yet implemented: if specified directory from which to recover
+            the Argo float data. If not, downloads data as needed using argopy.
+            By default None.
+        transform_fct : Optional[Callable[[xr.Dataset], xr.Dataset]], optional
+            Function to call on the data during preprocessing, by default None.
+        save_after_preprocess : bool, optional
+            Controls whether to save the results of preprocessing to the disk,
+            by default False.
+        lazy_load : bool, optional
+            Whether to load the data to memory instantly or to wait until it is
+            necessary for computation, by default True.
+        file_format : Optional[str], optional
+            Format in which to save the preprocessed samples, by default 'netcdf'.
+        min_latitude, max_latitude, min_longitude, max_longitude : float, optional
+            Bounds of the horizontal region for which to retrieve Argo data. 
+        max_depth : float, optional
+            Maximum depth for data retrieval, by default 10.
+
+        Notes
+        -----
+        The `max_depth` parameter has yet to be set to a reasonable default in
+        agreement with the Data Challenges' scientific teams.
+        """
 
         super().__init__(
             conf_args, root_data_dir,
@@ -381,6 +418,8 @@ class ArgoDataset(DCDataset):
 
     def get_data(self, index: int):
         min_date = self.list_dates[index]
+        if not isinstance(min_date, np.datetime64):
+            min_date = np.datetime64(min_date, "s")
 
         argo_region = [
             self.min_longitude,
@@ -392,9 +431,6 @@ class ArgoDataset(DCDataset):
             np.datetime_as_string(min_date, unit="s"),
             np.datetime_as_string(min_date + np.timedelta64(1, "D"), unit="s")
         ]
-
-        if not isinstance(min_date, np.datetime64):
-            min_date = np.datetime64(min_date, "s")
 
         day_dfetcher = argopy.DataFetcher(mode='research').region(argo_region)
         
