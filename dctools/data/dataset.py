@@ -4,11 +4,12 @@ from argparse import Namespace
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+import warnings
 
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
-import dask
+import numpy as np
 
 # from torchgeo.datasets import Landsat
 import xarray as xr
@@ -372,5 +373,125 @@ class GlonetDataset(DCDataset):
                 self.args.dclogger,
             )
         return glonet_data
+      
+class MODISLeadmapDataset(DCDataset):
+    """
+    Class to manage MODIS Leadmaps (for sea-ice monitoring).
+    """
+    def __init__(
+        self,
+        conf_args: Namespace,
+        list_dates: List[str | np.datetime64],
+        root_data_dir: str | None = None,
+        transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+        save_after_preprocess: bool = False,
+        lazy_load: bool = True,
+        file_format: Optional[str] = 'netcdf',
+    ):
+        """
+        Init method for the MODISLeadmapDataset class.
 
+        Parameters
+        ----------
+        conf_args : Namespace
+            Configuration arguments coming from either the command line or the
+            specific DC's YAML configuration file.
+        list_dates : List[str  |  np.datetime64]
+            List of dates to use as samples.
+        root_data_dir : str, optional
+            If specified, directory from which to recover the data. If not,
+            retrieves data from S3 bucket (not yet implemented).
+        transform_fct : Callable[[xr.Dataset], xr.Dataset], optional
+            Function to call on the data during preprocessing.
+        save_after_preprocess : bool, optional
+            Controls whether to save the results of preprocessing to the disk,
+            by default False.
+        lazy_load : bool, optional
+            Whether to load the data to memory instantly or to wait until it is
+            necessary for computation, by default True.
+        file_format : str, optional
+            Format in which to save the preprocessed samples, by default 'netcdf'.
+        min_latitude, max_latitude, min_longitude, max_longitude : float, optional
+            Bounds of the horizontal region for which to retrieve data. 
+        """
+
+        if root_data_dir is None:
+            raise NotImplementedError(
+                "Not specifying root_data_dir is not yet supported."
+                )
+        
+        super().__init__(
+            conf_args, root_data_dir,
+            transform_fct, save_after_preprocess,
+            lazy_load, file_format,
+        )
+        if isinstance(list_dates[0], np.datetime64):
+            self.list_dates = list_dates
+        else:
+            self.list_dates = [np.datetime64(date, "D") for date in list_dates]
+
+        _date_array = np.array(self.list_dates)
+        # Check that dates are valid and drop them if not
+        months = _date_array.astype('datetime64[M]').astype(int) % 12 + 1
+        valid_mask = (months >= 11) | (months <= 4) # Data from November to April
+        self.list_dates = list(_date_array[valid_mask])
+
+        if np.any(~valid_mask):
+            warnings.warn(
+                "Dates outside the data range (November to April) were dropped."
+                )
             
+        self.data_cache = {}
+
+    
+    def __len__(self):
+        return len(self.list_dates)
+
+    def get_data(self, index: int):
+        date = self.get_date(index)
+        
+        # Open corresponding file (and put it in cache)
+        winter_str = self.get_winter_string(date)
+        try:
+            winter_ds = self.data_cache[winter_str]
+        except KeyError:
+            data_path = Path(self.root_dir) / f"{winter_str}_ArcLeads.nc"
+            try:
+                winter_ds = xr.open_dataset(data_path)
+            except FileNotFoundError:
+                print(
+                    f"File {data_path} not found. " \
+                    "Check that the specified year is not in the dataset."
+                    )
+
+            self.data_cache[winter_str] = winter_ds
+
+        return winter_ds.sel(
+            time=date,
+            method="nearest",
+            tolerance=np.timedelta64(24, "h"),
+            )
+        
+
+    def get_date(self, index: int) -> np.datetime64:
+        return self.list_dates[index]
+    
+    @staticmethod
+    def get_winter_string(date:np.datetime64) -> str:
+        """
+        Get a string representing the winter season the date belongs to.
+
+        Useful since MODIS Leadmaps use things like \"202021\" to specify years.
+        """
+        year = date.astype('datetime64[Y]').astype(int) + 1970
+        month = date.astype('datetime64[M]').astype(int) % 12 + 1
+
+        if 11 <= month <= 12:
+            winter_start = year
+        elif 1 <= month <= 4:
+            winter_start = year - 1
+        else:
+            raise ValueError(f"Date {date} is not in the Northern Hemisphere winter (Nov to Apr)")
+
+        winter_end = winter_start + 1
+        return f"{winter_start}{winter_end % 100:02d}"
