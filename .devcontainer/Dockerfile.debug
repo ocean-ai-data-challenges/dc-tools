@@ -19,7 +19,7 @@ COPY ./environment.yml ${HOME_PREFIX}
 # install packages
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
-    build-essential ssh-client sudo git
+    build-essential ssh-client sudo git-all
 
 # user permissions
 RUN echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers

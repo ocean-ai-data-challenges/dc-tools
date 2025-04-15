@@ -23,7 +23,7 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     Returns:
         Namespace: Namespace with parsed args.
     """
-    folder_base = os.path.join("/home", "k24aitmo", "IMT", "software", "dc-tools")
+    #folder_base = os.path.join("/home", "k24aitmo", "IMT", "software", "dc-tools")
     parser = ArgumentParser()
     parser = ArgumentParser(description='Run DC1 Evaluation on Glorys data')
     parser.add_argument(
@@ -43,7 +43,7 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     parser.add_argument(
         '-j', '--jsonfile', type=str,
         help="File where to store results.",
-        default=os.path.join(folder_base, "tests", "logs", "result_logs.json")
+        #default=os.path.join(folder_base, "tests", "logs", "result_logs.json")
     ),
     parser.add_argument(
         '-m', '--metric', type=str,

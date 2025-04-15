@@ -14,6 +14,8 @@ import oceanbench.plot as oceanbench_plot
 import oceanbench.core.evaluate.rmse_core as rmse_metrics
 import xarray as xr
 
+from dctools.utilities.xarray_utils import get_vars_dims
+
 
 class DCMetric(ABC):
     def __init__(self, **kwargs: Dict[str, Any]) -> None:
@@ -82,11 +84,12 @@ class OceanbenchMetrics(DCMetric):
         Returns:
             ndarray, optional: computed metric (if any)
         """
+        vars_2d, vars_3d = get_vars_dims(eval_dataset)
         self.dc_logger.info(f"Run {self.metric_name} Evaluation.")
         result = None
         match self.metric_name:
             case 'rmse':
-                result = self.rmse_evaluation(eval_dataset, ref_dataset)
+                result = self.rmse_evaluation(eval_dataset, ref_dataset, vars_2d, vars_3d)
             case 'euclid_dist':
                 result = self.euclid_dist_analysis(eval_dataset, ref_dataset)
             case 'energy_cascad':
@@ -100,6 +103,8 @@ class OceanbenchMetrics(DCMetric):
         self,
         eval_dataset: xr.Dataset,
         ref_dataset: Optional[xr.Dataset],
+        vars_2d: List[str],
+        vars_3d: List[str],
     ) -> ndarray:
         """Compute RMSE metric.
 
@@ -117,10 +122,12 @@ class OceanbenchMetrics(DCMetric):
                 nparray = rmse_metrics._pointwise_evaluation_core(
                     candidate_datasets=[eval_dataset],
                     reference_datasets=[ref_dataset],
+                    vars_2d=vars_2d, vars_3d=vars_3d,
                 )
             else:
                 nparray = oceanbench_metrics.rmse_to_glorys(
-                    candidate_datasets=[eval_dataset]
+                    candidate_datasets=[eval_dataset],
+                    vars_2d=vars_2d, vars_3d=vars_3d,
                 )
             if self.plot_result:
                 oceanbench_plot.plot_rmse(

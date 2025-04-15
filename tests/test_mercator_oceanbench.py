@@ -19,8 +19,12 @@ from dctools.metrics.metrics import MetricComputer
 from dctools.data.transforms import CustomTransforms
 from dctools.utilities.init_dask import setup_dask
 from dctools.utilities.errors import DCExceptionHandler
-from dctools.utilities.xarray_utils import DICT_RENAME_CMEMS,\
-    LIST_VARS_GLONET, RANGES_GLONET, GLONET_DEPTH_VALS
+from dctools.utilities.xarray_utils import (
+    DICT_RENAME_CMEMS,
+    LIST_VARS_GLONET,
+    RANGES_GLONET,
+    GLONET_DEPTH_VALS,
+)
 
 
 class TestOceanBench:

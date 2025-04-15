@@ -20,7 +20,7 @@ from dctools.processing.gridded_data import GriddedDataProcessor
 from dctools.utilities.errors import DCExceptionHandler
 from dctools.utilities.file_utils import  get_list_filter_files, remove_listof_files
 from dctools.utilities.misc_utils import get_dates_from_startdate
-from dctools.utilities.net_utils import download_s3_file, S3Url, CMEMSManager
+from dctools.utilities.net_utils import download_s3_file, CMEMSManager, FTPManager
 from dctools.utilities.xarray_utils import rename_coordinates, rename_variables, DICT_RENAME_CMEMS
 
 class DCDataset(ABC):
@@ -92,7 +92,12 @@ class DCDataset(ABC):
                     )
             return dataset
         else:
+            self.close_all()
             raise(IndexError)
+
+    @abstractmethod
+    def close_all(self):
+        pass
 
 
 class DCEmptyDataset(DCDataset):
@@ -124,7 +129,8 @@ class DCEmptyDataset(DCDataset):
     def get_date(self, index: int):
         return(self.list_dates[index])
 
-
+    def close_all(self):
+        pass
 
 class CmemsDataset(DCDataset):
     """Class to manage data from Copernicus Marine service."""
@@ -178,6 +184,9 @@ class CmemsDataset(DCDataset):
             name_filter=name_filter,
             tmp_dir=self.root_data_dir,
         )
+
+    def close_all(self):
+        self.cmems_manager.cmems_logout()
 
 class CmemsGlorysDataset(CmemsDataset):
     """Class to manage data from Copernicus Marine service."""
@@ -334,7 +343,7 @@ class GlonetDataset(DCDataset):
         """Download glonet forecast file from Edito.
 
         Args:
-            filename (str): name of the file to download.
+            index (int): index of the date to download.
         """
         self.args.dclogger.info(
             f"Get data for date: {self.list_dates[index]}"
@@ -373,4 +382,110 @@ class GlonetDataset(DCDataset):
             )
         return glonet_data
 
-            
+    def close_all(self):
+        self.args.dclogger.info("Close S3 client.")
+        self.s3_client.close()
+
+class FTPDataset(DCDataset):
+    """Class to manage data from FTP servers."""
+    def __init__(
+        self,
+        conf_args: Namespace,
+        root_data_dir: str,
+        ftp_hostname: str,
+        ftp_dir: str,
+        transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+        save_after_preprocess: bool = False,
+        lazy_load: bool = True,
+        file_format: Optional[str] = 'netcdf',
+        ftp_user: Optional[str] = "anonymous",
+        ftp_pass: Optional[str] = "",
+    ):
+        super().__init__(
+            conf_args, root_data_dir,
+            transform_fct, save_after_preprocess,
+            lazy_load, file_format,
+        )
+        self.ftp_manager = FTPManager(
+            conf_args.dclogger, conf_args.exception_handler,
+            ftp_hostname, ftp_dir, ftp_user, ftp_pass,
+        )
+        self.root_data_dir = root_data_dir
+        self.init_server()
+        # self.logged: bool = False
+
+    def init_server(self):
+        """Create a list of files to download from the FTP server."""
+        self.ftp_manager.init_ftp()
+        #self.files_list = self.ftp_manager.get_files_list()
+        self.files_list = self.ftp_manager.get_files_list()
+        #self.dclogger.info(f"files_list: {self.files_list}")
+
+        #self.ftp_manager.close_ftp()
+        
+        #self.logged = True
+
+    def __len__(self):
+        """Get the number of files in the FTP server.
+
+        Returns:
+            (int): number of files
+        """
+        return len(self.files_list)
+
+    def get_date(self, index):
+        """Get the date of the file at the given index.
+        Args:
+            index (int): index of the file
+        Returns:
+            (str): date of the file
+        """
+        #if not hasattr(self, 'file_dict'):
+        #    self.create_list_files()
+        return self.files_list[index]['date']
+
+    def close_all(self):
+        """Close the FTP server connection."""
+        self.ftp_manager.close_ftp()
+        self.args.dclogger.info("Close FTP connection.")
+        #self.ftp_manager.close_ftp()
+
+class IfremerFTPDataset(FTPDataset):
+    """Class to manage data from Ifremer FTP servers."""
+    def __init__(
+        self,
+        conf_args: Namespace,
+        root_data_dir: str,
+        ftp_hostname: str,
+        ftp_dir: str,
+        transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+        save_after_preprocess: bool = False,
+        lazy_load: bool = True,
+        file_format: Optional[str] = 'netcdf',
+        ftp_user: Optional[str] = "anonymous",
+        ftp_pass: Optional[str] = "",
+    ):
+        super().__init__(
+            conf_args, root_data_dir,
+            ftp_hostname, ftp_dir,
+            transform_fct, save_after_preprocess,
+            lazy_load, file_format,
+            ftp_user, ftp_pass,
+        )
+
+    def get_data(self, index: int):
+        """Download ....
+        Args:
+        """
+        downl_name = self.ftp_manager.download_file(index, self.root_data_dir)
+        if self.lazy_load:
+            dataset = FileLoader.lazy_load_dataset(
+                downl_name, self.exception_handler,
+                self.dclogger,
+            )
+        else:
+            dataset = FileLoader.load_dataset(
+                downl_name, self.exception_handler,
+                self.dclogger,
+            )
+        return dataset

@@ -4,7 +4,7 @@
 """Misc. functions to aid in the processing xr.Datasets and DataArrays."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from pathlib import Path
@@ -108,6 +108,15 @@ def create_coords_rename_dict(ds: xr.Dataset):
     }
     return dict_rename
 
+def standard_rename_coords(ds: xr.Dataset):
+    """Rename coordinates to standard names."""
+    dict_rename = create_coords_rename_dict(ds)
+    # Remove None values from the dictionary
+    dict_rename = {k: v for k, v in dict_rename.items() if v is not None}
+    # Rename coordinates
+    ds = rename_coordinates(ds, dict_rename)
+    return ds
+
 def rename_coordinates(ds: xr.Dataset, rename_dict):
     """Rename coordinates according to a given dictionary."""
     return ds.rename(rename_dict)
@@ -175,3 +184,20 @@ def get_glonet_time_attrs(start_date: str):
         'units': f"days since {start_date} 00:00:00", 'calendar': "proleptic_gregorian"
     }
     return glonet_time_attrs
+
+def get_vars_dims(ds: xr.Dataset) -> Tuple[List[str]]:
+    """
+    Get the variables and their dimensions from an xarray dataset.
+    """
+    vars_2d = []
+    vars_3d = []
+    for var in ds.data_vars:
+        # dims = list(ds[var].dims)
+        dict_coords = get_grid_coord_names(ds[var])
+        print("dict_coords:", dict_coords)
+        if "lat" in dict_coords and "lon" in dict_coords:
+            if "depth" not in dict_coords:
+                vars_2d.append(var)
+            else:
+                vars_3d.append(var)
+    return (vars_2d, vars_3d)
