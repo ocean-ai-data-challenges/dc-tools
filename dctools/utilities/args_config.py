@@ -105,7 +105,10 @@ def load_args_and_config(
             name="DCLogger", logfile=args.logfile, jsonfile=args.jsonfile
         )
         dclogger = logger_instance.get_logger()
-        json_logger = logger_instance.get_json_logger()
+        if args.jsonfile is not None:
+            json_logger = logger_instance.get_json_logger()
+        else:
+            json_logger = None
         # initialize exception handler
         exception_handler = DCExceptionHandler(dclogger)
         vars(args)['device'] = device

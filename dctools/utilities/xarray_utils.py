@@ -194,7 +194,7 @@ def get_vars_dims(ds: xr.Dataset) -> Tuple[List[str]]:
     for var in ds.data_vars:
         # dims = list(ds[var].dims)
         dict_coords = get_grid_coord_names(ds[var])
-        print("dict_coords:", dict_coords)
+
         if "lat" in dict_coords and "lon" in dict_coords:
             if "depth" not in dict_coords:
                 vars_2d.append(var)

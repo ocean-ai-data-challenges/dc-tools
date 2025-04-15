@@ -53,6 +53,7 @@ class DCLogger(logging.Logger):
 
         # JSON handler
         if jsonfile is not None:
+            print(f"\n\njsonfile: {jsonfile}")
             self.json_logger = logging.getLogger()
             self.json_logger.setLevel(logging.WARNING)
             self.jsonhandler = logging.FileHandler(jsonfile)

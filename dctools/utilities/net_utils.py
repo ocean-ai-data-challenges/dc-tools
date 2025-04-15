@@ -263,13 +263,6 @@ class CMEMSManager:
         return filter
 
 
-
-
-import ftplib
-import os
-from datetime import datetime
-
-
 class FTPManager:
     """Class to manage downloads from ftp servers."""
 
