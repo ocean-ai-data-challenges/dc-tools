@@ -30,7 +30,7 @@ class DatasetLoader(ABC):
         self,
         pred_dataset: xr.Dataset,
         ref_dataset: Optional[xr.Dataset] = None,
-        batch_size: int = 1,
+        batch_size: int = 8,
     ) -> None:
         """
         Initialise avec une fonction de chargement et (optionnellement) une fonction de prétraitement.
@@ -107,12 +107,13 @@ class DatasetLoader(ABC):
 
     def load_date(self) -> Generator[int, Any, str]:
         yield(self.get_date())"""
-
     def load(
         self
     ) -> Generator[Tuple[str, Optional[DCDataset], Optional[DCDataset]]]:
         if self.ref_dataset:
             assert(self.ref_dataset.__len__() == self.pred_dataset.__len__())
+        batch = []
+ 
         for index in range(self.pred_dataset.__len__()):
             try:
                 pred_sample = self.pred_dataset.__getitem__(index)
@@ -121,11 +122,19 @@ class DatasetLoader(ABC):
                 else:
                     ref_sample = None
                 date: str = self.pred_dataset.get_date(index)
+                batch.append((date, pred_sample, ref_sample))
+                if len(batch) >= self.batch_size:
+                    yield batch
+                    batch = []
             except IndexError:
-                pred_sample = None
+                """pred_sample = None
                 ref_sample = None
                 date = None
-            yield (date, pred_sample, ref_sample)
+                yield (date, pred_sample, ref_sample)"""
+                yield batch
+            
+        if len(batch) > 0:
+            yield batch
         '''# assert(self.dataset.__len__() == self.dataset.__len__())
         #yield(dask.delayed(self.get_ref_data()))
         yield((self.get_date(), self.get_pred_data(), self.get_ref_data()))'''

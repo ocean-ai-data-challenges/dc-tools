@@ -11,6 +11,7 @@ import zarr
 
 from dctools.dcio.dclogger import DCLogger
 from dctools.utilities.errors import DCExceptionHandler
+# from dctools.utilities.xarray_utils import standard_rename_coords
 
 class FileLoader:
     """Loading NetCDF or Zarr files."""
@@ -79,11 +80,13 @@ class FileLoader:
                 #ds = xr.open_dataset(file_path, chunks='auto')
                 # ds = xr.open_mfdataset(file_path, parallel=True)
                 #ds = ds.chunk(chunks={})
-                if "longitude" in ds.variables:
+                if "longitude" in ds.variables and "time" in ds.variables:
                     # TODO: adapt chunking for each dataset
                     ds = ds.chunk(chunks={"latitude": -1, "longitude": -1, "time": 1})
-                else:
+                elif "lat" in ds.variables and "time" in ds.variables:
                     ds = ds.chunk(chunks={"lat": -1, "lon": -1, "time": 1})
+                else:
+                    ds = ds.chunk(chunks='auto')
                 '''if "longitude" in ds.variables:
                     ds = ds.chunk(chunks={"latitude": 20, "longitude": 20, "time": 1})
                 else:

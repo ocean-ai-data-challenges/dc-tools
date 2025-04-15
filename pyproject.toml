@@ -32,6 +32,7 @@ dependencies = [
     "xbatcher>=0.4.0",
     "python-json-logger>=3.3.0",
     "json-handler>=2.0.1",
+    "ftputil (>=5.1.0,<6.0.0)",
 ]
 
 [project.urls]
@@ -58,8 +59,8 @@ optional = false
 
 [tool.poetry.group.custom.dependencies]
 oceanbench = {git = "ssh://git@github.com/Articoking/oceanbench", branch = "main"}
-#oceanbench = {path = "/home/k24aitmo/IMT/software/oceanbench"}
-xrpatcher = {git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "main"}
+# oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench", develop = true}
+xrpatcher = { git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "main" }
 xesmf = {git = "git+https://github.com/pangeo-data/xESMF.git"}
 
 [build-system]
