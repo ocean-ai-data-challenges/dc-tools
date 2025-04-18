@@ -63,10 +63,6 @@ class DCDataset(ABC):
     def get_date(self, index: int):
         pass
 
-    #@abstractmethod
-    #def get_labels(self, index: int):
-    #    pass
-
     def preprocess_data(self, dataset):
         if self.transform_fct is not None:
             # preprocess dataset
@@ -411,8 +407,6 @@ class MODISLeadmapDataset(DCDataset):
             necessary for computation, by default True.
         file_format : str, optional
             Format in which to save the preprocessed samples, by default 'netcdf'.
-        min_latitude, max_latitude, min_longitude, max_longitude : float, optional
-            Bounds of the horizontal region for which to retrieve data. 
         """
 
         if root_data_dir is None:
@@ -533,8 +527,6 @@ class AMSR2Dataset(DCDataset):
             necessary for computation, by default True.
         file_format : str, optional
             Format in which to save the preprocessed samples, by default 'netcdf'.
-        min_latitude, max_latitude, min_longitude, max_longitude : float, optional
-            Bounds of the horizontal region for which to retrieve data. 
         
         Notes
         -----
@@ -574,6 +566,81 @@ class AMSR2Dataset(DCDataset):
         filename = f"{date.year}/asi-AMSR2-n3125-{date.year}{date.month:02d}{date.day:02d}-v5.4.nc"
         data_path = Path(self.root_dir) / filename
         return xr.open_dataset(data_path)
+
+    def get_date(self, index: int) -> np.datetime64:
+        return self.list_dates[index]
+
+
+class IABPDataset(DCDataset):
+    """
+    Class to manage IABP ice buoy data.
+    """
+    def __init__(
+        self,
+        conf_args: Namespace,
+        list_dates: List[str | np.datetime64],
+        root_data_dir: str | None = None,
+        transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+        save_after_preprocess: bool = False,
+        lazy_load: bool = True,
+        file_format: Optional[str] = 'netcdf',
+    ):
+        """
+        Init method for the AMSR2Dataset class.
+
+        Parameters
+        ----------
+        conf_args : Namespace
+            Configuration arguments coming from either the command line or the
+            specific DC's YAML configuration file.
+        list_dates : List[str  |  np.datetime64]
+            List of dates to use as samples.
+        root_data_dir : str, optional
+            If specified, directory from which to recover the data. If not,
+            retrieves data from S3 bucket.
+        transform_fct : Callable[[xr.Dataset], xr.Dataset], optional
+            Function to call on the data during preprocessing.
+        save_after_preprocess : bool, optional
+            Controls whether to save the results of preprocessing to the disk,
+            by default False.
+        lazy_load : bool, optional
+            Whether to load the data to memory instantly or to wait until it is
+            necessary for computation, by default True.
+        file_format : str, optional
+            Format in which to save the preprocessed samples, by default 'netcdf'.
+        
+        Notes
+        -----
+        
+        """
+
+        if root_data_dir is None:
+            raise NotImplementedError(
+                "Not specifying root_data_dir is not yet supported."
+                )
+        
+        super().__init__(
+            conf_args, root_data_dir,
+            transform_fct, save_after_preprocess,
+            lazy_load, file_format,
+        )
+        if isinstance(list_dates[0], np.datetime64):
+            self.list_dates = list_dates
+        else:
+            self.list_dates = [np.datetime64(date, "D") for date in list_dates]
+            
+        self.data_cache = {}
+
+    
+    def __len__(self):
+        return len(self.list_dates)
+
+    def get_data(self, index: int):
+        # Get date
+        # date = self.get_date(index).item()
+        # Get filename in format LEVEL1_YYYY.zarr (or .nc?)
+        # Open with dcio function that handles either S3 or local paths
+        pass
 
     def get_date(self, index: int) -> np.datetime64:
         return self.list_dates[index]
