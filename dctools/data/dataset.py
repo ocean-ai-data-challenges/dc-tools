@@ -290,16 +290,10 @@ class CmemsGlorysDataset(CmemsDataset):
 
                 return glorys_data
             else:
-                if self.lazy_load:
-                    glorys_data = FileLoader.lazy_load_dataset(
-                        glorys_filepath, self.exception_handler,
-                        self.dclogger,
-                    )
-                else:
-                    glorys_data = FileLoader.load_dataset(
-                        glorys_filepath, self.exception_handler,
-                        self.dclogger,
-                    )
+                glorys_data = FileLoader.load_dataset(
+                    glorys_filepath, self.exception_handler,
+                    self.dclogger,
+                )
                 return glorys_data
 
 class S3Dataset(DCDataset):
@@ -429,16 +423,10 @@ class GlonetDataset(S3Dataset):
                 dest_path=local_file_path,
             )
         assert(Path(local_file_path).is_file())
-        if self.lazy_load:
-            glonet_data = FileLoader.lazy_load_dataset(
-                local_file_path, self.args.exception_handler,
-                self.args.dclogger,
-            )
-        else:
-            glonet_data = FileLoader.load_dataset(
-                local_file_path, self.args.exception_handler,
-                self.args.dclogger,
-            )
+        glonet_data = FileLoader.load_dataset(
+            local_file_path, self.args.exception_handler,
+            self.args.dclogger,
+        )
         return glonet_data
 
     def close_all(self):
@@ -530,16 +518,10 @@ class IfremerFTPDataset(FTPDataset):
             index: index of the file in the dataset
         """
         downl_name = self.ftp_manager.download_file(index, self.root_data_dir)
-        if self.lazy_load:
-            dataset = FileLoader.lazy_load_dataset(
-                downl_name, self.exception_handler,
-                self.dclogger,
-            )
-        else:
-            dataset = FileLoader.load_dataset(
-                downl_name, self.exception_handler,
-                self.dclogger,
-            )
+        dataset = FileLoader.load_dataset(
+            downl_name, self.exception_handler,
+            self.dclogger,
+        )
         return dataset
 
     def get_time(self, index):
