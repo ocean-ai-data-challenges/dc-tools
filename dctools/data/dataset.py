@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from argparse import Namespace
 import os
 from pathlib import Path
-<<<<<<< HEAD
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 import warnings
 
@@ -11,13 +10,6 @@ import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
 import numpy as np
-=======
-from typing import (
-    Any, Callable, Dict, Iterable, List,
-    Mapping, Optional, Tuple, Union
-)
-# import dask
->>>>>>> main
 
 # from torchgeo.datasets import Landsat
 import xarray as xr
@@ -425,13 +417,11 @@ class MODISLeadmapDataset(DCDataset):
         root_data_dir: str | None = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         """
         Init method for the MODISLeadmapDataset class.
 
-<<<<<<< HEAD
         Parameters
         ----------
         conf_args : Namespace
@@ -447,9 +437,6 @@ class MODISLeadmapDataset(DCDataset):
         save_after_preprocess : bool, optional
             Controls whether to save the results of preprocessing to the disk,
             by default False.
-        lazy_load : bool, optional
-            Whether to load the data to memory instantly or to wait until it is
-            necessary for computation, by default True.
         file_format : str, optional
             Format in which to save the preprocessed samples, by default 'netcdf'.
         """
@@ -460,9 +447,11 @@ class MODISLeadmapDataset(DCDataset):
                 )
         
         super().__init__(
-            conf_args, root_data_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         if isinstance(list_dates[0], np.datetime64):
             self.list_dates = list_dates
@@ -546,7 +535,6 @@ class AMSR2Dataset(DCDataset):
         root_data_dir: str | None = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         """
@@ -567,9 +555,6 @@ class AMSR2Dataset(DCDataset):
         save_after_preprocess : bool, optional
             Controls whether to save the results of preprocessing to the disk,
             by default False.
-        lazy_load : bool, optional
-            Whether to load the data to memory instantly or to wait until it is
-            necessary for computation, by default True.
         file_format : str, optional
             Format in which to save the preprocessed samples, by default 'netcdf'.
         
@@ -589,9 +574,11 @@ class AMSR2Dataset(DCDataset):
                 )
         
         super().__init__(
-            conf_args, root_data_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         if isinstance(list_dates[0], np.datetime64):
             self.list_dates = list_dates
@@ -627,7 +614,6 @@ class IABPDataset(DCDataset):
         root_data_dir: str | None = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         """
@@ -648,9 +634,6 @@ class IABPDataset(DCDataset):
         save_after_preprocess : bool, optional
             Controls whether to save the results of preprocessing to the disk,
             by default False.
-        lazy_load : bool, optional
-            Whether to load the data to memory instantly or to wait until it is
-            necessary for computation, by default True.
         file_format : str, optional
             Format in which to save the preprocessed samples, by default 'netcdf'.
         
@@ -665,9 +648,11 @@ class IABPDataset(DCDataset):
                 )
         
         super().__init__(
-            conf_args, root_data_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         if isinstance(list_dates[0], np.datetime64):
             self.list_dates = list_dates
@@ -689,7 +674,6 @@ class IABPDataset(DCDataset):
 
     def get_date(self, index: int) -> np.datetime64:
         return self.list_dates[index]
-=======
 
 class FTPDataset(DCDataset):
     """Class to manage data from FTP servers."""
@@ -792,4 +776,3 @@ class IfremerFTPDataset(FTPDataset):
             (str): timestamp of the data
         """
         return get_time_info(self.files_list[index])
->>>>>>> main
