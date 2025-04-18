@@ -75,7 +75,7 @@ def create_glorys_ndays_forecast(
         for fname in list_nc_files:
             #print('File name Mercator:', fname)
             fpath = os.path.join(nc_path, fname)
-            tmp_ds = FileLoader.lazy_load_dataset(fpath, exception_handler)
+            tmp_ds = FileLoader.lazy_load_dataset(fpath, exception_handler, dclogger)
             #print('File path Mercator:', fpath)
             tmp_ds = transform_fct(tmp_ds)
             #print(f"assigning coordinate time: {tmp_ds}")
@@ -107,7 +107,7 @@ def create_glorys_ndays_forecast(
             #print("Closing dataset")
             time_step += 1
 
-        glorys_data = FileLoader.lazy_load_dataset(zarr_path, exception_handler)
+        glorys_data = FileLoader.lazy_load_dataset(zarr_path, exception_handler, dclogger)
 
     except Exception as e:
         exception_handler.handle_exception(

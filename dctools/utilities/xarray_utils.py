@@ -4,12 +4,15 @@
 """Misc. functions to aid in the processing xr.Datasets and DataArrays."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import cftime
 import numpy as np
+import pandas as pd
 from pathlib import Path
 import xarray as xr
 import xesmf as xe
+
 
 # Possible names of coordinates that we want to check for
 LATITUDE_NAMES = ["lat", "latitude", "LAT", "LATITUDE"]
@@ -108,6 +111,15 @@ def create_coords_rename_dict(ds: xr.Dataset):
     }
     return dict_rename
 
+def standard_rename_coords(ds: xr.Dataset):
+    """Rename coordinates to standard names."""
+    dict_rename = create_coords_rename_dict(ds)
+    # Remove None values from the dictionary
+    dict_rename = {k: v for k, v in dict_rename.items() if v is not None}
+    # Rename coordinates
+    ds = rename_coordinates(ds, dict_rename)
+    return ds
+
 def rename_coordinates(ds: xr.Dataset, rename_dict):
     """Rename coordinates according to a given dictionary."""
     return ds.rename(rename_dict)
@@ -175,3 +187,188 @@ def get_glonet_time_attrs(start_date: str):
         'units': f"days since {start_date} 00:00:00", 'calendar': "proleptic_gregorian"
     }
     return glonet_time_attrs
+
+def get_vars_dims(ds: xr.Dataset) -> Tuple[List[str]]:
+    """
+    Get the variables and their dimensions from an xarray dataset.
+    """
+    vars_2d = []
+    vars_3d = []
+    for var in ds.data_vars:
+        # dims = list(ds[var].dims)
+        dict_coords = get_grid_coord_names(ds[var])
+
+        if "lat" in dict_coords and "lon" in dict_coords:
+            if "depth" not in dict_coords:
+                vars_2d.append(var)
+            else:
+                vars_3d.append(var)
+    return (vars_2d, vars_3d)
+
+def get_time_info(ds: xr.Dataset):
+    """
+    Analyze the main time axis of an xarray Dataset.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset to analyze.
+
+    Returns
+    -------
+    dict
+        A dictionary containing:
+        - start: the earliest timestamp (pandas.Timestamp or string from attributes)
+        - end: the latest timestamp
+        - duration: the time range duration (if computable)
+        - calendar: the calendar used (if specified)
+    """
+    # Step 1: Try to find a valid time coordinate
+    for name in ds.coords:
+        if name.lower() in {"time", "t", "date", "datetime"}:
+            time_coord = ds.coords[name]
+            calendar = time_coord.attrs.get("calendar", "standard")
+
+            # Case 1: Already decoded to datetime-like values
+            if np.issubdtype(time_coord.dtype, np.datetime64) or isinstance(time_coord.values[0], cftime.DatetimeBase):
+                times = pd.to_datetime(time_coord.values)
+                break
+
+            # Case 2: Try decoding from CF metadata
+            units = time_coord.attrs.get("units")
+            if units:
+                try:
+                    decoded_time = xr.decode_cf(xr.Dataset({name: time_coord}))[name]
+                    times = pd.to_datetime(decoded_time.values)
+                    break
+                except Exception as exc:
+                    print(f"Error decoding time axis: {exc}")
+                    continue
+    else:
+        # Step 2 fallback: Use global attributes
+        start = ds.attrs.get("time_coverage_start")
+        end = ds.attrs.get("time_coverage_end")
+        duration = None
+        if start and end:
+            try:
+                parsed_start = pd.to_datetime(start)
+                parsed_end = pd.to_datetime(end)
+                duration = parsed_end - parsed_start
+            except Exception:
+                pass
+        return {
+            "start": start,
+            "end": end,
+            "duration": duration,
+            "calendar": None
+        }
+
+    # Step 3: Extract times and compute
+    if len(times) == 0:
+        return {
+            "start": None,
+            "end": None,
+            "duration": None,
+            "calendar": calendar
+        }
+
+    start = times.min()
+    end = times.max()
+    duration = end - start
+
+    return {
+        "start": start,
+        "end": end,
+        "duration": duration,
+        "calendar": calendar
+    }
+
+def filter_time_interval(ds: xr.Dataset, start_time: str, end_time: str) -> xr.Dataset:
+    """
+    Filters an xarray Dataset to only include data within a specified time range.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset containing time coordinates.
+    start_time : str
+        The start time in ISO format (e.g., "2024-05-02").
+    end_time : str
+        The end time in ISO format (e.g., "2024-05-11").
+
+    Returns
+    -------
+    xr.Dataset
+        A filtered dataset containing only data within the time range.
+        Returns None if no data is within the time range.
+    """
+    # Step 1: Analyze the time axis
+    time_info = get_time_info(ds)
+    
+    # Convert start and end times to pandas Timestamp
+    start_time = pd.to_datetime(start_time)
+    end_time = pd.to_datetime(end_time)
+
+    # Step 2: Check if the time axis is present and valid
+    if time_info["start"] is None or time_info["end"] is None:
+        print("No valid time axis found.")
+        return None
+
+    # Step 3: Filter the time coordinate within the given interval
+    time_coord = ds.coords["time"]
+    mask = (time_coord >= start_time) & (time_coord <= end_time)
+
+    # If no data falls within the time range, return None
+    if mask.sum() == 0:
+        print("No data found in the specified time interval.")
+        return None
+
+    # Step 4: Return the filtered dataset
+    return ds.sel(time=mask)
+
+def filter_spatial_area(
+    ds: xr.Dataset,
+    lat_min: float, lat_max: float,
+    lon_min: float, lon_max: float
+) -> xr.Dataset:
+    """
+    Filters an xarray Dataset to only include data within a specified spatial area.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset containing latitude and longitude coordinates.
+    lat_min : float
+        Minimum latitude.
+    lat_max : float
+        Maximum latitude.
+    lon_min : float
+        Minimum longitude.
+    lon_max : float
+        Maximum longitude.
+
+    Returns
+    -------
+    xr.Dataset
+        A filtered dataset containing only data within the specified spatial area.
+        Returns None if no data is within the area.
+    """
+    # Step 1: Check if latitude and longitude coordinates exist
+    if "latitude" not in ds.coords or "longitude" not in ds.coords:
+        print("Latitude or longitude coordinates not found in the dataset.")
+        return None
+
+    # Step 2: Apply the spatial filter
+    lat_coord = ds.coords["latitude"]
+    lon_coord = ds.coords["longitude"]
+    
+    lat_mask = (lat_coord >= lat_min) & (lat_coord <= lat_max)
+    lon_mask = (lon_coord >= lon_min) & (lon_coord <= lon_max)
+
+    # Step 3: Filter the dataset using the masks
+    if lat_mask.sum() == 0 or lon_mask.sum() == 0:
+        print("No data found in the specified spatial area.")
+        return None
+
+    # Step 4: Return the filtered dataset
+    return ds.sel(latitude=lat_mask, longitude=lon_mask)

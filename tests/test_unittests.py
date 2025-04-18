@@ -136,3 +136,56 @@ def test_regrid_data(setup_data, setup_logger):
     assert "temperature" in gridded_ds.variables
     assert gridded_ds.sizes["lon"] == 360
     assert gridded_ds.sizes["lat"] == 180
+
+
+'''
+from dctools.utilities.xarray_utils import filter_spatial_area, filter_time_interval
+
+def test_filter_spatial_area_with_valid_data():
+    # Create a sample dataset with latitude and longitude coordinates
+    lat = [10, 20, 30]
+    lon = [100, 110, 120]
+    data = xr.DataArray([[1, 2, 3], [4, 5, 6], [7, 8, 9]], coords=[lat, lon], dims=["lat", "lon"])
+    ds = xr.Dataset({"data": data})
+
+    # Filter the dataset for a specific spatial area
+    result = filter_spatial_area(ds, 15, 25, 105, 115)
+
+    assert result is not None
+    assert result["data"].shape == (1, 1)  # Only one point should be in the specified area
+
+def test_filter_spatial_area_no_data():
+    # Create a sample dataset with latitude and longitude coordinates
+    lat = [10, 20, 30]
+    lon = [100, 110, 120]
+    data = xr.DataArray([[1, 2, 3], [4, 5, 6], [7, 8, 9]], coords=[lat, lon], dims=["lat", "lon"])
+    ds = xr.Dataset({"data": data})
+
+    # Filter the dataset for a spatial area that doesn't match any data
+    result = filter_spatial_area(ds, 35, 45, 125, 135)
+
+    assert result is None  # Should return None as no data matches
+
+def test_filter_time_interval_with_valid_data():
+    # Create a sample dataset with a time coordinate
+    times = pd.date_range("2024-05-02", periods=10, freq="D")
+    data = xr.DataArray(range(10), coords=[times], dims=["time"])
+    ds = xr.Dataset({"data": data})
+
+    # Filter the dataset for a specific time range
+    result = filter_time_interval(ds, "2024-05-04", "2024-05-06")
+
+    assert result is not None
+    assert result["data"].shape[0] == 3  # Should have 3 time steps
+
+def test_filter_time_interval_no_data():
+    # Create a sample dataset with a time coordinate
+    times = pd.date_range("2024-05-02", periods=10, freq="D")
+    data = xr.DataArray(range(10), coords=[times], dims=["time"])
+    ds = xr.Dataset({"data": data})
+
+    # Filter the dataset for a time range that doesn't match any data
+    result = filter_time_interval(ds, "2024-06-01", "2024-06-10")
+
+    assert result is None  # Should return None as no data matches
+'''

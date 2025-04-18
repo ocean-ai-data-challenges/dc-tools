@@ -40,7 +40,7 @@ class DataSaver:
                 dclogger.info(
                     f"Saving dataset in zarr format: {file_path}"
                 )
-                if "append_dim" in kwargs:
+                if kwargs["append_dim"] is not None and len(kwargs["append_dim"]) > 0:
                     # Append to existing zarr file
                     ds.to_zarr(
                         store=file_path,

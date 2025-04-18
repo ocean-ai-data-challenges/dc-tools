@@ -20,8 +20,6 @@ class MetricComputer(OceanbenchMetrics):
         self, ref_data: xr.Dataset, pred_data: xr.Dataset
     ):
         try:
-            #metric_name = self.get_metric_name()
-
             result = self.compute_metric(
                 ref_data,
                 pred_data,
