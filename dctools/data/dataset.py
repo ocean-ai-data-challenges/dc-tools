@@ -59,10 +59,6 @@ class DCDataset(ABC):
     def get_date(self, index: int):
         pass
 
-    #@abstractmethod
-    #def get_labels(self, index: int):
-    #    pass
-
     def preprocess_data(self, dataset):
         if self.transform_fct is not None:
             # preprocess dataset
@@ -339,11 +335,6 @@ class S3Dataset(DCDataset):
 
     @abstractmethod
     def get_data(self, index: int):
-        """Download glonet forecast file from Edito.
-
-        Args:
-            index (int): index of the date to download.
-        """
         pass
 
     def upload_data(self, filepath: str, dest_bucket: str, dest_key: str) -> None:
@@ -354,23 +345,6 @@ class S3Dataset(DCDataset):
         self.args.dclogger.info("Close S3 client.")
         self.s3_client.close()
 
-
-"""import fsspec
-import xarray as xr
-
-s3_mapper = fsspec.get_mapper(
-            "s3://ppr-ocean-climat/DC3/IABP/LEVEL1_2023.zarr",
-            client_kwargs = {
-                "aws_access_key_id": <ta clé>,
-                "aws_secret_access_key": <ta clé secrète>,
-                "endpoint_url": "https://s3.eu-west-2.wasabisys.com",
-                }
-            )
-
-xr.open_dataset(
-    s3_mapper,
-    engine="zarr"
-    )"""
 
 class GlonetDataset(S3Dataset):
     """Class to manage forecasts from Glonet models."""
@@ -413,10 +387,6 @@ class GlonetDataset(S3Dataset):
         start_date = self.list_dates[index]
         glonet_filename = start_date + '.nc'
         local_file_path = os.path.join(self.root_data_dir, glonet_filename)
-        """print(f"start_date: {start_date}")
-        print(f"local_file_path: {local_file_path}")
-        print(f"glonet_filename: {glonet_filename}")
-        print(f"self.list_dates: {self.list_dates}")"""
         glonet_s3_filepath = os.path.join(
             self.s3_folder,
             glonet_filename
@@ -434,9 +404,6 @@ class GlonetDataset(S3Dataset):
         )
         return glonet_data
 
-    def close_all(self):
-        self.args.dclogger.info("Close S3 client.")
-        self.s3_client.close()
 
 class FTPDataset(DCDataset):
     """Class to manage data from FTP servers."""
@@ -470,7 +437,6 @@ class FTPDataset(DCDataset):
         """Create a list of files to download from the FTP server."""
         self.ftp_manager.init_ftp()
         self.files_list = self.ftp_manager.get_files_list()
-        #self.ftp_manager.close_ftp()
 
     def __len__(self):
         """Get the number of files in the FTP server.
@@ -493,7 +459,6 @@ class FTPDataset(DCDataset):
         """Close the FTP server connection."""
         self.ftp_manager.close_ftp()
         self.args.dclogger.info("Close FTP connection.")
-        #self.ftp_manager.close_ftp()
 
 class IfremerFTPDataset(FTPDataset):
     """Class to manage data from Ifremer FTP servers."""

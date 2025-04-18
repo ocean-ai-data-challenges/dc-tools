@@ -45,7 +45,7 @@ class FileLoader:
         Returns
         -------
         xr.Dataset | None
-            Loaded Xarray Dataset, or None if error while loading and `fail_on_error = True`
+            Loaded Xarray Dataset, or None if error while loading and `fail_on_error = True`.
 
         Raises
         ------
