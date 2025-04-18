@@ -3,12 +3,11 @@ from abc import ABC, abstractmethod
 from argparse import Namespace
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
-
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
-import dask
+from typing import (
+    Any, Callable, Dict, Iterable, List,
+    Mapping, Optional, Tuple, Union
+)
+# import dask
 
 # from torchgeo.datasets import Landsat
 import xarray as xr
@@ -16,12 +15,12 @@ import xarray as xr
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
 from dctools.processing.cmems_data import create_glorys_ndays_forecast
-from dctools.processing.gridded_data import GriddedDataProcessor
-from dctools.utilities.errors import DCExceptionHandler
-from dctools.utilities.file_utils import  get_list_filter_files, remove_listof_files
+# from dctools.processing.gridded_data import GriddedDataProcessor
+# from dctools.utilities.errors import DCExceptionHandler
+from dctools.utilities.file_utils import  get_list_filter_files #, remove_listof_files
 from dctools.utilities.misc_utils import get_dates_from_startdate
-from dctools.utilities.net_utils import download_s3_file, CMEMSManager, FTPManager
-from dctools.utilities.xarray_utils import rename_coordinates, rename_variables, DICT_RENAME_CMEMS
+from dctools.utilities.net_utils import CMEMSManager, FTPManager, S3Manager
+from dctools.utilities.xarray_utils import get_time_info #rename_coordinates, rename_variables, DICT_RENAME_CMEMS
 
 class DCDataset(ABC):
     """Data challenge custom dataset."""
@@ -38,11 +37,11 @@ class DCDataset(ABC):
         """
         Arguments:
             list_files (string): Path to the csv file with annotations.
-            root_dir (string): Directory with all the images.
+            root_data_dir (string): Directory with all the images.
                 on a sample.
         """
         self.args = conf_args
-        self.root_dir = root_data_dir
+        self.root_data_dir = root_data_dir
         self.transform_fct = transform_fct
         self.dclogger = conf_args.dclogger
         self.exception_handler = conf_args.exception_handler
@@ -80,7 +79,7 @@ class DCDataset(ABC):
             if self.save_after_preprocess:
                 file_extension = '.nc' if self.file_format == 'netcdf' else '.zarr'
                 filename = self.get_date(index) + file_extension
-                dataset_filepath = os.path.join(self.root_dir, filename)
+                dataset_filepath = os.path.join(self.root_data_dir, filename)
                 if not os.path.isfile(dataset_filepath):
                     self.args.dclogger.info(f"Save dataset to file: {dataset_filepath}")
                     DataSaver.save_dataset(
@@ -303,14 +302,16 @@ class CmemsGlorysDataset(CmemsDataset):
                     )
                 return glorys_data
 
-
-class GlonetDataset(DCDataset):
-    """Class to manage forecasts from Glonet models."""
+class S3Dataset(DCDataset):
+    """Class to manage datasets in S3 storage."""
     def __init__(
         self,
         conf_args: Namespace,
         root_data_dir: str,
         list_dates: List[str],
+        s3_url: str,
+        s3_access_key: str,
+        s3_bucket: Optional[str] = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
         lazy_load: bool = True,
@@ -323,12 +324,14 @@ class GlonetDataset(DCDataset):
         )
         self.list_dates = list_dates
         self.args = conf_args
-        self.s3_client = boto3.client(
-            "s3",
-            config=Config(signature_version=UNSIGNED),
-            endpoint_url=conf_args.glonet_base_url,
+        self.s3_bucket = s3_bucket
+        self.s3_manager = S3Manager(
+            conf_args.dclogger,
+            conf_args.exception_handler,
+            s3_url=s3_url,
+            s3_access_key=s3_access_key,
+            bucket_name=None,
         )
-
     def __len__(self):
         return len(self.list_dates)
 
@@ -338,6 +341,65 @@ class GlonetDataset(DCDataset):
 
     def get_date(self, index: int) -> str:
         return self.list_dates[index]
+
+    @abstractmethod
+    def get_data(self, index: int):
+        """Download glonet forecast file from Edito.
+
+        Args:
+            index (int): index of the date to download.
+        """
+        pass
+
+    def upload_data(self, filepath: str, dest_bucket: str, dest_key: str) -> None:
+        """Upload."""
+        self.s3_manager.upload_file(self, file_path=filepath, s3_key=dest_key, bucket_name=dest_bucket)
+
+    def close_all(self):
+        self.args.dclogger.info("Close S3 client.")
+        self.s3_client.close()
+
+
+"""import fsspec
+import xarray as xr
+
+s3_mapper = fsspec.get_mapper(
+            "s3://ppr-ocean-climat/DC3/IABP/LEVEL1_2023.zarr",
+            client_kwargs = {
+                "aws_access_key_id": <ta clé>,
+                "aws_secret_access_key": <ta clé secrète>,
+                "endpoint_url": "https://s3.eu-west-2.wasabisys.com",
+                }
+            )
+
+xr.open_dataset(
+    s3_mapper,
+    engine="zarr"
+    )"""
+
+class GlonetDataset(S3Dataset):
+    """Class to manage forecasts from Glonet models."""
+    def __init__(
+        self,
+        conf_args: Namespace,
+        root_data_dir: str,
+        list_dates: List[str],
+        s3_url: str,
+        s3_access_key: str,
+        s3_bucket: Optional[str] = None,
+        s3_folder: Optional[str] = None,
+        transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+        save_after_preprocess: bool = False,
+        lazy_load: bool = True,
+        file_format: Optional[str] = 'netcdf',
+    ):
+        super().__init__(
+            conf_args, root_data_dir, list_dates,
+            s3_url,s3_access_key, s3_bucket,
+            transform_fct, save_after_preprocess,
+            lazy_load, file_format,
+        )
+        self.s3_folder = s3_folder
 
     def get_data(self, index: int):
         """Download glonet forecast file from Edito.
@@ -351,23 +413,20 @@ class GlonetDataset(DCDataset):
         # get the start date of the forecast
         start_date = self.list_dates[index]
         glonet_filename = start_date + '.nc'
-        local_file_path = os.path.join(self.args.glonet_data_dir, glonet_filename)
+        local_file_path = os.path.join(self.root_data_dir, glonet_filename)
         """print(f"start_date: {start_date}")
         print(f"local_file_path: {local_file_path}")
         print(f"glonet_filename: {glonet_filename}")
         print(f"self.list_dates: {self.list_dates}")"""
         glonet_s3_filepath = os.path.join(
-            self.args.s3_glonet_folder,
+            self.s3_folder,
             glonet_filename
         )
         if not (Path(local_file_path).is_file()):
-            download_s3_file(
-                s3_client=self.s3_client,
-                bucket_name=self.args.glonet_s3_bucket,
-                file_name=glonet_s3_filepath,
-                local_file_path=local_file_path,
-                dclogger=self.args.dclogger,
-                exception_handler=self.args.exception_handler,
+            self.s3_manager.download_file(
+                s3_key=glonet_s3_filepath,
+                bucket_name=self.s3_bucket,
+                dest_path=local_file_path,
             )
         assert(Path(local_file_path).is_file())
         if self.lazy_load:
@@ -412,18 +471,12 @@ class FTPDataset(DCDataset):
         )
         self.root_data_dir = root_data_dir
         self.init_server()
-        # self.logged: bool = False
 
     def init_server(self):
         """Create a list of files to download from the FTP server."""
         self.ftp_manager.init_ftp()
-        #self.files_list = self.ftp_manager.get_files_list()
         self.files_list = self.ftp_manager.get_files_list()
-        #self.dclogger.info(f"files_list: {self.files_list}")
-
         #self.ftp_manager.close_ftp()
-        
-        #self.logged = True
 
     def __len__(self):
         """Get the number of files in the FTP server.
@@ -440,8 +493,6 @@ class FTPDataset(DCDataset):
         Returns:
             (str): date of the file
         """
-        #if not hasattr(self, 'file_dict'):
-        #    self.create_list_files()
         return self.files_list[index]['date']
 
     def close_all(self):
@@ -473,9 +524,10 @@ class IfremerFTPDataset(FTPDataset):
             ftp_user, ftp_pass,
         )
 
-    def get_data(self, index: int):
-        """Download ....
+    def get_data(self, index: int) -> xr.Dataset:
+        """Download the data
         Args:
+            index: index of the file in the dataset
         """
         downl_name = self.ftp_manager.download_file(index, self.root_data_dir)
         if self.lazy_load:
@@ -489,3 +541,12 @@ class IfremerFTPDataset(FTPDataset):
                 self.dclogger,
             )
         return dataset
+
+    def get_time(self, index):
+        """Get the timestamp of the data stored in a file at the given index.
+        Args:
+            index (int): index of the file
+        Returns:
+            (str): timestamp of the data
+        """
+        return get_time_info(self.files_list[index])

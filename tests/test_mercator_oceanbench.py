@@ -107,6 +107,10 @@ class TestOceanBench:
             conf_args=test_vars,
             root_data_dir= glonet_data_dir,
             list_dates=test_vars.list_glonet_start_dates,
+            s3_url=test_vars.glonet_base_url,
+            s3_access_key=None,
+            s3_bucket=test_vars.glonet_s3_bucket,
+            s3_folder=test_vars.s3_glonet_folder,
             transform_fct=None,
         )
 
@@ -144,14 +148,14 @@ class TestOceanBench:
             MetricComputer(
                 dc_logger=test_vars.dclogger,
                 exc_handler=test_vars.exception_handler,
-                metric_name='rmse', plot_result=True,
+                metric_name='rmse', plot_result=False,
             ),
 
             MetricComputer(
                 dc_logger=test_vars.dclogger,
                 exc_handler=test_vars.exception_handler,
                 metric_name='energy_cascad',
-                plot_result=True,
+                plot_result=False,
                 var="uo", depth=2,
             ),
         ]
@@ -160,7 +164,7 @@ class TestOceanBench:
                 dc_logger=test_vars.dclogger,
                 exc_handler=test_vars.exception_handler,
                 metric_name='euclid_dist',
-                plot_result=True,
+                plot_result=False,
                 minimum_latitude=0,
                 maximum_latitude=10,
                 minimum_longitude=0,

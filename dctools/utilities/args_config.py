@@ -4,7 +4,6 @@
 """Read config files and parse command-line arguments."""
 
 from argparse import ArgumentParser, Namespace
-import os
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -13,6 +12,13 @@ import yaml
 from dctools.dcio.dclogger import DCLogger
 from dctools.utilities.errors import DCExceptionHandler
 
+TIME_VARIABLES = [
+    "list_start_times",
+    "list_end_times",
+    "lead_time_start",
+    "lead_time_stop",
+    "lead_time_frequency",
+]
 
 def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     """Command-line argument parser.
@@ -23,7 +29,6 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     Returns:
         Namespace: Namespace with parsed args.
     """
-    #folder_base = os.path.join("/home", "k24aitmo", "IMT", "software", "dc-tools")
     parser = ArgumentParser()
     parser = ArgumentParser(description='Run DC1 Evaluation on Glorys data')
     parser.add_argument(
@@ -43,7 +48,6 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     parser.add_argument(
         '-j', '--jsonfile', type=str,
         help="File where to store results.",
-        #default=os.path.join(folder_base, "tests", "logs", "result_logs.json")
     ),
     parser.add_argument(
         '-m', '--metric', type=str,
@@ -72,12 +76,11 @@ def load_configs(
     """
     try:
         with open(config_filepath, 'r') as fp:
-            #print(f"OPEN FILE: {config_filepath}")
             config = yaml.safe_load(fp)
-            if('list_glonet_start_dates' in config.keys()):
-                list_dates = config['list_glonet_start_dates'].split(',')
-                config['list_glonet_start_dates'] = list_dates
-            #print(f"CONFIG: {config}")
+            for time_var in TIME_VARIABLES:
+                if time_var in config.keys():
+                    config[time_var] = config[time_var]
+            print(f"LOADED CONFIG: {config}")
     except Exception as err:
         exception_handler.handle_exception(
             err,
@@ -98,7 +101,6 @@ def load_args_and_config(
         args(Namespace): a Namespace with variables from config file and command-line 
     """
     try:
-        #print("ENTER CONF")
         # init logger and exception handler
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger_instance = DCLogger(
@@ -126,7 +128,6 @@ def load_args_and_config(
             config = load_configs(config_filepath, exception_handler)
             for key, value in config.items():
                 vars(args)[key] = value
-        #print('LOAD CONF OK')
         return args
     except Exception as err:
         print(f"App configuration has failed with error: {err}.")
