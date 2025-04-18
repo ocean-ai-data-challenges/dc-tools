@@ -31,7 +31,6 @@ class DCDataset(ABC):
         root_data_dir: str,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         """
@@ -46,7 +45,6 @@ class DCDataset(ABC):
         self.dclogger = conf_args.dclogger
         self.exception_handler = conf_args.exception_handler
         self.save_after_preprocess = save_after_preprocess
-        self.lazy_load = lazy_load
         self.file_format = file_format
 
     @abstractmethod
@@ -109,13 +107,14 @@ class DCEmptyDataset(DCDataset):
         list_dates: List[str],
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         super().__init__(
-            conf_args, root_data_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         self.list_dates = list_dates
 
@@ -141,13 +140,14 @@ class CmemsDataset(DCDataset):
         list_dates: List[str],
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         super().__init__(
-            conf_args, root_data_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         self.cmems_manager = CMEMSManager(
             conf_args.dclogger, conf_args.exception_handler
@@ -199,15 +199,15 @@ class CmemsGlorysDataset(CmemsDataset):
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         file_extension: str = '.zarr',
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'zarr',
     ):
         super().__init__(
-            conf_args, root_data_dir,
-            cmems_product_name, list_dates,
+            conf_args,
+            root_data_dir,
+            cmems_product_name,
+            list_dates,
             transform_fct=None,
             save_after_preprocess=save_after_preprocess,
-            lazy_load=lazy_load,
             file_format=file_format,
         )
         self.args = conf_args
@@ -308,13 +308,14 @@ class S3Dataset(DCDataset):
         s3_bucket: Optional[str] = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         super().__init__(
-            conf_args, root_data_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         self.list_dates = list_dates
         self.args = conf_args
@@ -384,14 +385,18 @@ class GlonetDataset(S3Dataset):
         s3_folder: Optional[str] = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
     ):
         super().__init__(
-            conf_args, root_data_dir, list_dates,
-            s3_url,s3_access_key, s3_bucket,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            list_dates,
+            s3_url,
+            s3_access_key,
+            s3_bucket,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         self.s3_folder = s3_folder
 
@@ -443,15 +448,16 @@ class FTPDataset(DCDataset):
         ftp_dir: str,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
         ftp_user: Optional[str] = "anonymous",
         ftp_pass: Optional[str] = "",
     ):
         super().__init__(
-            conf_args, root_data_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
+            conf_args,
+            root_data_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
         )
         self.ftp_manager = FTPManager(
             conf_args.dclogger, conf_args.exception_handler,
@@ -499,17 +505,20 @@ class IfremerFTPDataset(FTPDataset):
         ftp_dir: str,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
-        lazy_load: bool = True,
         file_format: Optional[str] = 'netcdf',
         ftp_user: Optional[str] = "anonymous",
         ftp_pass: Optional[str] = "",
     ):
         super().__init__(
-            conf_args, root_data_dir,
-            ftp_hostname, ftp_dir,
-            transform_fct, save_after_preprocess,
-            lazy_load, file_format,
-            ftp_user, ftp_pass,
+            conf_args,
+            root_data_dir,
+            ftp_hostname,
+            ftp_dir,
+            transform_fct,
+            save_after_preprocess,
+            file_format,
+            ftp_user,
+            ftp_pass,
         )
 
     def get_data(self, index: int) -> xr.Dataset:
