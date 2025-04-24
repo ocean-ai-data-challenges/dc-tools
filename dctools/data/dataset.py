@@ -24,6 +24,9 @@ from dctools.utilities.misc_utils import get_dates_from_startdate
 from dctools.utilities.net_utils import CMEMSManager, FTPManager, S3Manager
 from dctools.utilities.xarray_utils import get_time_info #rename_coordinates, rename_variables, DICT_RENAME_CMEMS
 
+IABP_DATA_ENDPOINT_URL = "https://s3.eu-west-2.wasabisys.com/"
+IABP_DATA_BUCKET = "ppr-ocean-climat"
+
 class DCDataset(ABC):
     """Data challenge custom dataset."""
 
@@ -332,9 +335,6 @@ class S3Dataset(DCDataset):
         labels = None
         return labels
 
-    def get_date(self, index: int) -> str:
-        return self.list_dates[index]
-
     @abstractmethod
     def get_data(self, index: int):
         pass
@@ -471,10 +471,6 @@ class MODISLeadmapDataset(DCDataset):
             
         self.data_cache = {}
 
-    
-    def __len__(self):
-        return len(self.list_dates)
-
     def get_data(self, index: int):
         date = self.get_date(index)
         
@@ -587,10 +583,6 @@ class AMSR2Dataset(DCDataset):
             
         self.data_cache = {}
 
-    
-    def __len__(self):
-        return len(self.list_dates)
-
     def get_data(self, index: int):
         date = self.get_date(index).item()
         
@@ -603,7 +595,7 @@ class AMSR2Dataset(DCDataset):
         return self.list_dates[index]
 
 
-class IABPDataset(DCDataset):
+class IABPDataset(S3Dataset):
     """
     Class to manage IABP ice buoy data.
     """
@@ -611,13 +603,16 @@ class IABPDataset(DCDataset):
         self,
         conf_args: Namespace,
         list_dates: List[str | np.datetime64],
+        s3_endpoint_url: str = IABP_DATA_ENDPOINT_URL,
+        s3_access_key: str | None = None,
+        s3_bucket: str = IABP_DATA_BUCKET,
         root_data_dir: str | None = None,
         transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
         save_after_preprocess: bool = False,
         file_format: Optional[str] = 'netcdf',
     ):
         """
-        Init method for the AMSR2Dataset class.
+        Init method for the IABPDataset class.
 
         Parameters
         ----------
@@ -660,10 +655,6 @@ class IABPDataset(DCDataset):
             self.list_dates = [np.datetime64(date, "D") for date in list_dates]
             
         self.data_cache = {}
-
-    
-    def __len__(self):
-        return len(self.list_dates)
 
     def get_data(self, index: int):
         # Get date
