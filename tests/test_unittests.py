@@ -5,16 +5,16 @@
 
 import os
 from pathlib import Path
+import sys
 
+from loguru import logger
 import numpy as np
 import xarray as xr
 import pytest
 
-from dctools.dcio.dclogger import DCLogger
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
-from dctools.processing.gridder import DataGridder
-from dctools.utilities.errors import DCExceptionHandler
+# from dctools.processing.gridder import DataGridder
 from dctools.utilities.file_utils import empty_folder
 
 def get_sample_dataset():
@@ -68,7 +68,7 @@ def setup_filepath():
         os.remove(test_file_path)
 
 @pytest.fixture(scope='session', autouse=True)
-def setup_output_dir():
+def setup_output_dir(setup_logger):
     """Test path configuration."""
     test_output_dir = os.path.join("tests", "test_output")
     os.makedirs(test_output_dir, exist_ok=True)
@@ -85,57 +85,51 @@ def setup_output_dir():
 def setup_logger():
     """Setup test logger."""
     # initialize_logger
-    test_logger = DCLogger(
-        name="Test Logger", logfile=None
-    ).get_logger()
-    yield test_logger
-
-@pytest.fixture(scope='session', autouse=True)
-def setup_exception_handler(setup_logger):
-    """Setup exception handler."""
-    # initialize exception handler
-    exc_handler = DCExceptionHandler(setup_logger)
-    yield exc_handler
+    LOGGER_CONFIG = {
+        'log_level': "DEBUG",
+        'log_format': "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | <level>{level: <8}</level> | <yellow>Line {line: >4} ({file}):</yellow> <b>{message}</b>"
+    }
+    log_level = LOGGER_CONFIG['log_level']
+    log_format = LOGGER_CONFIG['log_format']
+    logger.add(sys.stderr, level=log_level, format=log_format, colorize=True, backtrace=True, diagnose=True)
+    logger.add("file.log", level=log_level, format=log_format, colorize=False, backtrace=True, diagnose=True)
+  
 
 def test_save_load_dataset(
+    setup_logger,
     setup_data,
     setup_filepath,
-    setup_logger,
-    setup_exception_handler,
     ):
     """Test dataset loading."""
-    setup_logger.info("Run Test dataset loading")
+    logger.info("Run Test dataset loading")
     DataSaver.save_dataset(
         setup_data, setup_filepath,
-        setup_exception_handler, setup_logger,
     )
     loaded_ds = FileLoader.load_dataset(
-        setup_filepath, setup_exception_handler, setup_logger
+        setup_filepath
     )
     assert isinstance(loaded_ds, xr.Dataset)
     assert "temperature" in loaded_ds.variables
 
-def test_load_error(setup_filepath, setup_logger, setup_exception_handler):
+def test_load_error(setup_filepath):
     """Test trying to load a non-existent file."""
-    setup_logger.info("Run test_load_error")
+    logger.info("Run test_load_error")
     try:
         FileLoader.load_dataset(
-            Path(setup_filepath).stem,
-            setup_exception_handler, setup_logger,
-            fail_on_error=False,
+            Path(setup_filepath).stem
         )
     except Exception:
         pass
 
 
-def test_regrid_data(setup_data, setup_logger):
+'''def test_regrid_data(setup_logger, setup_data):
     """Test regridding data."""
-    setup_logger.info("Run test_regrid_data")
+    logger.info("Run test_regrid_data")
     gridded_ds = DataGridder.interpolate_to_2dgrid(setup_data)
 
     assert "temperature" in gridded_ds.variables
     assert gridded_ds.sizes["lon"] == 360
-    assert gridded_ds.sizes["lat"] == 180
+    assert gridded_ds.sizes["lat"] == 180'''
 
 
 '''

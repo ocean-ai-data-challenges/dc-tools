@@ -6,8 +6,8 @@ import psutil
 
 import dask
 from dask.distributed import Client, LocalCluster #, LocalCUDACluster
+from loguru import logger
 
-import torch
 
 # Détection automatique du nombre de workers
 def get_optimal_workers():
@@ -54,7 +54,7 @@ def setup_dask(args: Namespace):
                         #memory_target_fraction=0.5,
                         memory_limit=memory_limit)
     
-    args.dclogger.info(f"Dask tourne sur CPU avec {num_workers} workers et {memory_limit} de mémoire")
+    logger.info(f"Dask tourne sur CPU avec {num_workers} workers et {memory_limit} de mémoire")
 
 
     return cluster
