@@ -142,7 +142,6 @@ def interpolate_dataset(
     if weights_filepath and Path(weights_filepath).is_file():
         # Use precomputed weights
         logger.info(f"Using precomputed weights from {weights_filepath}")
-
         regridder = xe.Regridder(
             ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
         )

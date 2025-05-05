@@ -13,7 +13,7 @@ glorys_cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
 glonet_n_days_forecast: 10
 
 glonet_local_dir: "/home/k24aitmo/IMT/software/tests/Glonet"
-max_samples: 2
+max_samples: 10
 ###########################################
 ## List of start time for TC events
 start_times:
@@ -55,7 +55,7 @@ min_lon: -10
 max_lon: 10
 
 # Path to catalog file
-catalog_path: "data/catalog.parquet"
+catalog_path: ""
 
 # Datasets
 datasets:
@@ -80,6 +80,9 @@ sources:
     scanner: scanners.cmems_scanner
     
 # Wasabi S3 storage info
-s3_key_id: 
-s3_access_key: 
-s3_url: "https://s3.eu-west-2.wasabisys.com"
+wasabi_bucket: "ppr-ocean-climat"
+wasabi_glonet_folder: "DC1/Glonet_forecast"
+wasabi_key: "EG5GYSEYI5C20O6IHNEJ"
+wasabi_secret_key: "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
+wasabi_endpoint_url: "https://s3.eu-west-2.wasabisys.com"
+

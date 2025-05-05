@@ -96,8 +96,10 @@ class FTPConnectionConfig(BaseConnectionConfig):
 
 class S3ConnectionConfig(BaseConnectionConfig):
     def __init__(
-        self, local_root: str,
-        bucket: str, bucket_folder: str,
+        self,
+        local_root: str,
+        bucket: str,
+        bucket_folder: str,
         key: Optional[str] = None,
         secret_key: Optional[str] = None,
         endpoint_url: Optional[str] = None,
@@ -114,7 +116,8 @@ class S3ConnectionConfig(BaseConnectionConfig):
             "s3", local_root=local_root,
             bucket=bucket,
             bucket_folder=bucket_folder,
-            key=key, secret=secret_key,
+            key=key, secret_key=secret_key,
+            endpoint_url=endpoint_url,
             fs=fs, max_samples=max_samples,
         )
 
@@ -122,13 +125,37 @@ class S3ConnectionConfig(BaseConnectionConfig):
     #    return self.params
 
 
+class WasabiS3ConnectionConfig(S3ConnectionConfig):
+    def __init__(
+        self,
+        local_root: str,
+        bucket: str,
+        bucket_folder: str,
+        key: Optional[str] = None,
+        secret_key: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+        max_samples: Optional[int] = None,
+    ):
+        super().__init__(
+            local_root=local_root,
+            bucket=bucket,
+            bucket_folder=bucket_folder,
+            key=key, secret_key=secret_key,
+            endpoint_url=endpoint_url,
+            max_samples=max_samples,
+        )
+
 class GlonetConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
         local_root: str,
+        endpoint_url: str,
         max_samples: Optional[int] = None,
     ):
+        client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
+        fs = fsspec.filesystem('s3', anon=True, client_kwargs=client_kwargs)
+
         super().__init__(
             "s3", local_root=local_root,
-            fs=None, max_samples=max_samples,
+            fs=fs, max_samples=max_samples,
         )

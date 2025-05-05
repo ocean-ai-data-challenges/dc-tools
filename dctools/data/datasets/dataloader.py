@@ -30,7 +30,7 @@ class EvaluationDataloader:
         ref_catalog: DatasetCatalog,
         pred_manager: BaseConnectionManager,
         ref_manager: BaseConnectionManager,
-        batch_size: int = 8,
+        batch_size: int = 1,
         pred_transform: Optional[CustomTransforms] = None,
         ref_transform: Optional[CustomTransforms] = None,
     ):
@@ -111,12 +111,17 @@ class EvaluationDataloader:
             logger.warning("No reference catalog provided. Skipping reference data.")
 
             for _, pred_entry in pred_df.iterrows():
-                pred_data = self.pred_manager.open(pred_entry["path"])
+                """pred_data = self.pred_manager.open(pred_entry["path"])
                 if self.pred_transform:
                     pred_data = self.pred_transform(pred_data)
                 entry = {
                     "date": pred_entry["date_start"],
                     "pred_data": pred_data,
+                    "ref_data": None,
+                }"""
+                entry = {
+                    "date": pred_entry["date_start"],
+                    "pred_data": pred_entry["path"],
                     "ref_data": None,
                 }
                 batch.append(entry)
@@ -129,7 +134,7 @@ class EvaluationDataloader:
         else:
             for ((_, pred_entry), (_, ref_entry)) in zip(pred_df.iterrows(), ref_df.iterrows()):
 
-                pred_data = self.pred_manager.open(pred_entry["path"])
+                """pred_data = self.pred_manager.open(pred_entry["path"])
                 ref_data = self.ref_manager.open(ref_entry["path"])
 
                 # Appliquer les transformations si elles sont définies
@@ -143,6 +148,11 @@ class EvaluationDataloader:
                     "date": pred_entry["date_start"],
                     "pred_data": pred_data,
                     "ref_data": ref_data,
+                }"""
+                entry = {
+                    "date": pred_entry["date_start"],
+                    "pred_data": pred_entry["path"],
+                    "ref_data": ref_entry["path"],
                 }
                 batch.append(entry)
 
@@ -154,6 +164,16 @@ class EvaluationDataloader:
             # Retourner le dernier lot s'il reste des éléments
             if batch:
                 yield batch
+
+    def open_pred(self, pred_entry: str) -> xr.Dataset:
+        pred_data = self.pred_manager.open(pred_entry)
+        return pred_data
+
+
+    def open_ref(self, ref_entry: str) -> xr.Dataset:
+        ref_data = self.pred_manager.open(ref_entry)
+        return ref_data
+
 
 
     '''def _find_matching_reference(self, pred_row: pd.Series) -> Optional[xr.Dataset]:

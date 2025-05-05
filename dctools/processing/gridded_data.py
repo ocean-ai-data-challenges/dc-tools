@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 import numpy as np
 import xarray as xr
 
-from dctools.utilities.xarray_utils import get_grid_coord_names, get_grid_dim_names
+from dctools.utilities.xarray_utils import get_grid_coord_names
 
 
 class GriddedDataProcessor:
@@ -88,7 +88,7 @@ class GriddedDataProcessor:
         """
         coarsen_dict = {}
         # Check dimension names
-        dim_name_dict = get_grid_dim_names(data)
+        dim_name_dict = get_grid_coord_names(data)
 
         temp = data
         if horizontal_window is not None:

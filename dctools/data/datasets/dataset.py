@@ -20,6 +20,7 @@ from dctools.data.connection.config import (
     LocalConnectionConfig,
     CMEMSConnectionConfig,
     S3ConnectionConfig,
+    WasabiS3ConnectionConfig,
     FTPConnectionConfig,
     GlonetConnectionConfig,
 )
@@ -29,6 +30,7 @@ from dctools.data.connection.connection_manager import (
     LocalConnectionManager,
     CMEMSManager,
     S3Manager,
+    S3WasabiManager,
     FTPManager,
     GlonetManager,
 )
@@ -39,6 +41,7 @@ class DatasetConfig:
         LocalConnectionConfig: LocalConnectionManager,
         CMEMSConnectionConfig: CMEMSManager,
         S3ConnectionConfig: S3Manager,
+        WasabiS3ConnectionConfig: S3WasabiManager,
         FTPConnectionConfig: FTPManager,
         GlonetConnectionConfig: GlonetManager,
     }
@@ -159,7 +162,7 @@ class BaseDataset(ABC):
             with open(local_path, 'wb') as local_file:
                 local_file.write(remote_file.read())
 
-    def load_item(self, index: int) -> xr.Dataset:
+    '''def load_item(self, index: int) -> xr.Dataset:
         """
         Charge un fichier en tant que dataset Xarray.
 
@@ -170,7 +173,7 @@ class BaseDataset(ABC):
             xr.Dataset: Dataset chargé.
         """
         path = self.get_path(index)
-        return FileLoader.open_dataset_auto(path, self.connection_manager)
+        return FileLoader.open_dataset_auto(path, self.connection_manager)'''
 
     def iter_data(self) -> Iterator[xr.Dataset]:
         """
@@ -180,7 +183,7 @@ class BaseDataset(ABC):
             xr.Dataset: Dataset chargé.
         """
         for idx in range(len(self._paths)):
-            yield self.load_item(idx)
+            yield self.load_data(idx)
 
 
     def build_catalog(self) -> gpd.GeoDataFrame:
@@ -246,7 +249,7 @@ class BaseDataset(ABC):
         self.catalog.filter_by_variables(variables)
         logger.info(f"Catalogue filtré avec succès pour les variables : {variables}")
 
-    def load_data(self, path: str) -> xr.Dataset:
+    def load_data(self, index: int) -> xr.Dataset:
         """
         Charge un dataset à partir d'un chemin.
 
@@ -256,6 +259,7 @@ class BaseDataset(ABC):
         Returns:
             xr.Dataset: Dataset chargé.
         """
+        path = self.get_path(index)
         return self.connection_manager.open(path)
 
     def catalog_is_empty(self) -> bool:
@@ -277,7 +281,7 @@ class BaseDataset(ABC):
         Returns:
             str: Représentation GeoJSON du catalogue.
         """
-        logger.info(f"DATASET.PY   Exporting catalog to GeoJSON at {path}")
+        logger.info(f"Exporting catalog to GeoJSON at {path}")
         return self.catalog.to_json(path)
 
 

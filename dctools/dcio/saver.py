@@ -4,10 +4,9 @@
 """Classes and functions for saving xarray datasets."""
 from typing import Any, Dict, Optional
 
+from loguru import logger
 import xarray as xr
 
-from dctools.dcio.dclogger import DCLogger
-from dctools.utilities.errors import DCExceptionHandler
 
 class DataSaver:
     """Saving datasets."""
@@ -16,8 +15,6 @@ class DataSaver:
     def save_dataset(
         ds: xr.Dataset,
         file_path: str,
-        exception_handler: DCExceptionHandler,
-        dclogger: DCLogger,
         **kwargs: Dict[str, Any]
     ) -> None:
         """Save a dataset in a NetCDF file.
@@ -32,12 +29,12 @@ class DataSaver:
         kwargs.update((k,v) for k,v in default_attrs.items() if k not in kwargs)
         try:
             if kwargs["file_format"] == "netcdf":
-                dclogger.info(
+                logger.info(
                     f"Saving dataset in netcdf format: {file_path}"
                 )
                 ds.to_netcdf(file_path, format="NETCDF4", engine="netcdf4")
             elif kwargs["file_format"] == "zarr":
-                dclogger.info(
+                logger.info(
                     f"Saving dataset in zarr format: {file_path}"
                 )
                 if kwargs["append_dim"] is not None and len(kwargs["append_dim"]) > 0:
@@ -55,11 +52,11 @@ class DataSaver:
             else:
                 raise ValueError(f"Unsupported file format: {kwargs["file_format"]}")
         except FileNotFoundError as error:
-            message = (f"File not found: {file_path}")
-            exception_handler.handle_exception(error, message)
+            message = (f"File not found: {file_path}: {repr(error)}")
+            logger.error(message)
         except PermissionError as error:
-            message = (f"Permission denied: {file_path}")
-            exception_handler.handle_exception(error, message)
+            message = (f"Permission denied: {file_path}: {repr(error)}")
+            logger.error(message)
         except Exception as error:
-            message = (f"Error when saving dataset to {file_path}")
-            exception_handler.handle_exception(error, message)
+            message = (f"Error when saving dataset to {file_path}: {repr(error)}")
+            logger.error(message)

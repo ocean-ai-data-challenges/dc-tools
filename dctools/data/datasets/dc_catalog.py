@@ -139,10 +139,10 @@ class DatasetCatalog:
             gpd.GeoDataFrame: GeoDataFrame filtré.
         """
         region = box(*bbox)
-        logger.debug(f"Filtering by bounding box: {bbox}")
+        """logger.debug(f"Filtering by bounding box: {bbox}")
         logger.debug(f"Region: {region}")
         logger.debug(f"Initial number of entries: {len(self.df)}")
-        logger.debug(f"Entries before filtering: {self.df}")
+        logger.debug(f"Entries before filtering: {self.df}")"""
         self.df = self.df[self.df.intersects(region)]
 
     def filter_by_variables(self, variables: List[str]) -> gpd.GeoDataFrame:

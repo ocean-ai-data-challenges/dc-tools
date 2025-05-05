@@ -45,10 +45,11 @@ class BaseConnectionManager(ABC):
             xr.Dataset: Opened dataset.
         """
         # Tenter d'ouvrir le fichier en local
-        dataset = self.open_local(path)
-        if dataset:
-            return dataset
-        # Tenter d'ouvrir le fichier en ligne via S3
+        if LocalConnectionManager.supports(path):
+            dataset = self.open_local(path)
+            if dataset:
+                return dataset
+        # Tenter d'ouvrir le fichier en ligne
         dataset = self.open_remote(path, mode)
         if dataset:
             return dataset
@@ -75,7 +76,7 @@ class BaseConnectionManager(ABC):
             Optional[xr.Dataset]: Opened dataset, or None if the file does not exist.
         """
         if Path(local_path).exists():
-            logger.info(f"Opening local file: {local_path}")
+            # logger.info(f"Opening local file: {local_path}")
             return FileLoader.load_dataset(local_path)
             # return open_dataset_auto(local_path, self)
         return None
@@ -92,7 +93,7 @@ class BaseConnectionManager(ABC):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            logger.info(f"Attempting to open remote file: {path}")
+            logger.info(f"Open remote file: {path}")
             return FileLoader.open_dataset_auto(path, self)
         except Exception as exc:
             logger.warning(f"Failed to open remote file: {path}. Error: {repr(exc)}")
@@ -426,7 +427,6 @@ class CMEMSManager(BaseConnectionManager):
                 dataset_id=self.params.dataset_id, create_file_list=tmp_filepath
             )
             self._files = read_file_tolist(tmp_filepath)
-            #logger.info(f"List of files: {self._files}")
             return self._files
         except Exception as exc:
             logger.error(f"Failed to list files from CMEMS: {repr(exc)}")
@@ -561,7 +561,7 @@ class S3Manager(BaseConnectionManager):
     def supports(cls, path: str) -> bool:
         return path.startswith("s3://")
 
-    def list_files(self, pattern: str = "*.nc") -> List[str]:
+    def list_files(self, pattern="*.zarr") -> List[str]:
         """
         List files matching the given pattern.
 
@@ -576,26 +576,29 @@ class S3Manager(BaseConnectionManager):
                 logger.info(f"Accessing bucket: {self.params.bucket}")
 
             # Construire le chemin distant
-            remote_path = f"{self.params.endpoint_url}/{self.params.bucket}/{self.params.bucket_folder}/"
+            remote_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}/{pattern}"
             logger.info(f"Listing files in: {remote_path}")
 
             # Utiliser fsspec pour accéder aux fichiers
-            fs = self.params.fs
-            files = fs.glob(f"{remote_path}{pattern}")
+            files = self.params.fs.glob(remote_path)
+            files_urls = [
+                f"s3://{file}"
+                for file in files
+            ]
 
-            if not files:
+            if not files_urls:
                 logger.warning(f"No files found in bucket: {self.params.bucket}")
-            return files
+            return files_urls
         except PermissionError as exc:
             logger.error(f"Permission error while accessing bucket: {repr(exc)}")
-            logger.info("Attempting to list files using object-level access...")
+            logger.info("List files using object-level access...")
 
             # Contourner le problème en listant les objets directement
             try:
                 #remote_path = f"{self.params.bucket}/{self.params.bucket_folder}/"
                 files = [
                     f"s3://{self.params.endpoint_url}/{self.params.bucket}/{obj['Key']}"
-                    for obj in fs.ls(remote_path, detail=True)
+                    for obj in self.params.fs.ls(remote_path, detail=True)
                     if obj["Key"].endswith(pattern.split("*")[-1])
                 ]
                 return files
@@ -615,8 +618,10 @@ class S3Manager(BaseConnectionManager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            logger.info(f"Attempting to open S3 file: {path}")
-            return xr.open_dataset(self.params.fs.open(path, mode))
+            # logger.info(f"Open S3 file: {path}")
+            # return xr.open_dataset(self.params.fs.open(path, mode))
+            # return xr.open_zarr(path)
+            return(FileLoader.open_dataset_auto(path, self))
         except Exception as exc:
             logger.warning(f"Failed to open S3 file: {path}. Error: {repr(exc)}")
             return None
@@ -636,7 +641,7 @@ class S3WasabiManager(S3Manager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            logger.info(f"Attempting to open S3 file: {path}")
+            # logger.info(f"Open Wasabi S3 file: {path}")
             # return xr.open_dataset(self.params.fs.open(path, mode))
         
             s3_mapper = fsspec.get_mapper(
@@ -648,10 +653,11 @@ class S3WasabiManager(S3Manager):
                     "endpoint_url": self.params.endpoint_url,
                     }
                 )
-            return xr.open_dataset(
+            """return xr.open_zarr(
                 s3_mapper,
-                engine="zarr"
-            )
+                #engine="zarr"
+            )"""
+            return(FileLoader.open_dataset_auto(path, self))
         except Exception as exc:
             logger.warning(f"Failed to open Wasabi S3 file: {path}. Error: {repr(exc)}")
             return None
@@ -679,7 +685,8 @@ class GlonetManager(BaseConnectionManager):
             if date.year < 2025:
                 date_str = date.strftime("%Y-%m-%d")
                 list_files.append(
-                    f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
+                    #f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
+                    f"project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
                 )
                 date = date + datetime.timedelta(days=7)
             else:
@@ -702,9 +709,8 @@ class GlonetManager(BaseConnectionManager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            glonet_ds = xr.open_zarr(
-                path,
-            )
+            # glonet_ds = xr.open_zarr(path)
+            glonet_ds = FileLoader.open_dataset_auto(path, self)
             # logger.info(f"Opened Glonet file: {path}")
             """filename = os.path.basename(path)
             filepath = os.path.join("/home/k24aitmo/IMT/software/tests/Glonet", filename)
