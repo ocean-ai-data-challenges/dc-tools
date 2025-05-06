@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Iterator, Optional, Tuple, Type
 
 import datetime
 import geopandas as gpd
+import json
 from loguru import logger
 import pandas as pd
 from pathlib import Path
@@ -37,6 +38,11 @@ from dctools.data.connection.connection_manager import (
 
 
 class DatasetConfig:
+    """DATASET_ALIAS_MAP: Dict[str, Type[BaseConnectionConfig]] = {
+        "glorys": CMEMSConnectionConfig,
+        "glonet": GlonetConnectionConfig,
+        "glonet_wasabi": WasabiS3ConnectionConfig,
+    }"""
     CONNECTION_MANAGER_MAP: Dict[Type[BaseConnectionConfig], Type[BaseConnectionManager]] = {
         LocalConnectionConfig: LocalConnectionManager,
         CMEMSConnectionConfig: CMEMSManager,
@@ -48,7 +54,7 @@ class DatasetConfig:
 
     def __init__(
         self,
-        name: str,
+        alias: str,
         connection_config: BaseConnectionConfig,
         catalog_options: Optional[Dict[str, Any]] = None,
     ):
@@ -56,11 +62,11 @@ class DatasetConfig:
         Configuration pour un dataset.
 
         Args:
-            name (str): Nom du dataset.
+            alias (str): Nom du dataset.
             connection_config (BaseConnectionConfig): Configuration de connexion.
             catalog_options (Optional[Dict[str, Any]]): Options pour le catalogue (e.g., filtres par défaut).
         """
-        self.name = name
+        self.alias = alias
         self.connection_config = connection_config
         self.catalog_options = catalog_options or {}
         self.connection_manager = self._create_connection_manager()
@@ -93,10 +99,23 @@ class BaseDataset(ABC):
             raise ValueError(f"Unsupported connection configuration type: {type(config.connection_config)}")
 
         self.connection_manager = connection_manager_class(config.connection_config)
-        self._metadata = self.connection_manager.list_files_with_metadata()  # Récupérer les métadonnées
-        self._paths = [entry.path for entry in self._metadata]
-        self.name = config.name
-        self.catalog = DatasetCatalog([])  # Initialiser un catalogue vide
+        self.alias = config.alias
+        self.catalog_type = ""
+        # Vérifier si un fichier de catalogue JSON est spécifié dans catalog_options
+        catalog_path = config.catalog_options.get("catalog_path") if config.catalog_options else None
+        if catalog_path and Path(catalog_path).exists():
+            logger.info(f"Loading catalog from JSON file: {catalog_path}")
+            self.catalog = DatasetCatalog.from_json(catalog_path)
+            #self._metadata = self.catalog.entries
+            self._paths = self.catalog.list_paths()
+            self.catalog_type = "from_catalog_file"
+        else:
+            logger.info("No catalog JSON file found. Generating metadata from the dataset.")
+        
+            self._metadata = self.connection_manager.list_files_with_metadata()  # Récupérer les métadonnées
+            self._paths = [entry.path for entry in self._metadata]
+            self.build_catalog()  # Construire le catalogue à partir des métadonnées
+            self.catalog_type = "from_data"
 
     def list_paths(self) -> List[str]:
         """
@@ -186,32 +205,16 @@ class BaseDataset(ABC):
             yield self.load_data(idx)
 
 
-    def build_catalog(self) -> gpd.GeoDataFrame:
+    def build_catalog(self) -> None:
         """
         Construit un catalogue pour ce dataset.
 
         Returns:
-            gpd.GeoDataFrame: Catalogue sous forme de GeoDataFrame.
         """
-        '''if not self._metadata:
-            logger.warning("No metadata available for this dataset.")
-            return gpd.GeoDataFrame()
-
-        df = pd.DataFrame(self._metadata)
-        # Vérifier les colonnes requises
-        required_columns = ["date_start", "date_end", "lat_min", "lat_max", "lon_min", "lon_max"]
-        for col in required_columns:
-            if col not in df.columns:
-                logger.warning(f"Missing required column '{col}' in metadata.")
-                df[col] = None  # Ajouter des valeurs par défaut si nécessaire
-
-        df["geometry"] = df.apply(
-            lambda row: box(row["lon_min"], row["lat_min"], row["lon_max"], row["lat_max"]), axis=1
-        )
-
-        logger.debug(f"Metadata DataFrame: {df.head()}")
-        logger.debug(f"Metadata DataFrame columns: {df.columns.tolist()}")'''
-        self.catalog = DatasetCatalog(self._metadata)
+        if self.catalog_type == "from_catalog_file":
+            logger.info("Le catalogue existe déjà (chargé à partir d'un fichier)")
+            return
+        self.catalog = DatasetCatalog(entries=self._metadata)
         #return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
 
@@ -271,24 +274,27 @@ class BaseDataset(ABC):
         """
         return self.catalog.get_dataframe().empty
 
-    def to_json(self, path: Optional[str] = None) -> str:
+    def to_file(self, path: str) -> None:
         """
-        Exporte le catalogue au format GeoJSON.
+        Exporte l'intégralité du contenu de BaseDataset au format JSON.
 
         Args:
-            path (Optional[str]): Chemin pour sauvegarder le fichier GeoJSON.
-
-        Returns:
-            str: Représentation GeoJSON du catalogue.
+            path (str): Chemin pour sauvegarder le fichier JSON.
         """
-        logger.info(f"Exporting catalog to GeoJSON at {path}")
-        return self.catalog.to_json(path)
+        try:
+            # Sauvegarder le catalogue en JSON
+            self.catalog.to_file(str(path))
+            # Construire un dictionnaire pour les attributs de BaseDataset
+            logger.info(f"BaseDataset sauvegardé avec succès dans {path}")
+        except Exception as exc:
+            logger.error(f"Erreur lors de l'exportation de BaseDataset en JSON : {repr(exc)}")
+            raise
 
 
 class RemoteDataset(BaseDataset):
     """Generic dataset for remote sources."""
-    def __init__(self, manager: BaseConnectionManager):
-        super().__init__(manager)
+    #def __init__(self, config: DatasetConfig):
+    #    super().__init__(config)
 
     def download(self, index: int, local_path: str):
         """
@@ -308,6 +314,11 @@ class RemoteDataset(BaseDataset):
 
 class LocalDataset(BaseDataset):
     """Dataset pour les fichiers locaux (NetCDF ou autres)."""
-    def __init__(self, manager: BaseConnectionManager):
-        super().__init__(manager)
+    #def __init__(self, config: DatasetConfig):
+    #    super().__init__(config)
+    def empty_fct(self):
+        """
+        Fonction vide.
+        """
+        pass
 

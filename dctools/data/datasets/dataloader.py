@@ -93,8 +93,8 @@ class EvaluationDataloader:
         ].rename(columns=lambda x: x.replace("_ref", "")).to_dict(orient="records")
 
         # Mettre à jour les catalogues avec les données alignées
-        self.pred_catalog = DatasetCatalog(pred_entries)
-        self.ref_catalog = DatasetCatalog(ref_entries)
+        self.pred_catalog = DatasetCatalog(entries=pred_entries)
+        self.ref_catalog = DatasetCatalog(entries=ref_entries)
 
     def _generate_batches(self) -> Generator[Dict[str, xr.Dataset], None, None]:
         """
@@ -111,14 +111,6 @@ class EvaluationDataloader:
             logger.warning("No reference catalog provided. Skipping reference data.")
 
             for _, pred_entry in pred_df.iterrows():
-                """pred_data = self.pred_manager.open(pred_entry["path"])
-                if self.pred_transform:
-                    pred_data = self.pred_transform(pred_data)
-                entry = {
-                    "date": pred_entry["date_start"],
-                    "pred_data": pred_data,
-                    "ref_data": None,
-                }"""
                 entry = {
                     "date": pred_entry["date_start"],
                     "pred_data": pred_entry["path"],
@@ -133,22 +125,6 @@ class EvaluationDataloader:
                 yield batch
         else:
             for ((_, pred_entry), (_, ref_entry)) in zip(pred_df.iterrows(), ref_df.iterrows()):
-
-                """pred_data = self.pred_manager.open(pred_entry["path"])
-                ref_data = self.ref_manager.open(ref_entry["path"])
-
-                # Appliquer les transformations si elles sont définies
-                if self.pred_transform:
-                    pred_data = self.pred_transform(pred_data)
-                if self.ref_transform:
-                    ref_data = self.ref_transform(ref_data)
-
-                # Ajouter les données dans une structure
-                entry = {
-                    "date": pred_entry["date_start"],
-                    "pred_data": pred_data,
-                    "ref_data": ref_data,
-                }"""
                 entry = {
                     "date": pred_entry["date_start"],
                     "pred_data": pred_entry["path"],

@@ -4,7 +4,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import fsspec
 import geopandas as gpd
+import json
 from loguru import logger
 import pandas as pd
 from shapely.geometry import box, Polygon
@@ -24,32 +26,45 @@ class CatalogEntry:
     spatial_resolution: Optional[Tuple[float, float]] = None  # Résolution (lat, lon) en degrés
     temporal_resolution: Optional[str] = None  # En format ISO 8601 (e.g., "P1D")
     geometry: Optional[Polygon] = None
-    alias: Optional[str] = None  # Ajout du champ alias
+    # alias: Optional[str] = None  # Ajout du champ alias
 
 
 class DatasetCatalog:
     """Structured catalog to hold and filter dataset metadata entries."""
 
 
-    def __init__(self, entries: List[Union[CatalogEntry, Dict[str, Any]]]):
+    def __init__(
+        self,
+        entries: Optional[List[Union[CatalogEntry, Dict[str, Any]]]] = None,
+        dataframe: Optional[gpd.GeoDataFrame] = gpd.GeoDataFrame(),
+    ):  
         """
         Initialise le catalogue avec une liste d'entrées.
 
         Args:
             entries (List[Union[CatalogEntry, Dict[str, Any]]]): Liste des métadonnées des datasets.
         """
+        if entries is None and dataframe.empty:
+            logger.warning("No entries or dataframe provided. Initializing empty catalog.")
+            self.entries = []
+            self.df = gpd.GeoDataFrame()
+            return
+        #logger.info(f"\n\nENTRIES: {entries}\n\n")
         # Convertir les dictionnaires en CatalogEntry si nécessaire
-        self.entries = []
-        for entry in entries:
-            if isinstance(entry, dict):
-                self.entries.append(CatalogEntry(**entry))
-            elif isinstance(entry, CatalogEntry):
-                self.entries.append(entry)
-            else:
-                logger.warning(f"Ignoring invalid entry: {entry}")
+        if entries:
+            self.entries = []
+            for entry in entries:
+                """if isinstance(entry, dict):
+                    self.entries.append(CatalogEntry(**entry))"""
+                if isinstance(entry, CatalogEntry):
+                    self.entries.append(entry)
+                else:
+                    logger.warning(f"Ignoring invalid entry: {entry}")
+            # Convertir les entrées en GeoDataFrame
+            self.df = gpd.GeoDataFrame([asdict(entry) for entry in self.entries])
+        if not dataframe.empty:
+            self.df = dataframe
 
-        # Convertir les entrées en GeoDataFrame
-        self.df = gpd.GeoDataFrame([asdict(entry) for entry in self.entries])
         if not self.df.empty:
             self.df = self._clean_dataframe(self.df)
 
@@ -115,7 +130,7 @@ class DatasetCatalog:
         """
         self.df = pd.concat([self.df, other_catalog.df], ignore_index=True)
 
-    def filter_by_date(self, start: datetime, end: datetime) -> gpd.GeoDataFrame:
+    def filter_by_date(self, start: datetime, end: datetime) -> None:
         """
         Filtre les entrées par plage temporelle.
 
@@ -126,9 +141,15 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: GeoDataFrame filtré.
         """
-        self.df = self.df[(self.df.date_end >= start) & (self.df.date_start < end)]
+        if not isinstance(start, datetime) or not isinstance(end, datetime):
+            logger.warning("Start and end dates must be datetime objects.")
+            return
+        # self.df = self.df[(self.df.date_end >= start) & (self.df.date_start < end)]
+        self.df = self.df.loc[
+            (self.df.date_end >= start) & (self.df.date_start < end)
+        ]
 
-    def filter_by_bbox(self, bbox: Tuple[float, float, float, float]) -> gpd.GeoDataFrame:
+    def filter_by_bbox(self, bbox: Tuple[float, float, float, float]) -> None:
         """
         Filtre les entrées par boîte englobante (bounding box).
 
@@ -138,14 +159,13 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: GeoDataFrame filtré.
         """
+        if not isinstance(bbox, tuple) or len(bbox) != 4:
+            logger.warning("Bounding box must be a tuple of (lon_min, lat_min, lon_max, lat_max).")
+            return
         region = box(*bbox)
-        """logger.debug(f"Filtering by bounding box: {bbox}")
-        logger.debug(f"Region: {region}")
-        logger.debug(f"Initial number of entries: {len(self.df)}")
-        logger.debug(f"Entries before filtering: {self.df}")"""
         self.df = self.df[self.df.intersects(region)]
 
-    def filter_by_variables(self, variables: List[str]) -> gpd.GeoDataFrame:
+    def filter_by_variables(self, variables: List[str]) -> None:
         """
         Filtre les entrées par liste de variables.
 
@@ -155,6 +175,9 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: GeoDataFrame filtré.
         """
+        if not variables or len(variables) == 0:
+            logger.warning("No variables provided for filtering.")
+            return
         self.df = self.df[self.df["variables"].apply(lambda vars: any(var in vars for var in variables))]
 
     def to_geodataframe(self) -> gpd.GeoDataFrame:
@@ -166,47 +189,54 @@ class DatasetCatalog:
         """
         return self.df.copy()
 
-    def to_json(self, path: Optional[str] = None) -> str:
+    def to_file(self, path: Optional[str] = None) -> str:
         """
-        Exporte le catalogue au format GeoJSON.
+        Exporte l'intégralité du contenu de DatasetCatalog au format JSON.
 
         Args:
-            path (Optional[str]): Chemin pour sauvegarder le fichier GeoJSON.
+            path (Optional[str]): Chemin pour sauvegarder le fichier JSON.
 
         Returns:
-            str: Représentation GeoJSON du catalogue.
+            str: Représentation JSON complète de l'instance.
         """
         try:
-            # Convertir les colonnes Timestamp en chaînes de caractères au format ISO 8601
-            df = self.df.copy()
-
+            """df = self.df.copy()
             for col in ["date_start", "date_end"]:  # Colonnes contenant des dates
                 if col in df.columns:
-                    df[col] = df[col].dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # Format ISO 8601
+                    df[col] = df[col].dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # Format ISO 8601"""
 
-            # Exporter au format GeoJSON
-            json_str = df.to_json()
+            self.df.to_file(path, driver="GeoJSON")
 
-            # Sauvegarder dans un fichier si un chemin est fourni
-            if path:
-                with open(path, "w") as f:
-                    f.write(json_str)
-
-            return json_str
+            #return json_str
         except Exception as exc:
-            logger.error(f"Erreur lors de l'exportation en GeoJSON : {repr(exc)}")
+            logger.error(f"Erreur lors de l'exportation en JSON : {repr(exc)}")
             raise
 
+
     @classmethod
-    def from_json(cls, json_str: str) -> 'DatasetCatalog':
+    def from_json(cls, path: str) -> 'DatasetCatalog':
         """
-        Charge un catalogue à partir d'une chaîne JSON.
+        Reconstruit une instance de DatasetCatalog à partir d'un fichier JSON.
 
         Args:
-            json_str (str): Chaîne JSON.
+            path (str): Chemin vers le fichier JSON.
 
         Returns:
-            DatasetCatalog: Instance du catalogue.
+            DatasetCatalog: Instance reconstruite.
         """
-        df = pd.read_json(json_str, orient="records")
-        return cls(df.to_dict(orient="records"))
+        try:
+            # Charger le contenu JSON
+            df = gpd.read_file(path)
+            return cls(dataframe=df)
+        except Exception as exc:
+            logger.error(f"Erreur lors du chargement depuis JSON : {repr(exc)}")
+            raise
+
+    def list_paths(self):
+        """
+        Liste les chemins des fichiers dans le catalogue.
+
+        Returns:
+            List[str]: Liste des chemins.
+        """
+        return [entry["path"] for _, entry in self.df.iterrows()]

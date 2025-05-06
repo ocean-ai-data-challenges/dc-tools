@@ -98,6 +98,7 @@ class MultiSourceDatasetManager:
         Args:
             variables (List[str]): Liste des variables à filtrer.
         """
+        logger.debug(f"MANAGER.PY    Filtrage du dataset '{alias}' par variables : {variables}")
         self.datasets[alias].filter_catalog_by_variable(variables)
 
     def filter_all_by_date(self, start: datetime, end: datetime):
@@ -134,7 +135,7 @@ class MultiSourceDatasetManager:
             logger.info(f"Filtrage du dataset '{alias}' par variables : {variables}")
             self.filter_by_variable(alias, variables)
 
-    def to_json(self, alias: str, path: Optional[str] = None) -> str:
+    def to_file(self, alias: str, path: Optional[str] = None) -> str:
         """
         Exporte les informations d'un dataset au format JSON.
 
@@ -149,17 +150,16 @@ class MultiSourceDatasetManager:
             raise ValueError(f"Alias '{alias}' not found in the manager.")
 
         dataset = self.datasets[alias]
-
-        # Construire le dictionnaire des informations du dataset
+        dataset.get_catalog().to_file(path)
+        '''# Construire le dictionnaire des informations du dataset
         dataset_info = {
             "alias": alias,
-            "name": dataset.name,
             #"connection_config": dataset.connection_manager.params,  # Configuration de connexion
             "catalog": dataset.get_catalog().to_json(),  # Catalogue
             #"catalog": dataset.get_catalog().get_dataframe().to_dict(orient="records"),  # Catalogue
-        }
+        }'''
 
-        # Convertir en JSON
+        '''# Convertir en JSON
         json_str = json.dumps(dataset_info, indent=4)
 
         # Sauvegarder dans un fichier si un chemin est fourni
@@ -167,9 +167,9 @@ class MultiSourceDatasetManager:
             with open(path, "w") as f:
                 f.write(json_str)
 
-        return json_str
+        return json_str'''
 
-    def all_to_json(self, output_dir: str):
+    def all_to_file(self, output_dir: str):
         """
         Exporte les informations de tous les datasets au format JSON.
 
@@ -192,13 +192,13 @@ class MultiSourceDatasetManager:
             json_filename = f"{alias}.json"
             json_path = os.path.join(output_dir, json_filename)
 
-            # Appeler la méthode to_json() pour chaque dataset
-            self.to_json(alias, path=json_path)
+            # Appeler la méthode to_file() pour chaque dataset
+            self.to_file(alias, path=json_path)
 
             logger.info(f"Dataset '{alias}' exporté au format JSON dans '{json_path}'.")
 
-    @staticmethod
-    def from_json(json_paths: List[str]) -> 'MultiSourceDatasetManager':
+    '''@staticmethod
+    def add_from_json(json_paths: List[str]) -> 'MultiSourceDatasetManager':
         """
         Charge un gestionnaire multi-sources à partir d'une liste de fichiers JSON.
 
@@ -224,9 +224,9 @@ class MultiSourceDatasetManager:
 
                 # Charger la configuration du dataset
                 config = DatasetConfig(
-                    name=dataset_info["name"],
+                    alias=dataset_info["alias"],
                     connection_config=BaseConnectionConfig(**dataset_info["connection_config"]),
-                    catalog_options=dataset_info.get("catalog_options", {}),
+                    # catalog_options=dataset_info.get("catalog_options", {}),
                 )
 
                 # Créer une instance de BaseDataset (ou une classe dérivée)
@@ -244,7 +244,7 @@ class MultiSourceDatasetManager:
             logger.error(f"Erreur lors du chargement du gestionnaire depuis les fichiers JSON : {repr(exc)}")
             raise
 
-        return manager
+        return manager'''
 
     def get_dataloader(
         self,
@@ -310,4 +310,4 @@ class MultiSourceDatasetManager:
             DatasetCatalog: Catalogue filtré pour l'alias spécifié.
         """
         filtered_df = self.catalog.get_dataframe()[self.catalog.get_dataframe()["alias"] == alias]
-        return DatasetCatalog(filtered_df.to_dict(orient="records"))
+        return DatasetCatalog(entries=filtered_df.to_dict(orient="records"))

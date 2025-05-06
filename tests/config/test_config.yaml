@@ -13,14 +13,16 @@ glorys_cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
 glonet_n_days_forecast: 10
 
 glonet_local_dir: "/home/k24aitmo/IMT/software/tests/Glonet"
-max_samples: 10
+max_samples: 2
 ###########################################
 ## List of start time for TC events
 start_times:
-  - "2021-07-01"
+   - "1900-01-01"
+   - "2021-07-01"
 ## List of end time for TC events 
 end_times:
-  - "2021-07-02"
+   - "2026-01-01"
+   - "2021-07-02"
 
 # lead time definition (hours)
 lead_time_start: "0"
@@ -29,11 +31,11 @@ lead_time_frequency: "24"
 
 # variables for evaluation data targets
 target_vars:
-  - "uo"
-  - "vo"
-  - "zos"
-  - "thetao"
-  - "so"
+#  - "uo"
+#  - "vo"
+#  - "zos"
+#  - "thetao"
+#  - "so"
   
 #vents 	de surface (sortie) / observations satellitaires (SAR) du vent à haute résolution (référence)
 #variables représentatives des vagues de surface (haute résolution) : 	SSH, SST, SSS, couleur de l’océan (sortie) / observations satellite et réanalyses (modèles ERA-5 et Mercator-GLORYS)	(référence)
@@ -49,23 +51,16 @@ input_vars: "*"
 #réanalyses : atmosphérique, océanique, des caractéristiques du vortex.
 
 # Target region coordinates
-min_lat: -10
-max_lat: 10
-min_lon: -10
-max_lon: 10
+min_lat: -180
+max_lat: 180
+min_lon: -180
+max_lon: 180
 
 # Path to catalog file
 catalog_path: ""
 
 # Datasets
-datasets:
-  - name: GLONET
-    module: dctools.data.dataset
-    class: GlonetDataset
-
-  - name: GLORYS
-    module: dctools.data.dataset
-    class: CmemsGlorysDataset
+batch_size: 8
 
 sources:
   - url: "https://minio.dive.edito.eu"

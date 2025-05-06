@@ -139,6 +139,7 @@ class BaseConnectionManager(ABC):
         logger.info(f"Extracting global metadata from {first_file}")
 
         # Charger le fichier avec xarray
+        logger.info(f"Opening file: {first_file}")
         with self.open(first_file, "rb") as ds:
             # Extraire les métadonnées globales
 
@@ -221,7 +222,7 @@ class BaseConnectionManager(ABC):
             lat_resolution = float(ds.lat.diff(dim="lat").mean().values)
             lon_resolution = float(ds.lon.diff(dim="lon").mean().values)
             return lat_resolution, lon_resolution
-        return None
+        return -1, -1
 
     def _infer_temporal_resolution(self, ds: xr.Dataset) -> Optional[str]:
         """
@@ -247,7 +248,7 @@ class BaseConnectionManager(ABC):
             except Exception as exc:
                 logger.error(f"Erreur lors de l'inférence de la résolution temporelle : {repr(exc)}")
                 return None
-        return None
+        return -1
 
     def list_files_with_metadata(self) -> List[CatalogEntry]:
         """
@@ -685,8 +686,8 @@ class GlonetManager(BaseConnectionManager):
             if date.year < 2025:
                 date_str = date.strftime("%Y-%m-%d")
                 list_files.append(
-                    #f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
-                    f"project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
+                    f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
+                    #f"s3://project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
                 )
                 date = date + datetime.timedelta(days=7)
             else:
@@ -709,8 +710,8 @@ class GlonetManager(BaseConnectionManager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            # glonet_ds = xr.open_zarr(path)
-            glonet_ds = FileLoader.open_dataset_auto(path, self)
+            glonet_ds = xr.open_zarr(path)
+            #glonet_ds = FileLoader.open_dataset_auto(path, self)
             # logger.info(f"Opened Glonet file: {path}")
             """filename = os.path.basename(path)
             filepath = os.path.join("/home/k24aitmo/IMT/software/tests/Glonet", filename)
