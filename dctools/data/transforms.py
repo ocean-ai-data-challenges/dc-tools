@@ -3,13 +3,20 @@
 from typing import Any, Dict, List, Optional
 
 # import kornia
+from loguru import logger
 import numpy as np
 from torchvision import transforms
 import xarray as xr
 
-from dctools.utilities.xarray_utils import rename_coordinates,\
-    subset_variables, interpolate_dataset, create_coords_rename_dict,\
-    assign_coordinate
+from dctools.utilities.xarray_utils import (
+    rename_coordinates,
+    subset_variables,
+    interpolate_dataset,
+    create_coords_rename_dict,
+    assign_coordinate,
+    reset_time_coordinates,
+    LIST_VARS_GLONET,
+)
 
 
 class TransformWrapper:
@@ -17,7 +24,6 @@ class TransformWrapper:
     def __init__(self, transf):
         self.transf = transf
 
-    #@dask.delayed
     def __call__(self, data):
         """
             data: tuple containing both sample and time_axis
@@ -32,7 +38,6 @@ class RenameCoordsTransform:
     def __init__(self, rename_dict: Optional[Dict] = None):
         self.rename_dict = rename_dict
 
-    #@dask.delayed
     def __call__(self, data):
         if not self.rename_dict:
             self.rename_dict = create_coords_rename_dict(data)
@@ -44,21 +49,28 @@ class SelectVariablesTransform:
     def __init__(self, variables: List[str]):
         self.variables = variables
 
-    #@dask.delayed
     def __call__(self, data):
         renamed_dataset = subset_variables(data, self.variables)
         return renamed_dataset
 
 
 class InterpolationTransform:
-    def __init__(self, ranges: Dict[str, np.arange], weights_filepath: Optional[str] = None):
+    def __init__(self, ranges: Dict[str, np.arange], weights_filepath: str):
         self.weights_filepath = weights_filepath
         self.ranges = ranges
 
-    #@dask.delayed
     def __call__(self, data):
         interp_dataset = interpolate_dataset(data, self.ranges, self.weights_filepath)
         return interp_dataset
+
+
+class ResetTimeCoordsTransform:
+    def __init__(self):
+        pass
+
+    def __call__(self, data):
+        reset_dataset = reset_time_coordinates(data)
+        return reset_dataset
 
 
 class AssignCoordsTransform:
@@ -70,7 +82,6 @@ class AssignCoordsTransform:
         self.coord_vals = coord_vals
         self.coord_attrs = coord_attrs
 
-    #@dask.delayed
     def __call__(self, data):
         transf_dataset = assign_coordinate(
             data, self.coord_name,
@@ -89,7 +100,6 @@ class SubsetCoordTransform:
                 return True
         return False
 
-    #@dask.delayed
     def __call__(self, data):
         assert(self.coord_name in list(data.dims))
         match self.coord_name:
@@ -129,7 +139,6 @@ class SubsetCoordTransform:
 class CustomTransforms:
     def __init__(self, transform_name: str, **kwargs):
         self.transform_name = transform_name
-        self.weights_path = None
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -137,22 +146,19 @@ class CustomTransforms:
         match self.transform_name:
             case "rename_subset_vars":
                 return self.transform_rename_subset_vars(
-                    dataset, self.dict_rename, self.list_vars
+                    dataset
                 )
             case "interpolate":
                 return self.transform_interpolate(
-                    dataset, self.ranges, weights_filepath=self.weights_path
+                    dataset
                 )
             case "glorys_to_glonet":
                 return self.transform_glorys_to_glonet(
-                    dataset, self.list_vars,
-                    self.depth_coord_vals, self.interp_ranges,
-                    weights_path=self.weights_path
+                    dataset
                 )
             case "subset_dataset":
                 return self.transform_subset_dataset(
-                    dataset, self.list_vars,
-                    self.depth_coord_vals
+                    dataset
                 )
             case _:
                 return dataset
@@ -160,61 +166,57 @@ class CustomTransforms:
     def transform_rename_subset_vars(
         self,
         dataset: xr.Dataset,
-        dict_rename: Optional[Dict[str, str]] = None,
-        list_vars: Optional[List[str]] = None
     ) -> xr.Dataset:
         assert(hasattr(self, "dict_rename") and hasattr(self, "list_vars"))
 
         transform=transforms.Compose([
-            RenameCoordsTransform(dict_rename),
-            SelectVariablesTransform(list_vars),
+            RenameCoordsTransform(self.dict_rename),
+            SelectVariablesTransform(self.list_vars),
         ])
         transf_dataset = transform(dataset)
         return transf_dataset
 
     def transform_interpolate(
-        self, dataset: xr.Dataset, interp_ranges: Dict[str, np.ndarray],
-        weights_path: Optional[str] = None,
+        self, dataset: xr.Dataset,
     ) -> xr.Dataset:
         assert(hasattr(self, "interp_ranges"))
+        assert(hasattr(self, "weights_path"))
 
         transform=transforms.Compose([
-            InterpolationTransform(interp_ranges, weights_path)
+            InterpolationTransform(self.interp_ranges, self.weights_path)
         ])
         interp_dataset = transform(dataset)
         return interp_dataset
 
     def transform_glorys_to_glonet(
-        self, dataset: xr.Dataset,
-        list_vars: List[str],
-        depth_coord_vals: List[Any],
-        interp_ranges: Dict[str, np.ndarray],
-        dict_rename: Optional[Dict[str, str]] = None,
-        depth_coord_name: Optional[str] = "depth",
-        weights_path: Optional[str] = None,
+        self, dataset: xr.Dataset
     ):
-        assert(hasattr(self, "list_vars"))
-        assert(hasattr(self, "interp_ranges") and hasattr(self, "depth_coord_vals"))
+        assert(hasattr(self, "depth_coord_vals"))
+        assert(hasattr(self, "weights_path"))
+        assert(hasattr(self, "interp_ranges"))
+        dict_rename = self.dict_rename if hasattr(self, "dict_rename") else None
+        depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
+        list_vars = self.list_vars if hasattr(self, "list_vars") else LIST_VARS_GLONET
+
         transform=transforms.Compose([
             RenameCoordsTransform(dict_rename),
             SelectVariablesTransform(list_vars),
-            SubsetCoordTransform(depth_coord_name, depth_coord_vals),
+            SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
             #AssignCoordsTransform(time_coord_name, time_coord_vals, time_coord_attrs),
-            InterpolationTransform(interp_ranges, weights_path),
+            InterpolationTransform(self.interp_ranges, self.weights_path),
+            # ResetTimeCoordsTransform(),
         ])
         transf_dataset = transform(dataset)
         return transf_dataset
 
     def transform_subset_dataset(
         self, dataset: xr.Dataset,
-        list_vars: List[str],
-        depth_coord_vals: List[Any],
-        depth_coord_name: Optional[str] = "depth",
     ):
         assert(hasattr(self, "list_vars") and hasattr(self, "depth_coord_vals"))
+        depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
         transform=transforms.Compose([
-            SelectVariablesTransform(list_vars),
-            SubsetCoordTransform(depth_coord_name, depth_coord_vals),
+            SelectVariablesTransform(self.list_vars),
+            SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
         ])
         transf_dataset = transform(dataset)
         return transf_dataset

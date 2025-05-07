@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import cftime
+from loguru import logger
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -21,6 +22,7 @@ DEPTH_NAMES = ["depth", "DEPTH", "height", "HEIGHT"]
 TIME_NAMES = ["time", "TIME"]
 DICT_RENAME_CMEMS = dict(longitude="lon", latitude="lat")
 LIST_VARS_GLONET = ["thetao", "zos", "uo", "vo", "so", "depth", "lat", "lon", "time"]
+LIST_VARS_GLONET_NO_DIMS = ["thetao", "zos", "uo", "vo", "so"]
 LIST_VARS_GLONET_UNITTEST = ["thetao", "zos", "uo"]
 GLONET_DEPTH_VALS = [0.494025, 47.37369, 92.32607, 155.8507, 222.4752, 318.1274, 380.213, 
         453.9377, 541.0889, 643.5668, 763.3331, 902.3393, 1245.291, 1684.284, 
@@ -32,7 +34,7 @@ RANGES_GLONET = {
     "lat": np.arange(-78, 90, 0.25),
     "lon": np.arange(-180, 180, 0.25),
     "depth": GLONET_DEPTH_VALS,
-    "time": GLONET_TIME_VALS,
+    #"time": GLONET_TIME_VALS,
 }
 
 GLONET_ENCODING = {"depth": {"dtype": "float32"},
@@ -47,6 +49,20 @@ GLONET_ENCODING = {"depth": {"dtype": "float32"},
 }
 
 STD_COORDS_NAMES = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
+
+def create_empty_dataset(dimensions: dict) -> xr.Dataset:
+    """
+    Crée un Dataset Xarray vide à partir d'un dictionnaire de dimensions.
+
+    Args:
+        dimensions (dict): Dictionnaire où les clés sont les noms des dimensions
+                           et les valeurs sont les tailles des dimensions.
+
+    Returns:
+        xr.Dataset: Dataset Xarray vide avec les dimensions spécifiées.
+    """
+    coords = {dim: range for dim, range in dimensions.items()}
+    return xr.Dataset(coords=coords)
 
 def get_grid_coord_names(
     data: xr.Dataset | xr.DataArray,
@@ -73,33 +89,6 @@ def get_grid_coord_names(
     coord_name_dict["time"] = None if len(time_set) == 0 else next(iter(time_set))
 
     return coord_name_dict
-
-def get_grid_dim_names(
-    data: xr.Dataset | xr.DataArray,
-) -> Dict[str, Optional[str]]:
-    """
-    Get the names of the dimensions in `data`.
-
-    Return a dictionary with "lat", "lon", "depth" and "time" as keys
-    and the names of the corresponding coordinates (if they exist) as
-    values.
-    The names are determined by checking against the `XXX_NAMES` constants defined
-    in this file for any existing coordinates in `data`
-    """
-    dim_name_dict = {}
-    list_dims = list(data.coords) if hasattr(data, "coords") else list(data)
-
-    # There's probably a less disgusting way of doing this...
-    lon_set = set(LONGITUDE_NAMES).intersection(list_dims)
-    dim_name_dict["lon"] = None if len(lon_set) == 0 else next(iter(lon_set))
-    lat_set = set(LATITUDE_NAMES).intersection(list_dims)
-    dim_name_dict["lat"] = None if len(lat_set) == 0 else next(iter(lat_set))
-    depth_set = set(DEPTH_NAMES).intersection(list_dims)
-    dim_name_dict["depth"] = None if len(depth_set) == 0 else next(iter(depth_set))
-    time_set = set(TIME_NAMES).intersection(list_dims)
-    dim_name_dict["time"] = None if len(time_set) == 0 else next(iter(time_set))
-
-    return dim_name_dict
 
 def create_coords_rename_dict(ds: xr.Dataset):
     ds_coords = get_grid_coord_names(ds)
@@ -139,28 +128,20 @@ def interpolate_dataset(
     for key in ranges.keys():
         assert(key in list(ds.dims))
 
-    if "depth" in ds.dims:
-        ds_out = xr.Dataset(
-            {
-                "lat": (["lat"], ranges['lat']),
-                "lon": (["lon"], ranges['lon']),
-                "depth": (["depth"], ranges['depth']),
-                "time": (["time"], ranges['time']),
-            }
-        )
-    else:
-        ds_out = xr.Dataset(
-            {
-                "lat": (["lat"], ranges['lat']),
-                "lon": (["lon"], ranges['lon']),
-                "time": (["time"], ranges['time']),
-            }
-        )
+    out_dict = {}
+    for key in ranges.keys():
+        out_dict[key] = ranges[key]
+    for dim in STD_COORDS_NAMES.keys():
+        if dim not in out_dict.keys():
+            out_dict[dim] = ds.coords[dim].values
+    ds_out = create_empty_dataset(out_dict)
+
     # TODO : adapt chunking depending on the dataset type
     ds_out = ds_out.chunk(chunks={"lat": -1, "lon": -1, "time": 1})
 
     if weights_filepath and Path(weights_filepath).is_file():
         # Use precomputed weights
+        logger.info(f"Using precomputed weights from {weights_filepath}")
         regridder = xe.Regridder(
             ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
         )
@@ -242,7 +223,7 @@ def get_time_info(ds: xr.Dataset):
                     times = pd.to_datetime(decoded_time.values)
                     break
                 except Exception as exc:
-                    print(f"Error decoding time axis: {exc}")
+                    logger.error(f"Error decoding time axis: {repr(exc)}")
                     continue
     else:
         # Step 2 fallback: Use global attributes
@@ -311,7 +292,6 @@ def filter_time_interval(ds: xr.Dataset, start_time: str, end_time: str) -> xr.D
 
     # Step 2: Check if the time axis is present and valid
     if time_info["start"] is None or time_info["end"] is None:
-        print("No valid time axis found.")
         return None
 
     # Step 3: Filter the time coordinate within the given interval
@@ -320,11 +300,42 @@ def filter_time_interval(ds: xr.Dataset, start_time: str, end_time: str) -> xr.D
 
     # If no data falls within the time range, return None
     if mask.sum() == 0:
-        print("No data found in the specified time interval.")
+        logger.warning("No data found in the specified time interval.")
         return None
 
     # Step 4: Return the filtered dataset
     return ds.sel(time=mask)
+
+
+def extract_spatial_bounds(ds: xr.Dataset) -> dict:
+    """
+    Extract spatial bounds from an xarray Dataset, handling various coordinate naming conventions.
+
+    Args:
+        ds (xr.Dataset): The xarray dataset.
+
+    Returns:
+        dict: Dictionary with lat/lon min/max.
+    """
+    # Tentatives courantes pour les noms de coordonnées
+    lat_names = ["lat", "latitude"]
+    lon_names = ["lon", "longitude"]
+
+    lat_var = next((name for name in lat_names if name in ds.coords), None)
+    lon_var = next((name for name in lon_names if name in ds.coords), None)
+
+    if lat_var is None or lon_var is None:
+        raise ValueError("Could not identify latitude or longitude coordinates in dataset.")
+
+    lat_vals = ds[lat_var].values
+    lon_vals = ds[lon_var].values
+
+    return {
+        "lat_min": float(lat_vals.min()),
+        "lat_max": float(lat_vals.max()),
+        "lon_min": float(lon_vals.min()),
+        "lon_max": float(lon_vals.max()),
+    }
 
 def filter_spatial_area(
     ds: xr.Dataset,
@@ -355,7 +366,7 @@ def filter_spatial_area(
     """
     # Step 1: Check if latitude and longitude coordinates exist
     if "latitude" not in ds.coords or "longitude" not in ds.coords:
-        print("Latitude or longitude coordinates not found in the dataset.")
+        logger.warning("Latitude or longitude coordinates not found in the dataset.")
         return None
 
     # Step 2: Apply the spatial filter
@@ -367,8 +378,33 @@ def filter_spatial_area(
 
     # Step 3: Filter the dataset using the masks
     if lat_mask.sum() == 0 or lon_mask.sum() == 0:
-        print("No data found in the specified spatial area.")
+        logger.warning("No data found in the specified spatial area.")
         return None
 
     # Step 4: Return the filtered dataset
     return ds.sel(latitude=lat_mask, longitude=lon_mask)
+
+
+def extract_variables(ds: xr.Dataset) -> List[str]:
+    return list(ds.data_vars.keys())
+
+
+def reset_time_coordinates(dataset: xr.Dataset) -> xr.Dataset:
+    """
+    Remplace les valeurs des coordonnées de temps par une suite débutant à 0.
+
+    Args:
+        dataset (xr.Dataset): Le Dataset Xarray à modifier.
+
+    Returns:
+        xr.Dataset: Le Dataset avec les coordonnées de temps modifiées.
+    """
+    if "time" not in dataset.coords:
+        raise ValueError("Le dataset ne contient pas de coordonnées 'time'.")
+
+    # Générer une suite de valeurs commençant à 0
+    new_time_values = range(len(dataset.coords["time"]))
+
+    # Remplacer les valeurs des coordonnées de temps
+    dataset = dataset.assign_coords(time=new_time_values)
+    return dataset

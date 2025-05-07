@@ -3,23 +3,24 @@
 
 """Tools for handling Copernicus Marine data."""
 
-import datetime
-import logging
 import os
-from typing import List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-import pandas as pd
+from loguru import logger
+#import numpy as np
+#import pandas as pd
 import xarray as xr
-import xesmf as xe
+#import xesmf as xe
 
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
-from dctools.utilities.errors import DCExceptionHandler
-from dctools.processing.gridded_data import GriddedDataProcessor
-from dctools.utilities.xarray_utils import rename_coordinates,\
-    get_glonet_time_attrs, assign_coordinate, RANGES_GLONET, GLONET_ENCODING
-
+#from dctools.utilities.errors import DCExceptionHandler
+#from dctools.processing.gridded_data import GriddedDataProcessor
+from dctools.utilities.xarray_utils import (
+    get_glonet_time_attrs, assign_coordinate,
+    #RANGES_GLONET, GLONET_ENCODING, rename_coordinates,\
+)
 
 def create_glorys_ndays_forecast(
     nc_path: str,
@@ -28,8 +29,6 @@ def create_glorys_ndays_forecast(
     start_date: str,
     zarr_path: str,
     transform_fct: Optional[callable],
-    dclogger: logging.Logger,
-    exception_handler: DCExceptionHandler
 ) -> xr.Dataset:
     """Create a forecast dataset from a list of CMEMS files.
 
@@ -39,8 +38,6 @@ def create_glorys_ndays_forecast(
         `ref_data` (xr.Dataset): reference dataset
         `start_time` (str): start date for forecast
         `zarr_path` (str): path to the zarr file
-        `dclogger` (logging.Logger): logger instance
-        `exception_handler` (DCExceptionHandler): exception handler instance
 
     Returns:
         `glorys_data` (xr.Dataset): Glorys forecast dataset
@@ -67,18 +64,14 @@ def create_glorys_ndays_forecast(
             time=times, #RANGES_GLONET['time'], "attrs", get_glonet_time_attrs(start_date)),
         ),
     )"""
-    dclogger.info(f"Concatenate {len(list_nc_files)} Glorys forecast files.")
+    logger.info(f"Concatenate {len(list_nc_files)} Glorys forecast files.")
     time_step = 0
     try:
-        #print('list_nc_files:', list_nc_files)
         # concatenate downloaded files from CMEMS
         for fname in list_nc_files:
-            #print('File name Mercator:', fname)
             fpath = os.path.join(nc_path, fname)
-            tmp_ds = FileLoader.lazy_load_dataset(fpath, exception_handler, dclogger)
-            #print('File path Mercator:', fpath)
+            tmp_ds = FileLoader.lazy_load_dataset(fpath)
             tmp_ds = transform_fct(tmp_ds)
-            #print(f"assigning coordinate time: {tmp_ds}")
             tmp_ds = assign_coordinate(
                 tmp_ds, "time", coord_vals=[time_step],
                 #tmp_ds, "time", coord_vals=[times[time_step]],
@@ -87,31 +80,57 @@ def create_glorys_ndays_forecast(
             assert tmp_ds is not None, f"Error while loading dataset: {tmp_ds}."
 
             if time_step == 0:
-                #print('First time step:', time_step, '   zarr_path: ', zarr_path)
                 DataSaver.save_dataset(
-                    tmp_ds, zarr_path, exception_handler,
-                    dclogger=dclogger,
+                    tmp_ds, zarr_path,
                     #file_format="zarr", mode="r+",
                     file_format="zarr", mode="w",
                     compute=True,
                 )
             else:
-                #print("Appending time step:", time_step, '   zarr_path: ', zarr_path)
                 DataSaver.save_dataset(
-                    tmp_ds, zarr_path, exception_handler,
-                    dclogger=dclogger,
+                    tmp_ds, zarr_path,
                     file_format="zarr", mode="a", append_dim='time',
                     compute=True,
                 )
             #tmp_ds.close()
-            #print("Closing dataset")
             time_step += 1
 
-        glorys_data = FileLoader.lazy_load_dataset(zarr_path, exception_handler, dclogger)
+        glorys_data = FileLoader.lazy_load_dataset(zarr_path)
 
-    except Exception as e:
-        exception_handler.handle_exception(
-            e, "Error while creating Glorys forecast dataset."
+    except Exception as err:
+        logger.error(
+            f"Error while creating Glorys forecast dataset: {repr(err)}"
         )
+        raise
 
     return glorys_data
+
+
+
+def extract_dates_from_filename(filename: str) -> Optional[Tuple[str, str]]:
+    """
+    Extract start and end dates from a CMEMS filename.
+
+    Args:
+        filename (str): The name of the file.
+
+    Returns:
+        Optional[Tuple[str, str]]: A tuple of (start_date, end_date) in 'YYYY-MM-DD' format,
+                                   or None if no dates are found.
+    """
+    # Regex pour extraire une plage de dates (YYYYMMDD-YYYYMMDD)
+    match_range = re.search(r"(\d{8})-(\d{8})", filename)
+    if match_range:
+        start_date = match_range.group(1)
+        end_date = match_range.group(2)
+        return start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:], \
+               end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
+
+    # Regex pour extraire une seule date (YYYYMMDD)
+    match_single = re.search(r"(\d{8})", filename)
+    if match_single:
+        date = match_single.group(1)
+        return date[:4] + "-" + date[4:6] + "-" + date[6:], date[:4] + "-" + date[4:6] + "-" + date[6:]
+
+    return None
+

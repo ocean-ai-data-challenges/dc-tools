@@ -4,118 +4,113 @@ from typing import Any, Dict, List, Optional
 
 import dask
 from dask.distributed import Client
+from loguru import logger
 
-from dctools.data.dataloader import DatasetLoader
-from dctools.data.dataset import DCDataset
+# from dctools.data.datasets.dataloader import DatasetLoader
+from dctools.data.datasets.dataloader import EvaluationDataloader
 from dctools.metrics.oceanbench_metrics import DCMetric
+from dctools.metrics.metrics import MetricComputer
 
 
-
-class Evaluator(ABC):
+class Evaluator:
     def __init__(
-            self,
-            conf_args: Namespace,
-            dask_cluster: object,
-            metrics: Optional[List[DCMetric]] = None,
-            data_container: Optional[Dict[str, DatasetLoader]] = None,
-        ):
+        self,
+        dask_cluster: object,
+        metrics: List[MetricComputer],
+        dataloader: EvaluationDataloader,
+    ):
         """
-        :param reference_loader: Instance de DatasetLoader pour charger la référence.
-        :param prediction_loaders: Dictionnaire {nom_model: DatasetLoader}.
-        :param metrics: Liste d'instances de métriques.
+        Initialise l'évaluateur.
+
+        Args:
+            dask_cluster (object): Cluster Dask pour la parallélisation.
+            metrics (List[MetricComputer]): Liste des métriques à calculer.
+            dataloader (EvaluationDataloader): Dataloader pour charger les données.
         """
-        self.args = conf_args
         self.dask_cluster = dask_cluster
-        self._data_container = data_container
-        self._model_name = list(self._data_container.keys())[0] if data_container else None
-        self._metrics = metrics
+        self.metrics = metrics
+        self.dataloader = dataloader
+        self.results = []
 
-        self._plot = False
-        self._tasks: Dict[str, Dict[str, Any]] = {}
-        self.results: Dict[str, Dict[str, Any]] = {}
-
-    def reset_tasks(self):
-        self._tasks = {}
-        self.results = {}
-
-    def set_metrics(self, metrics: List[DCMetric]):
+    def evaluate(self) -> List[Dict[str, Any]]:
         """
-        :param metrics: Liste d'instances de métriques.
-        """
-        self._metrics = metrics
-        self.args.dclogger.info(f"Metrics set: {self._metrics}")
+        Évalue les métriques sur les données du dataloader.
 
-    def evaluate(self):
-        if self._data_container and self._metrics:
+        Returns:
+            List[Dict[str, Any]]: Résultats des métriques pour chaque lot.
+        """
+        try:
+            with Client(self.dask_cluster) as dask_client:
+                for batch in self.dataloader:
+                    batch_results = self._evaluate_batch(batch, self.dataloader, dask_client)
+                    self.results.extend(batch_results)
+            return self.results
+        except Exception as exc:
+            logger.error(f"Evaluation failed: {repr(exc)}")
+            return []
+
+    def _evaluate_batch(
+        self, batch: List[Dict[str, Any]],
+        dataloader: EvaluationDataloader,
+        dask_client: Client
+    ) -> List[Dict[str, Any]]:
+        """
+        Évalue un lot de données.
+
+        Args:
+            batch (List[Dict[str, Any]]): Lot de données.
+            dask_client (Client): Client Dask.
+
+        Returns:
+            List[Dict[str, Any]]: Résultats des métriques pour le lot.
+        """
+        tasks = []
+        for entry in batch:
             try:
-                with Client(self.dask_cluster) as dask_client:
-                    self.reset_tasks()
-                    #print('before')
-                    for model_name, data_loader in self._data_container.items():
-                        for batch in data_loader.load(): #self._data_container.items():
-                            #print('Model name:', model_name)
-                            #print('Data loader:', data_loader)
-                            self._tasks[model_name] = {}
-                            self.results[model_name] = {}
-                            date: str = str()
-                            for date, pred_dataset, ref_dataset in batch:
-                                #self._model_name = model_name
-                                # Chargement des datasets de prédiction
-                                #print('Sample:', sample)
-                                self.args.dclogger.info(f"Load data for model: {model_name} date: {date}")
-                                #print('Sample:', sample)
+                date = entry["date"]
+                pred_data = dataloader.open_pred(entry["pred_data"])
+                ref_data = dataloader.open_ref(entry["ref_data"]) if entry["ref_data"] else None
 
-                                """for date, pred_dataset, ref_dataset in zip(
-                                    sample.load_date(),
-                                    sample.load_pred(),
-                                    sample.load_ref(),
-                                ):"""
-                                #print('Date:', date)
-                                self.results[model_name][date] = {}
-                                self._tasks[model_name][date] = {}
+                if dataloader.pred_transform:
+                    pred_data = dataloader.pred_transform(pred_data)
+                if dataloader.ref_transform:
+                    ref_data = dataloader.ref_transform(pred_data)
 
-                                pred_dataset_future = dask_client.scatter(pred_dataset, broadcast=True)
-                                ref_dataset_future = dask_client.scatter(ref_dataset, broadcast=True)
+                # Partager les données entre les workers
+                pred_future = dask_client.scatter(pred_data, broadcast=True)
+                ref_future = dask_client.scatter(ref_data, broadcast=True)
 
-                                for metric in self._metrics:
-                                    self.args.dclogger.info(f"Compute metric: {metric.get_metric_name()} for model: {model_name} date: {date}")
-                                    #print('Metric:', metric)
-                                    metric_name = metric.get_metric_name()
-                                    self._tasks[self._model_name][date][metric_name] = dask.delayed(metric.compute)(
-                                        pred_dataset_future, ref_dataset_future
-                                    )
-                            self.args.dclogger.info(f"Run set of tasks: {self._tasks[model_name]}")
-
-                            # Convertir tout le dictionnaire en liste de tâches
-                            tasks_list = [
-                                task for model in self._tasks.values() for date in model.values() for task in date.values()
-                            ]
-
-                            # Envoyer les tâches aux workers et récupérer les résultats
-                            futures = dask_client.compute(tasks_list)  # Envoi au cluster
-                            results = dask_client.gather(futures)  # Récupération des résultats
-                            #print('Results:', results)
-                            i = 0
-                            for model_name in self._tasks:
-                                #dclogger = self.args.dclogger
-                                #dclogger.info(f"Show results for Model : {model_name}")
-                                for date in self._tasks[model_name]:
-                                    #dclogger.info(f"    Show results for Date : {date}")
-                                    for metric_name in self._tasks[model_name][date]:
-                                        #dclogger.info(f"        Show results for Metric : {metric_name}")
-                                        #dclogger.info(f"            i: {i} Result : {results[i]}")
-                                        self.results[model_name][date][metric_name] = results[i]
-                                        i += 1
-                                #self.args.json_logger.info(self.results)
-
-                            # self.args.dclogger.info(f"WORKERS RESULTS: {self.results}")
-                return self.results
+                # Construire les tâches pour chaque métrique
+                for metric in self.metrics:
+                    task = dask.delayed(self._compute_metric)(
+                        metric, pred_future, ref_future, date
+                    )
+                    tasks.append(task)
             except Exception as exc:
-                self.args.exception_handler.handle_exception(
-                    exc, "Evaluator failed."
-                )
-        else:
-            self.args.dclogger.error("No metrics or data container set.")
-            return None
+                logger.error(f"Error processing entry {entry}: {repr(exc)}")
+                continue
 
+        # Exécuter les tâches et récupérer les résultats
+        futures = dask_client.compute(tasks)
+        return dask_client.gather(futures)
 
+    @staticmethod
+    def _compute_metric(metric: MetricComputer, pred_data, ref_data, date: str) -> Dict[str, Any]:
+        """
+        Calcule une métrique pour un lot de données.
+
+        Args:
+            metric (MetricComputer): Instance de la métrique.
+            pred_data: Données de prédiction.
+            ref_data: Données de référence.
+            date (str): Date associée au lot.
+
+        Returns:
+            Dict[str, Any]: Résultat de la métrique.
+        """
+        try:
+            result = metric.compute(pred_data, ref_data)
+            return {"date": date, "metric": metric.get_metric_name(), "result": result}
+        except Exception as exc:
+            logger.error(f"Error computing metric {metric.get_metric_name()} for date {date}: {repr(exc)}")
+            return {"date": date, "metric": metric.get_metric_name(), "result": None}

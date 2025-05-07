@@ -6,19 +6,23 @@
 from argparse import ArgumentParser, Namespace
 from typing import Dict, List, Optional, Tuple
 
+from loguru import logger
 import torch
 import yaml
 
-from dctools.dcio.dclogger import DCLogger
-from dctools.utilities.errors import DCExceptionHandler
 
 TIME_VARIABLES = [
-    "list_start_times",
-    "list_end_times",
+    "start_times",
+    "end_times",
     "lead_time_start",
     "lead_time_stop",
     "lead_time_frequency",
 ]
+
+LOGGER_CONFIG = {
+    'log_level': "DEBUG",
+    'log_format': "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | <level>{level: <8}</level> | <yellow>Line {line: >4} ({file}):</yellow> <b>{message}</b>"
+}
 
 def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     """Command-line argument parser.
@@ -60,13 +64,12 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
 
 
 def load_configs(
-    config_filepath: str, exception_handler: DCExceptionHandler
+    config_filepath: str
 ) -> Dict:
     """Load configuration from yaml file.
 
     Args:
         args (Namespace): parsed arguments Namespace.
-        exception_handler (DCExceptionHandler):
 
     Raises:
         err: error
@@ -77,15 +80,15 @@ def load_configs(
     try:
         with open(config_filepath, 'r') as fp:
             config = yaml.safe_load(fp)
-            for time_var in TIME_VARIABLES:
-                if time_var in config.keys():
-                    config[time_var] = config[time_var]
-            print(f"LOADED CONFIG: {config}")
+            # for time_var in TIME_VARIABLES:
+            #    if time_var in config.keys():
+            #        config[time_var] = config[time_var]
+            logger.info(f"LOADED CONFIG: {config}")
     except Exception as err:
-        exception_handler.handle_exception(
-            err,
-            f"Error while loading config from: {config_filepath}."
+        logger.error(
+            f"Error while loading config from {config_filepath}: {repr(err)}"
         )
+        raise
     return config
 
 
@@ -103,29 +106,17 @@ def load_args_and_config(
     try:
         # init logger and exception handler
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        logger_instance = DCLogger(
-            name="DCLogger", logfile=args.logfile, jsonfile=args.jsonfile
-        )
-        dclogger = logger_instance.get_logger()
-        if args.jsonfile is not None:
-            json_logger = logger_instance.get_json_logger()
-        else:
-            json_logger = None
         # initialize exception handler
-        exception_handler = DCExceptionHandler(dclogger)
         vars(args)['device'] = device
-        vars(args)['dclogger'] = dclogger
-        vars(args)['json_logger'] = json_logger
-        vars(args)['exception_handler'] = exception_handler
 
         # TODO : Put these in config files:
-        patch_size: Optional[Tuple[float, float]] = None
-        stride_size: Optional[Tuple[float, float]] = None
-        vars(args)['patch_size'] = patch_size
-        vars(args)['stride_size'] = stride_size
+        # patch_size: Optional[Tuple[float, float]] = None
+        # stride_size: Optional[Tuple[float, float]] = None
+        # vars(args)['patch_size'] = patch_size
+        # vars(args)['stride_size'] = stride_size
 
         if config_filepath:
-            config = load_configs(config_filepath, exception_handler)
+            config = load_configs(config_filepath)
             for key, value in config.items():
                 vars(args)[key] = value
         return args

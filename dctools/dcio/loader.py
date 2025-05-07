@@ -3,25 +3,43 @@
 
 """Classes and functions for loading xarray datasets."""
 
-from typing import Optional
+from typing import Any, Optional
 
-from dask.diagnostics import ProgressBar
+from loguru import logger
 import xarray as xr
 import zarr
 
-from dctools.dcio.dclogger import DCLogger
-from dctools.utilities.errors import DCExceptionHandler
 # from dctools.utilities.xarray_utils import standard_rename_coords
 
 class FileLoader:
     """Loading NetCDF or Zarr files."""
 
     @staticmethod
+    def open_dataset_auto(path: str, manager: Any) -> xr.Dataset:
+        """
+        Open a dataset automatically, handling both NetCDF and Zarr formats.
+
+        Args:
+            path (str): Path to the dataset (local or remote).
+            manager (Any): Connection manager providing the filesystem.
+
+        Returns:
+            xr.Dataset: Opened dataset.
+        """
+        try:
+            if path.endswith(".zarr"):
+                #logger.info(f"Opening Zarr dataset: {path}")
+                return xr.open_zarr(manager.params.fs.get_mapper(path))
+            else:
+                #logger.info(f"Opening NetCDF dataset: {path}")
+                return xr.open_dataset(manager.params.fs.open(path), engine="netcdf4")
+        except Exception as exc:
+            logger.error(f"Failed to open dataset {path}: {repr(exc)}")
+            raise
+
+    @staticmethod
     def load_dataset(
         file_path: str,
-        exc_handler: DCExceptionHandler,
-        dclogger: DCLogger,
-        fail_on_error: bool = True,
         adaptive_chunking: bool = False,
     ) -> xr.Dataset | None:
         """Load a dataset from a local NetCDF or Zarr file.
@@ -30,13 +48,6 @@ class FileLoader:
         ----------
         file_path : str
             Path to NetCDF or Zarr file.
-        exc_handler : DCExceptionHandler
-            DCExceptionHandler object.
-        dclogger : DCLogger
-            DCLogger object.
-        fail_on_error : bool, optional
-            Whether to stop excecution when encountering an error while loading
-            the file, by default True.
         adaptive_chunking : bool, optional
             Whether to adapt chunking to the specific dataset being loaded. This
             feature is not supported for Zarr datasets and is experimental at
@@ -54,9 +65,9 @@ class FileLoader:
         """
         try:
             if file_path.endswith(".nc"):
-                dclogger.info(
-                    f"Loading dataset from NetCDF file: {file_path}"
-                )
+                #logger.info(
+                #    f"Loading dataset from NetCDF file: {file_path}"
+                #)
                 ds = xr.open_dataset(file_path, chunks='auto')
 
                 if adaptive_chunking:
@@ -69,7 +80,6 @@ class FileLoader:
                         ds = ds.chunk(chunks='auto')
                 else:
                     ds = ds.chunk(chunks='auto')
-                
                 return ds
             elif file_path.endswith(".zarr"):
                 ds = xr.open_zarr(file_path)
@@ -78,8 +88,7 @@ class FileLoader:
                 raise ValueError(f"Unsupported file format {file_path}.")
 
         except Exception as error:
-            exc_handler.handle_exception(
-                error, f"Error when loading file {file_path}",
-                fail_on_error=fail_on_error,
+            logger.error(
+                f"Error when loading file {file_path}: {repr(error)}"
             )
             return None
