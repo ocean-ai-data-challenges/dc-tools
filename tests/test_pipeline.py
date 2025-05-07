@@ -67,8 +67,9 @@ class TestPipeline:
     ):
         """Fixture pour configurer les datasets."""
 
-        '''ds_test = xr.open_zarr(
+        '''ds_test = xr.open_dataset(
             f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/2024-01-03.zarr",
+            engine="zarr",
         )
         logger.debug(f"ds_test: {ds_test}")'''
 
@@ -177,10 +178,10 @@ class TestPipeline:
     ):
         # Appliquer les filtres temporels
         manager.filter_all_by_date(
-            #start=pd.to_datetime(test_config.start_times[0]),
-            #end=pd.to_datetime(test_config.end_times[0]),
-            start=test_config.start_times[0],
-            end=test_config.end_times[0],
+            start=pd.to_datetime(test_config.start_times[0]),
+            end=pd.to_datetime(test_config.end_times[0]),
+            #start=test_config.start_times[0],
+            #end=test_config.end_times[0],
         )
         # Appliquer les filtres spatiaux
         manager.filter_all_by_bbox(

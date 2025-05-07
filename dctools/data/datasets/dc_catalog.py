@@ -146,8 +146,9 @@ class DatasetCatalog:
             return
         # self.df = self.df[(self.df.date_end >= start) & (self.df.date_start < end)]
         self.df = self.df.loc[
-            (self.df.date_end >= start) & (self.df.date_start < end)
+            (self.df["date_end"] >= start) & (self.df["date_start"] < end)
         ]
+
 
     def filter_by_bbox(self, bbox: Tuple[float, float, float, float]) -> None:
         """
