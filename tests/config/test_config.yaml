@@ -77,7 +77,7 @@ sources:
 # Wasabi S3 storage info
 wasabi_bucket: "ppr-ocean-climat"
 wasabi_glonet_folder: "DC1/Glonet_forecast"
-wasabi_key: "EG5GYSEYI5C20O6IHNEJ"
-wasabi_secret_key: "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
+wasabi_key: 
+wasabi_secret_key: 
 wasabi_endpoint_url: "https://s3.eu-west-2.wasabisys.com"
 
