@@ -4,9 +4,11 @@ import pytest
 from types import SimpleNamespace
 
 from datetime import datetime
+import geopandas as gpd
 from loguru import logger
 import numpy as np
 import pandas as pd
+from shapely import geometry
 import xarray as xr
 
 from dctools.data.connection.config import (
@@ -109,8 +111,6 @@ class TestPipeline:
         # Création du dataset
         glorys_dataset = RemoteDataset(glorys_config)
 
-
-
         # Glonet (source Wasabi)
         glonet_wasabi_connection_config = WasabiS3ConnectionConfig(
             local_root=test_config.glonet_data_dir,
@@ -139,6 +139,8 @@ class TestPipeline:
         '''glonet_connection_config = GlonetConnectionConfig(
             local_root=test_config.glonet_data_dir,
             endpoint_url=test_config.glonet_base_url,
+            glonet_s3_bucket=test_config.glonet_s3_bucket,
+            s3_glonet_folder=test_config.s3_glonet_folder,
             max_samples=test_config.max_samples,
         )
         if os.path.exists(glonet_catalog_path) and use_json_catalog:
@@ -176,6 +178,24 @@ class TestPipeline:
         self, manager: MultiSourceDatasetManager,
         test_config: SimpleNamespace,
     ):
+        #min_time = pd.to_datetime(test_config.start_times[0])
+        #max_time = pd.to_datetime(test_config.end_times[0])
+        filter_region = gpd.GeoSeries(geometry.Polygon((
+            (test_config.min_lon,test_config.min_lat),
+            (test_config.min_lon,test_config.max_lat),
+            (test_config.max_lon,test_config.min_lat),
+            (test_config.max_lon,test_config.max_lat),
+            (test_config.min_lon,test_config.min_lat),
+            )), crs="EPSG:4326")
+        '''manager.filter_attrs(
+            filters={
+                "date_start": lambda dt: min_time <= dt,
+                "date_end": lambda dt: dt < max_time,
+                #  "coord_system": lambda c_t: c_t.coord_type in ("polar", "geographic"),
+                "variables": lambda vars: var in test_config.target_vars for var in vars,
+                "geometry": lambda reg: reg.intersects(filter_region),
+            }
+        )'''
         # Appliquer les filtres temporels
         manager.filter_all_by_date(
             start=pd.to_datetime(test_config.start_times[0]),
@@ -184,8 +204,8 @@ class TestPipeline:
             #end=test_config.end_times[0],
         )
         # Appliquer les filtres spatiaux
-        manager.filter_all_by_bbox(
-            bbox=(test_config.min_lon, test_config.min_lat, test_config.max_lon, test_config.max_lat)
+        manager.filter_all_by_region(
+            region=filter_region #=(test_config.min_lon, test_config.min_lat, test_config.max_lon, test_config.max_lat)
         )
         # Appliquer les filtres sur les variables
         manager.filter_all_by_variable(variables=test_config.target_vars)
@@ -200,15 +220,15 @@ class TestPipeline:
 
         manager = MultiSourceDatasetManager()
 
-        logger.debug(f"Setup datasets manager")
+        logger.info("Setup datasets manager")
         # Ajouter les datasets avec des alias
-        #manager.add_dataset("glonet", setup_datasets["glonet"])
+        # manager.add_dataset("glonet", setup_datasets["glonet"])
         manager.add_dataset("glorys", setup_datasets["glorys"])
         #manager.add_dataset("glonet_local", setup_datasets["glonet_local"])
         manager.add_dataset("glonet_wasabi", setup_datasets["glonet_wasabi"])
 
         # Construire le catalogue
-        logger.debug(f"Build catalog")
+        logger.info("Build catalog")
         manager.build_catalogs()
 
         manager.all_to_file(output_dir=test_config.catalog_dir)
@@ -322,3 +342,13 @@ class TestPipeline:
             assert "metric" in result
             assert "result" in result
         logger.info(f"Test Results: {results}")
+
+
+'''import folium
+import geopandas as gpd
+
+m = folium.Map(zoom_start=2)
+for _, row in catalog.iterrows():
+    geojson = gpd.GeoSeries([row.geometry]).to_json()
+    folium.GeoJson(geojson, tooltip=row.path).add_to(m)
+'''

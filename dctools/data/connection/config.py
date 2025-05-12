@@ -80,6 +80,7 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
 class FTPConnectionConfig(BaseConnectionConfig):
     def __init__(
         self, local_root: str, host: str,
+        folder: str,
         user: str = None, password: str = None,
         max_samples: Optional[int] = None,
     ):
@@ -87,6 +88,7 @@ class FTPConnectionConfig(BaseConnectionConfig):
         super().__init__(
             "ftp", local_root=local_root, host=host,
             user=user, password=password, fs=fs,
+            ftp_folder=folder,
             max_samples=max_samples,
         )
 
@@ -150,6 +152,8 @@ class GlonetConnectionConfig(BaseConnectionConfig):
         self,
         local_root: str,
         endpoint_url: str,
+        glonet_s3_bucket: str,
+        s3_glonet_folder: str,
         max_samples: Optional[int] = None,
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
@@ -157,5 +161,9 @@ class GlonetConnectionConfig(BaseConnectionConfig):
 
         super().__init__(
             "s3", local_root=local_root,
-            fs=fs, max_samples=max_samples,
+            fs=fs,
+            endpoint_url=endpoint_url,
+            glonet_s3_bucket=glonet_s3_bucket,
+            s3_glonet_folder=s3_glonet_folder,
+            max_samples=max_samples,
         )

@@ -2,7 +2,10 @@
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import (
+    Any, Callable, Dict, List,
+    Optional, Tuple, Union,
+)
 
 import fsspec
 import geopandas as gpd
@@ -11,21 +14,20 @@ from loguru import logger
 import pandas as pd
 from shapely.geometry import box, Polygon
 
+# from dctools.data.coordinates import CoordinateSystem
 
 @dataclass
 class CatalogEntry:
     path: str
-    date_start: Optional[str]  # Format ISO 8601 (e.g., "2024-01-01")
-    date_end: Optional[str]
-    lat_min: Optional[float]
-    lat_max: Optional[float]
-    lon_min: Optional[float]
-    lon_max: Optional[float]
+    date_start: str  # Format ISO 8601 (e.g., "2024-01-01")
+    date_end: str
     variables: Dict[str, List[str]]  # Nom des variables et leurs dimensions associées
     dimensions: Dict[str, str]  # Dimensions sous forme de {standard_name: real_name}
-    spatial_resolution: Optional[Tuple[float, float]] = None  # Résolution (lat, lon) en degrés
-    temporal_resolution: Optional[str] = None  # En format ISO 8601 (e.g., "P1D")
-    geometry: Optional[Polygon] = None
+    coord_type: str    # Type de coordonnées (e.g., "geographic", "polar")
+    crs: str  # Système de référence de coordonnées (e.g., "EPSG:4326")
+    geometry: Polygon
+    #dimensions: Dict[str, str]  # Dimensions sous forme de {standard_name: real_name}
+    resolution: Optional[Dict[str, float]] = None  # Résolution (lat, lon) en degrés, time
     # alias: Optional[str] = None  # Ajout du champ alias
 
 
@@ -96,16 +98,21 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: GeoDataFrame nettoyé et structuré.
         """
-        required = ["path", "date_start", "date_end", "lat_min", "lat_max", "lon_min", "lon_max", "variables", "dimensions"]
+        required = [
+            "path", "date_start", "date_end",
+            "variables", "coordinates",
+            "coord_type", "crs",
+            "geometry",
+        ]
         for col in required:
             if col not in df:
                 df[col] = pd.NA
         df["date_start"] = pd.to_datetime(df["date_start"], errors="coerce")
         df["date_end"] = pd.to_datetime(df["date_end"], errors="coerce")
-        df["geometry"] = df.apply(
-            lambda row: box(row["lon_min"], row["lat_min"], row["lon_max"], row["lat_max"]), axis=1
-        )
-        return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+        # df["geometry"] = df.apply(
+        #    lambda row: box(row["lon_min"], row["lat_min"], row["lon_max"], row["lat_max"]), axis=1
+        #)
+        return df  #gpd.GeoDataFrame(df, crs=df.crs)
 
     def append(self, metadata: Union[CatalogEntry, Dict[str, Any]]):
         """
@@ -130,6 +137,45 @@ class DatasetCatalog:
         """
         self.df = pd.concat([self.df, other_catalog.df], ignore_index=True)
 
+
+    def filter_attrs(
+        self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
+        #filters: Dict[str, Callable[[Any], bool]],
+    ) -> None:
+        df = self.df.copy()
+        for key, func in filters.items():
+            '''if key not in df.columns:
+                raise KeyError(f"{key} not found in catalog columns")
+            elif key == "geometry":
+                # Special case for geometry filtering
+                roi = func(df[key])
+                if not isinstance(roi, gpd.GeoSeries):
+                    raise ValueError(
+                        f"Expected a gpd.GeoSeries for {key}, got {type(roi)}"
+                    )
+                #df = df[df[key].intersects(roi)]
+                df = df[roi]
+                logger.debug(f"Filtered DataFrame shape: {df.shape}")'''
+
+            if not key in df.columns:
+                raise KeyError(f"{key} not found in catalog columns")
+            elif key == "variables":
+                # Special case for variables filtering
+                # df = df[df[key].apply(func)]
+                df = df[func(key)]
+                logger.debug(f"Filtered DataFrame shape: {df.shape}") 
+            else:
+                # df = df[df[key].apply(func)]
+                df = df[func(df[key])]
+                logger.debug(f"Filtered DataFrame: {df}")
+
+        self.df = df
+        # catalog[catalog.intersects(roi)]
+
+
+    #def filter_by_bbox(self, bounds: Polygon) -> gpd.GeoDataFrame:
+    #    return self.df[self.df.intersects(bounds)]
+
     def filter_by_date(self, start: datetime, end: datetime) -> None:
         """
         Filtre les entrées par plage temporelle.
@@ -150,7 +196,7 @@ class DatasetCatalog:
         ]
 
 
-    def filter_by_bbox(self, bbox: Tuple[float, float, float, float]) -> None:
+    def filter_by_region(self, region: gpd.GeoSeries) -> None:
         """
         Filtre les entrées par boîte englobante (bounding box).
 
@@ -160,10 +206,9 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: GeoDataFrame filtré.
         """
-        if not isinstance(bbox, tuple) or len(bbox) != 4:
-            logger.warning("Bounding box must be a tuple of (lon_min, lat_min, lon_max, lat_max).")
+        if not isinstance(region, gpd.GeoSeries):
+            logger.warning("Region must be a GeoSeries.")
             return
-        region = box(*bbox)
         self.df = self.df[self.df.intersects(region)]
 
     def filter_by_variables(self, variables: List[str]) -> None:

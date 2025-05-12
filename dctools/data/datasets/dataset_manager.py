@@ -1,6 +1,6 @@
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from datetime import datetime
 import geopandas as gpd
@@ -42,7 +42,6 @@ class MultiSourceDatasetManager:
         Construit les catalogues pour tous les datasets.
         """
         for alias, dataset in self.datasets.items():
-            logger.debug(f"Building catalog for dataset with alias: {alias}")
             dataset.build_catalog()
 
     def get_catalog(self, alias: str) -> DatasetCatalog:
@@ -72,6 +71,18 @@ class MultiSourceDatasetManager:
         """
         return self.datasets[alias].load_data(path)
 
+    def filter_attrs(
+        self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
+    ) -> None:
+        """
+        Filtre les datasets en fonction des attributs.
+
+        Args:
+            filters (dict[str, Callable[[Any], bool]]): Dictionnaire de filtres.
+        """
+        for alias, dataset in self.datasets.items():
+            dataset.filter_attrs(filters)
+
     def filter_by_date(self, alias: str,start: datetime, end: datetime):
         """
         Filtre le catalogue par plage temporelle.
@@ -82,14 +93,14 @@ class MultiSourceDatasetManager:
         """
         self.datasets[alias].filter_catalog_by_date(start, end)
 
-    def filter_by_bbox(self, alias: str, bbox: Tuple[float, float, float, float]):
+    def filter_by_region(self, alias: str, region: gpd.GeoSeries):
         """
         Filtre le catalogue par boîte englobante.
 
         Args:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
-        self.datasets[alias].filter_catalog_by_bbox(bbox)
+        self.datasets[alias].filter_catalog_by_region(region)
 
     def filter_by_variable(self, alias: str, variables: List[str]):
         """
@@ -98,7 +109,6 @@ class MultiSourceDatasetManager:
         Args:
             variables (List[str]): Liste des variables à filtrer.
         """
-        logger.debug(f"Filtrage du dataset '{alias}' par variables : {variables}")
         self.datasets[alias].filter_catalog_by_variable(variables)
 
     def filter_all_by_date(self, start: datetime, end: datetime):
@@ -113,7 +123,7 @@ class MultiSourceDatasetManager:
             logger.info(f"Filtrage du dataset '{alias}' par date : {start} -> {end}")
             self.filter_by_date(alias, start, end)
 
-    def filter_all_by_bbox(self, bbox: Tuple[float, float, float, float]):
+    def filter_all_by_region(self, region: gpd.GeoSeries):
         """
         Filtre tous les datasets gérés par cette classe par par boîte englobante.
 
@@ -121,8 +131,8 @@ class MultiSourceDatasetManager:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
         for alias, _ in self.datasets.items():
-            logger.info(f"Filtrage du dataset '{alias}' par bbox : {bbox}")
-            self.filter_by_bbox(alias, bbox)
+            logger.info(f"Filtrage du dataset '{alias}' par bbox : {region}")
+            self.filter_by_region(alias, region)
 
     def filter_all_by_variable(self, variables: List[str]):
         """
