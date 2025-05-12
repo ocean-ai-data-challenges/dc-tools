@@ -6,6 +6,7 @@
 from typing import Any, Optional
 
 from loguru import logger
+import netCDF4
 import xarray as xr
 import zarr
 

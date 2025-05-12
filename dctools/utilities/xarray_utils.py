@@ -14,6 +14,7 @@ from pathlib import Path
 import xarray as xr
 import xesmf as xe
 
+from dctools.data.coordinates import CoordinateSystem
 
 # Possible names of coordinates that we want to check for
 LATITUDE_NAMES = ["lat", "latitude", "LAT", "LATITUDE"]
@@ -77,7 +78,15 @@ def get_grid_coord_names(
     in this file for any existing coordinates in `data`
     """
     coord_name_dict = {}
-    list_coords = list(data.coords) if hasattr(data, "coords") else list(data)
+    if hasattr(data, "coords")and len(data.coords) > 0:
+        # If data is a Dataset, get the coordinates
+        list_coords = list(data.coords) if hasattr(data, "coords") else list(data)
+    elif hasattr(data, "dims") and len(data.dims) > 0:
+        # If data is a DataArray, get the dimensions
+        list_coords = list(data.dims)
+    else:
+        # If data is neither a Dataset nor a DataArray, return an empty dictionary
+        list_coords = list(data)
     # There's probably a less disgusting way of doing this...
     lon_set = set(LONGITUDE_NAMES).intersection(list_coords)
     coord_name_dict["lon"] = None if len(lon_set) == 0 else next(iter(lon_set))
@@ -408,3 +417,12 @@ def reset_time_coordinates(dataset: xr.Dataset) -> xr.Dataset:
     # Remplacer les valeurs des coordonnées de temps
     dataset = dataset.assign_coords(time=new_time_values)
     return dataset
+
+def detect_coordinate_system(ds: xr.Dataset) -> CoordinateSystem:
+    if "lat" in ds.dims and "lon" in ds.dims:
+        return CoordinateSystem("geographic", ("lat", "lon"), crs="EPSG:4326")
+    elif "x" in ds.dims and "y" in ds.dims:
+        crs = ds.attrs.get("crs", "EPSG:3413")  # ex: stéréographique arctique
+        return CoordinateSystem("polar", ("x", "y"), crs=crs)
+    else:
+        raise ValueError("Unknown coordinate system in dataset.")

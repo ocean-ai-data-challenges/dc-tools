@@ -83,7 +83,6 @@ def load_configs(
             # for time_var in TIME_VARIABLES:
             #    if time_var in config.keys():
             #        config[time_var] = config[time_var]
-            logger.info(f"LOADED CONFIG: {config}")
     except Exception as err:
         logger.error(
             f"Error while loading config from {config_filepath}: {repr(err)}"

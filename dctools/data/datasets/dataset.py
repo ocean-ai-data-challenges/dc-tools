@@ -1,7 +1,11 @@
 
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Iterator, Optional, Tuple, Type
+from typing import (
+    Any, Callable, Dict, List,
+    Iterator, Optional, Tuple, Type,
+    Union,
+)
 
 import datetime
 import geopandas as gpd
@@ -218,6 +222,12 @@ class BaseDataset(ABC):
         #return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
 
+    '''def filter_attrs(
+        self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
+    ) -> None:
+        self.catalog.filter_attrs(filters)'''
+
+
     def filter_catalog_by_date(self, start: datetime, end: datetime):
         """
         Filtre le catalogue par plage temporelle.
@@ -228,14 +238,14 @@ class BaseDataset(ABC):
         """
         self.catalog.filter_by_date(start, end)
 
-    def filter_catalog_by_bbox(self, bbox: Tuple[float, float, float, float]):
+    def filter_catalog_by_region(self, region: gpd.GeoSeries):
         """
         Filtre le catalogue par boîte englobante.
 
         Args:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
-        self.catalog.filter_by_bbox(bbox)
+        self.catalog.filter_by_region(region)
 
     def filter_catalog_by_variable(self, variables: List[str]):
         """

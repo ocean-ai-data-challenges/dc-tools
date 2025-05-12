@@ -8,11 +8,10 @@
 ## Net variables
 glonet_base_url: "https://minio.dive.edito.eu"
 glonet_s3_bucket: "project-glonet"
-s3_glonet_folder: "public/glonet_reforecast_2024"
+s3_glonet_folder: "public/glonet_refull_2024"
 glorys_cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
 glonet_n_days_forecast: 10
 
-glonet_local_dir: "/home/k24aitmo/IMT/software/tests/Glonet"
 max_samples: 2
 ###########################################
 ## List of start time for TC events
@@ -62,18 +61,6 @@ catalog_path: ""
 # Datasets
 batch_size: 8
 
-sources:
-  - url: "https://minio.dive.edito.eu"
-    s3_bucket: "project-glonet"
-    s3_folder: "public/glonet_reforecast_2024"
-    dataset: GLONET
-    scanner: scanners.s3_scanner
-
-  - url: ""
-    cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
-    dataset: GLORYS
-    scanner: scanners.cmems_scanner
-    
 # Wasabi S3 storage info
 wasabi_bucket: "ppr-ocean-climat"
 wasabi_glonet_folder: "DC1/Glonet_forecast"

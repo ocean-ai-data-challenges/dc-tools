@@ -1,25 +1,34 @@
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import (
+    Any, Dict, List, Optional, Union
+)
 
 import copernicusmarine
 import datetime
 import fsspec
+# import geopandas as gpd
 from loguru import logger
 import os
+import numpy as np
 import pandas as pd
 from pathlib import Path
-import random
-from shapely.geometry import box
-import string
+# import random
+# from shapely.geometry import box, Point
+# import string
 import xarray as xr
 
 from dctools.data.connection.config import BaseConnectionConfig
 from dctools.data.datasets.dc_catalog import CatalogEntry
-from dctools.dcio.saver import DataSaver
+from dctools.data.coordinates import (
+    get_dataset_geometry,
+    get_coordinate_system,
+    CoordinateSystem,
+)
+# from dctools.dcio.saver import DataSaver
 from dctools.dcio.loader import FileLoader
-from dctools.utilities.file_utils import read_file_tolist #, check_valid_files
-from dctools.processing.cmems_data import extract_dates_from_filename
+from dctools.utilities.file_utils import read_file_tolist
+# from dctools.processing.cmems_data import extract_dates_from_filename
 from dctools.utilities.xarray_utils import (
     get_grid_coord_names,
     extract_spatial_bounds,
@@ -32,7 +41,7 @@ class BaseConnectionManager(ABC):
         self.params = connect_config.to_dict()
         self._list_files = self.list_files()
 
-    def open(self, path: str, mode: str = "rb") -> xr.Dataset:
+    def open(self, path: str, mode: str = "rb", try_remote_open=True) -> xr.Dataset:
         """
         Open a file, prioritizing remote access via S3. If the file is not available remotely,
         attempt to download it locally and open it.
@@ -50,9 +59,10 @@ class BaseConnectionManager(ABC):
             if dataset:
                 return dataset
         # Tenter d'ouvrir le fichier en ligne
-        dataset = self.open_remote(path, mode)
-        if dataset:
-            return dataset
+        elif self.supports(path):
+            dataset = self.open_remote(path, mode)
+            if dataset:
+                return dataset
 
         # Télécharger le fichier en local, puis l'ouvrir
         try:
@@ -107,6 +117,8 @@ class BaseConnectionManager(ABC):
             remote_path (str): Remote path of the file.
             local_path (str): Local path to save the file.
         """
+
+        remote_file = remote_file.replace("ftp://ftp.ifremer.fr", "")
         with self.params.fs.open(remote_path, "rb") as remote_file:
             with open(local_path, "wb") as local_file:
                 local_file.write(remote_file.read())
@@ -143,31 +155,23 @@ class BaseConnectionManager(ABC):
         with self.open(first_file, "rb") as ds:
             # Extraire les métadonnées globales
 
-            dict_dims = get_grid_coord_names(ds)
-            longitude_data = ds[dict_dims['lon']].values
-            latitude_data = ds[dict_dims['lat']].values
+            coord_sys = get_coordinate_system(ds)
+
+            #logger.info(f"Dimensions: {coord_sys.coordinates}")
 
             # Inférer la résolution spatiale et temporelle
-            spatial_resolution = self._infer_spatial_resolution(ds)
-            temporal_resolution = self._infer_temporal_resolution(ds)
-
-            # Extraire les dimensions
-            dimensions = get_grid_coord_names(ds)
+            dict_resolution = self.estimate_resolution(
+                ds, coord_sys
+            )
 
             # Associer les variables à leurs dimensions
             variables = {var: list(ds[var].dims) for var in ds.data_vars}
 
             global_metadata = {
-                "dimensions": dimensions,
                 "variables": variables,
-                "spatial_resolution": spatial_resolution,
-                "temporal_resolution": temporal_resolution,
-                "lon_min": longitude_data.min(),
-                "lon_max": longitude_data.max(),
-                "lat_min": latitude_data.min(),
-                "lat_max": latitude_data.max(),
+                "resolution": dict_resolution,
+                "coord_system": coord_sys,
             }
-            
         return global_metadata
 
     def extract_metadata(self, path: str, global_metadata: Dict[str, Any]) -> CatalogEntry:
@@ -184,71 +188,91 @@ class BaseConnectionManager(ABC):
         try:
             with self.open(path, "rb") as ds:
                 #ds = xr.open_dataset(f)
-                date_start = pd.to_datetime(ds.time.min().values) if "time" in ds.coords else None
-                date_end = pd.to_datetime(ds.time.max().values) if "time" in ds.coords else None
+                date_start = pd.to_datetime(
+                    ds.time.min().values
+                ) if "time" in ds.coords else None
+                date_end = pd.to_datetime(
+                    ds.time.max().values
+                ) if "time" in ds.coords else None
                 #date_start = ds.time.min().values if "time" in ds.coords else None
                 #date_end = ds.time.max().values if "time" in ds.coords else None
+
+                ds_region = get_dataset_geometry(ds, global_metadata.get('coord_system'))
 
                 # Créer une instance de CatalogEntry
                 return CatalogEntry(
                     path=path,
                     date_start=date_start,
                     date_end=date_end,
-                    lat_min=global_metadata.get("lat_min"),
-                    lat_max=global_metadata.get("lat_max"),
-                    lon_min=global_metadata.get("lon_min"),
-                    lon_max=global_metadata.get("lon_max"),
                     variables=global_metadata.get("variables"),
-                    dimensions=global_metadata.get("dimensions"),
-                    spatial_resolution=global_metadata.get("spatial_resolution"),
-                    temporal_resolution=global_metadata.get("temporal_resolution"),
-                    geometry=box(global_metadata["lon_min"], global_metadata["lat_min"], global_metadata["lon_max"], global_metadata["lat_max"]),
+                    #dimensions=global_metadata.get("dimensions"),
+                    dimensions=global_metadata.get("coord_system").coordinates,
+                    coord_type=global_metadata.get("coord_system").coord_type,
+                    crs=global_metadata.get("coord_system").crs,
+                    resolution=global_metadata.get(
+                        "resolution"
+                    ),
+                    geometry=ds_region,
                 )
         except Exception as exc:
-            logger.error(f"Failed to extract metadata for file {path}: {repr(exc)}")
+            logger.error(
+                f"Failed to extract metadata for file {path}: {repr(exc)}"
+            )
             raise
 
-    def _infer_spatial_resolution(self, ds: xr.Dataset) -> Optional[Tuple[float, float]]:
+    def estimate_resolution(
+        self,
+        ds: xr.Dataset,
+        coord_system: CoordinateSystem,
+    ) -> Dict[str, Union[float, str]]:
         """
-        Infère la résolution spatiale à partir des coordonnées du dataset.
+        Estimate spatial and temporal resolution from an xarray Dataset based on coordinate type and names.
 
         Args:
-            ds (xr.Dataset): Dataset xarray.
+            ds: xarray.Dataset
+            coord_type: 'geographic' or 'polar'
+            dict_coord: dict mapping standardized keys ('lat', 'lon', 'x', 'y', 'time') to actual dataset coord names
 
         Returns:
-            Optional[Tuple[float, float]]: Résolution spatiale (lat, lon) en degrés.
+            Dictionary of estimated resolutions (degrees, meters, seconds, etc.)
         """
-        if "lat" in ds.coords and len(ds.lat) > 1 and "lon" in ds.coords and len(ds.lon) > 1:
-            lat_resolution = float(ds.lat.diff(dim="lat").mean().values)
-            lon_resolution = float(ds.lon.diff(dim="lon").mean().values)
-            return lat_resolution, lon_resolution
-        return -1, -1
+        res = {}
 
-    def _infer_temporal_resolution(self, ds: xr.Dataset) -> Optional[str]:
-        """
-        Infère la résolution temporelle à partir des coordonnées du dataset.
-
-        Args:
-            ds (xr.Dataset): Dataset xarray.
-
-        Returns:
-            Optional[str]: Résolution temporelle en format ISO 8601.
-        """
-        if "time" in ds.coords and len(ds.time) > 1:
-            try:
-                # Extraire les deux premières valeurs de temps comme scalaires
-                time_0 = pd.to_datetime(ds.time[0].values)
-                time_1 = pd.to_datetime(ds.time[1].values)
-
-                # Calculer la différence temporelle
-                delta = pd.to_timedelta(time_1 - time_0)
-
-                # Retourner la résolution au format ISO 8601
-                return delta.isoformat()
-            except Exception as exc:
-                logger.error(f"Erreur lors de l'inférence de la résolution temporelle : {repr(exc)}")
+        # Helper function for 1D resolution
+        def compute_1d_resolution(coord):
+            values = ds.coords[coord].values
+            if values.ndim != 1:
                 return None
-        return -1
+            diffs = np.diff(values)
+            return float(np.round(np.median(np.abs(diffs)), 6))
+
+        # Spatial resolution
+        if coord_system.coord_type == "geographic":
+            lat_name = coord_system.coordinates.get("lat")
+            lon_name = coord_system.coordinates.get("lon")
+            if lat_name in ds.coords:
+                res["latitude"] = compute_1d_resolution(lat_name)
+            if lon_name in ds.coords:
+                res["longitude"] = compute_1d_resolution(lon_name)
+
+        elif coord_system.coord_type == "polar":
+            x_name = coord_system.coordinates.get("x")
+            y_name = coord_system.coordinates.get("y")
+            if x_name in ds.coords:
+                res["x"] = compute_1d_resolution(x_name)
+            if y_name in ds.coords:
+                res["y"] = compute_1d_resolution(y_name)
+
+        # Temporal resolution (common to both)
+        time_name = coord_system.coordinates.get("time")
+        if time_name in ds.coords:
+            time_values = ds.coords[time_name].values
+            if time_values.ndim == 1 and len(time_values) > 1:
+                diffs = np.diff(time_values)
+                diffs = pd.to_timedelta(diffs).astype("timedelta64[s]").astype(int)
+                res["time"] = f"{int(np.median(diffs))}s"
+
+        return res
 
     def list_files_with_metadata(self) -> List[CatalogEntry]:
         """
@@ -304,7 +328,7 @@ class LocalConnectionManager(BaseConnectionManager):
             List[str]: List of file paths on local disk".
         """
         root = self.params.local_root
-        files = [p for p in self.params.fs.glob(f"{root}/{pattern}")]
+        files = [p for p in sorted(self.params.fs.glob(f"{root}/{pattern}"))]
         return [f"{file}" for file in files]
 
     @classmethod
@@ -333,7 +357,7 @@ class CMEMSManager(BaseConnectionManager):
         Return:
             (dict): CMEMS credentials
         """
-        with open(self.params.cmems_credentials, "r") as f:
+        with open(self.params.cmems_credentials, "rb") as f:
             lines = f.readlines()
         credentials = {}
         for line in lines:
@@ -402,7 +426,7 @@ class CMEMSManager(BaseConnectionManager):
         return None
 
 
-    '''def list_files(self, pattern="*.nc") -> List[str]:
+    '''def list_files(self, pattern="**/*.nc") -> List[str]:
         """List files in the Copernicus Marine directory."""
         logger.info("Listing files in Copernicus Marine directory.")
         tmp_filepath = os.path.join(
@@ -419,7 +443,7 @@ class CMEMSManager(BaseConnectionManager):
             logger.error(f"Failed to list files from CMEMS: {repr(exc)}")
             return []'''
     
-    def list_files(self, pattern="*.nc") -> List[str]:
+    def list_files(self, pattern="**/*.nc") -> List[str]:
         """List files in the Copernicus Marine directory."""
         logger.info("Listing files in Copernicus Marine directory.")
         tmp_filepath = os.path.join(self.params.local_root, "files.txt")
@@ -529,14 +553,20 @@ class CMEMSManager(BaseConnectionManager):
 class FTPManager(BaseConnectionManager):
     @classmethod
     def supports(cls, path: str) -> bool:
+        # FTP does not support remote opening
         return path.startswith("ftp://")
 
-    def list_files(self, pattern: str = "*.nc") -> List[str]:
+    def open_remote(self, path, mode = "rb"):
+        # cannot open files remotely
+        # FTP does not support remote opening
+        return None
+
+    def list_files(self, pattern: str = "**/*.nc") -> List[str]:
         """
         Liste les fichiers disponibles sur le serveur FTP correspondant au motif donné.
 
         Args:
-            pattern (str): Motif de recherche pour filtrer les fichiers (par défaut "*.nc").
+            pattern (str): Motif de recherche pour filtrer les fichiers (par défaut "**/*.nc").
 
         Returns:
             List[str]: Liste des chemins des fichiers correspondant au motif.
@@ -544,14 +574,18 @@ class FTPManager(BaseConnectionManager):
         try:
             # Accéder au système de fichiers FTP via fsspec
             fs = self.params.fs
-            root = self.params.local_root
 
+            remote_path = f"ftp://{self.params.host}/{self.params.ftp_folder}{pattern}"
+            # remote_path = f"{self.params.ftp_folder}" #{pattern}"
+            logger.info(f"\n\nListing files in: {remote_path}\n\n")
             # Lister les fichiers correspondant au motif
-            files = fs.glob(f"{root}/{pattern}")
+            #files = fs.glob(f"{remote_path}")
+            files = sorted(fs.glob(remote_path))
+            logger.info(f"Files found: {files}")
 
             if not files:
                 logger.warning(f"Aucun fichier trouvé sur le serveur FTP avec le motif : {pattern}")
-            return files
+            return [ f"ftp://{self.params.host}{file}" for file in files ]
         except Exception as exc:
             logger.error(f"Erreur lors de la liste des fichiers sur le serveur FTP : {repr(exc)}")
             return []
@@ -581,7 +615,7 @@ class S3Manager(BaseConnectionManager):
             logger.info(f"Listing files in: {remote_path}")
 
             # Utiliser fsspec pour accéder aux fichiers
-            files = self.params.fs.glob(remote_path)
+            files = sorted(self.params.fs.glob(remote_path))
             files_urls = [
                 f"s3://{file}"
                 for file in files
@@ -686,7 +720,8 @@ class GlonetManager(BaseConnectionManager):
             if date.year < 2025:
                 date_str = date.strftime("%Y-%m-%d")
                 list_files.append(
-                    f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
+                    f"{self.params.endpoint_url}/{self.params.glonet_s3_bucket}/{self.params.s3_glonet_folder}/{date_str}.zarr"
+                    #f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
                     #f"s3://project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
                 )
                 date = date + datetime.timedelta(days=7)

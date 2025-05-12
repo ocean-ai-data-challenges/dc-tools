@@ -6,6 +6,7 @@
 import os
 from typing import List
 
+import hashlib
 import pandas as pd
 
 def get_dates_from_startdate(start_date: str, ndays: int) -> List[str]:
@@ -35,3 +36,7 @@ def get_home_path():
         #logger.info(f"HOME: {os.environ['HOMEPATH']}")
         home_path = os.environ['HOMEPATH']
     return home_path
+
+def hash_schema(schema: dict) -> str:
+    normalized = json.dumps(schema, sort_keys=True)
+    return hashlib.md5(normalized.encode()).hexdigest()
