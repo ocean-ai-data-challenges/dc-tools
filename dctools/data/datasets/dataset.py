@@ -1,6 +1,7 @@
 
 
 from abc import ABC, abstractmethod
+import os
 from typing import (
     Any, Callable, Dict, List,
     Iterator, Optional, Tuple, Type,
@@ -284,7 +285,7 @@ class BaseDataset(ABC):
         """
         return self.catalog.get_dataframe().empty
 
-    def to_file(self, path: str) -> None:
+    def to_json(self, path: str) -> None:
         """
         Exporte l'intégralité du contenu de BaseDataset au format JSON.
 
@@ -292,8 +293,10 @@ class BaseDataset(ABC):
             path (str): Chemin pour sauvegarder le fichier JSON.
         """
         try:
+            logger.info(f"Exportation de BaseDataset en JSON dans {path}")
+            logger.info(f"Catalogue : {self.catalog}")
             # Sauvegarder le catalogue en JSON
-            self.catalog.to_file(str(path))
+            self.catalog.to_json(str(path))
             # Construire un dictionnaire pour les attributs de BaseDataset
             logger.info(f"BaseDataset sauvegardé avec succès dans {path}")
         except Exception as exc:
@@ -332,3 +335,94 @@ class LocalDataset(BaseDataset):
         """
         pass
 
+
+
+def get_dataset_from_config(
+    source: dict,
+    root_data_folder: str,
+    root_catalog_folder: str,
+    max_samples: Optional[int] = 0,
+    use_catalog: bool = False,
+) -> RemoteDataset:
+    """Get dataset from config."""
+    # Load config
+    dataset_name = source['dataset']
+    config_name = source['config']
+    connection_type = source['connection_type']
+
+    data_root = os.path.join(
+        root_data_folder,
+        dataset_name,
+    )
+
+    catalog_path = os.path.join(
+        root_catalog_folder,
+        dataset_name + ".json",
+    )
+
+    if not os.path.exists(data_root):
+        os.mkdir(data_root)
+    if not os.path.exists(root_catalog_folder):
+        os.mkdir(root_catalog_folder)
+
+    match config_name:
+        case "cmems":
+            cmems_connection_config = CMEMSConnectionConfig(
+                local_root=data_root,
+                dataset_id=source['cmems_product_name'],
+                max_samples=max_samples,
+            )
+            if os.path.exists(catalog_path) and use_catalog:
+                # Load dataset metadata from catalog
+                cmems_config = DatasetConfig(
+                    alias=dataset_name,
+                    connection_config=cmems_connection_config,
+                    catalog_options={"catalog_path": catalog_path}
+                )
+            else:
+                # create dataset
+                cmems_config = DatasetConfig(
+                    alias=dataset_name,
+                    connection_config=cmems_connection_config,
+                )
+            # Création du dataset
+            dataset = RemoteDataset(cmems_config)
+
+        case "s3":
+            if "wasabi" in dataset_name:
+                s3_connection_config = WasabiS3ConnectionConfig(
+                    local_root=data_root,
+                    bucket=source['s3_bucket'],
+                    bucket_folder=source['s3_folder'],
+                    key=source['s3_key'],
+                    secret_key=source['s3_secret_key'],
+                    endpoint_url=source['url'],
+                    max_samples=max_samples,
+                )
+            elif dataset_name == "glonet":
+                s3_connection_config = GlonetConnectionConfig(
+                    local_root=data_root,
+                    endpoint_url=source['url'],
+                    glonet_s3_bucket=source['s3_bucket'],
+                    s3_glonet_folder=source['s3_folder'],
+                    max_samples=max_samples,
+                )
+
+            if os.path.exists(catalog_path) and use_catalog:
+                # Load dataset metadata from catalog
+                s3_config = DatasetConfig(
+                    alias=dataset_name,
+                    connection_config=s3_connection_config,
+                    catalog_options={"catalog_path": catalog_path}
+                )
+            else:
+                # create dataset
+                s3_config = DatasetConfig(
+                    alias=dataset_name,
+                    connection_config=s3_connection_config,
+                )
+            # Création du dataset
+            dataset = RemoteDataset(s3_config)
+
+
+    return dataset

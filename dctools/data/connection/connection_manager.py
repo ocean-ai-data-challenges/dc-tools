@@ -87,6 +87,7 @@ class BaseConnectionManager(ABC):
         """
         if Path(local_path).exists():
             # logger.info(f"Opening local file: {local_path}")
+
             return FileLoader.load_dataset(local_path)
             # return open_dataset_auto(local_path, self)
         return None
@@ -199,6 +200,11 @@ class BaseConnectionManager(ABC):
 
                 ds_region = get_dataset_geometry(ds, global_metadata.get('coord_system'))
 
+                '''from dctools.utilities.misc_utils import visualize_netcdf_with_geometry
+                visualize_netcdf_with_geometry(
+                    ds, ds_region, global_metadata.get("coord_system").coordinates
+                )'''
+
                 # Créer une instance de CatalogEntry
                 return CatalogEntry(
                     path=path,
@@ -271,7 +277,6 @@ class BaseConnectionManager(ABC):
                 diffs = np.diff(time_values)
                 diffs = pd.to_timedelta(diffs).astype("timedelta64[s]").astype(int)
                 res["time"] = f"{int(np.median(diffs))}s"
-
         return res
 
     def list_files_with_metadata(self) -> List[CatalogEntry]:
@@ -713,12 +718,12 @@ class GlonetManager(BaseConnectionManager):
         Returns:
             List[str]: List of file paths.
         """
-        start_date = "2024-01-03"
-        date = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+        start_date = "20240103"
+        date = datetime.datetime.strptime(start_date, "%Y%m%d")
         list_files = []
         while True:
             if date.year < 2025:
-                date_str = date.strftime("%Y-%m-%d")
+                date_str = date.strftime("%Y%m%d")
                 list_files.append(
                     f"{self.params.endpoint_url}/{self.params.glonet_s3_bucket}/{self.params.s3_glonet_folder}/{date_str}.zarr"
                     #f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
@@ -727,6 +732,7 @@ class GlonetManager(BaseConnectionManager):
                 date = date + datetime.timedelta(days=7)
             else:
                 break
+        #logger.info(f"List of files: {list_files}")
         return list_files
 
 

@@ -364,6 +364,49 @@ urllib3 = {version = ">=1.25.4,<2.2.0 || >2.2.0,<3", markers = "python_version >
 crt = ["awscrt (==0.23.8)"]
 
 [[package]]
+name = "cartopy"
+version = "0.24.1"
+description = "A Python library for cartographic visualizations with Matplotlib"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "Cartopy-0.24.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ce0c83314570c61a695a1f7c3a4a22dc75f79d28f4c68b88a8aeaf13d6a2343c"},
+    {file = "Cartopy-0.24.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:511f992340baea2c171cb17b3ef595537e5355640f3baa7ac895de25df016a70"},
+    {file = "Cartopy-0.24.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:54f4d23961e0f9436baaf4747928361ccdcc893fa9b7bad9f615551bc8aa3fe8"},
+    {file = "Cartopy-0.24.1-cp310-cp310-win_amd64.whl", hash = "sha256:e0b55526b605a9dee4fa3d7e5659b6d7d9d30e609bc5e62487bc4f7d8e90873b"},
+    {file = "Cartopy-0.24.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:4a14638b63d7df2858f73e9f8f4f4826d7c9cf13781aa6824fa0134fbaebbd98"},
+    {file = "Cartopy-0.24.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:d74b4a3eae9e570f474276fb61847112cdccdead396ec2ddad226dad9eaf4564"},
+    {file = "Cartopy-0.24.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dfa38fb216cfd16cc266fd6f86b60ebdf0056839b490f38d2d89229b03abc877"},
+    {file = "Cartopy-0.24.1-cp311-cp311-win_amd64.whl", hash = "sha256:f440ddb61171319adf34ecec4d91202864cd514a7bc8a252e0ff7788a6604031"},
+    {file = "Cartopy-0.24.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:a984e33977daed8f760c09c331c8368a6af060db1190af89d74a027c272e39c3"},
+    {file = "Cartopy-0.24.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:71d8a6d061d0764aba3baf357a68f3d73796a8a46d34b8c9fb241171b273c69e"},
+    {file = "Cartopy-0.24.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2f354a1d902a8d6ee33b099acc86ac2e1af528bbc0ea718b834111c97e604981"},
+    {file = "Cartopy-0.24.1-cp312-cp312-win_amd64.whl", hash = "sha256:b1bb2d02b31884ee1d4f14e5b436bbf95745eac39c6fc0d6c67c83bb907b55b3"},
+    {file = "Cartopy-0.24.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:d279968b845f72e3423e454b2b0b985fb2389e6ccd18fb73324abeca4e43f516"},
+    {file = "Cartopy-0.24.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:f0963b80a048252815c56fbd21bc4e5d163618a9eaa36c8898ce2c60b6c03979"},
+    {file = "Cartopy-0.24.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dfdde0a6e0e56c5fc46f4e7d332237eb31bbd9908417f0f190fda5d322754184"},
+    {file = "Cartopy-0.24.1-cp313-cp313-win_amd64.whl", hash = "sha256:b17cf23dd74d0a922c2a5682dacef3c0bf89fa8c0bd0eae96b87fb684f966b15"},
+    {file = "cartopy-0.24.1.tar.gz", hash = "sha256:01c910d5634c69a7efdec46e0a17d473d2328767f001d4dc0b5c4b48e585c8bd"},
+]
+
+[package.dependencies]
+matplotlib = ">=3.6"
+numpy = ">=1.23"
+packaging = ">=21"
+pyproj = ">=3.3.1"
+pyshp = ">=2.3"
+shapely = ">=1.8"
+
+[package.extras]
+doc = ["pydata-sphinx-theme", "sphinx", "sphinx-gallery"]
+ows = ["OWSLib (>=0.27.0)", "pillow (>=9.1)"]
+plotting = ["pillow (>=9.1)", "scipy (>=1.9)"]
+speedups = ["fiona", "pykdtree"]
+srtm = ["beautifulsoup4"]
+test = ["coveralls", "pytest (>=5.1.2)", "pytest-cov", "pytest-mpl (>=0.11)", "pytest-xdist"]
+
+[[package]]
 name = "certifi"
 version = "2025.1.31"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -3153,7 +3196,7 @@ zarr = "2.18.4"
 type = "git"
 url = "ssh://git@github.com/aitmohandk/oceanbench"
 reference = "main"
-resolved_reference = "244ed0d00ff9faa84430d280824b1ec8f8a197b1"
+resolved_reference = "a6d93f36aa108b303b41cb1ade43ad1623c777e9"
 
 [[package]]
 name = "omegaconf"
@@ -4001,6 +4044,18 @@ files = [
 
 [package.dependencies]
 certifi = "*"
+
+[[package]]
+name = "pyshp"
+version = "2.3.1"
+description = "Pure Python read/write support for ESRI Shapefile format"
+optional = false
+python-versions = ">=2.7"
+groups = ["main"]
+files = [
+    {file = "pyshp-2.3.1-py2.py3-none-any.whl", hash = "sha256:67024c0ccdc352ba5db777c4e968483782dfa78f8e200672a90d2d30fd8b7b49"},
+    {file = "pyshp-2.3.1.tar.gz", hash = "sha256:4caec82fd8dd096feba8217858068bacb2a3b5950f43c048c6dc32a3489d5af1"},
+]
 
 [[package]]
 name = "pystac"
@@ -5648,4 +5703,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11.0,<3.14.0"
-content-hash = "119b63413f313254b688ee47789af28386d789f109b57b100b38e66823f8fe48"
+content-hash = "d25e3d9f21aac60cf08b79125d68ffe0883ea81ab8fa6e4251ba37ed6a3f5e15"
