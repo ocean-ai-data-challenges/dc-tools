@@ -145,7 +145,7 @@ class MultiSourceDatasetManager:
             logger.info(f"Filtrage du dataset '{alias}' par variables : {variables}")
             self.filter_by_variable(alias, variables)
 
-    def to_file(self, alias: str, path: Optional[str] = None) -> str:
+    def to_json(self, alias: str, path: Optional[str] = None) -> str:
         """
         Exporte les informations d'un dataset au format JSON.
 
@@ -160,7 +160,7 @@ class MultiSourceDatasetManager:
             raise ValueError(f"Alias '{alias}' not found in the manager.")
 
         dataset = self.datasets[alias]
-        dataset.get_catalog().to_file(path)
+        dataset.get_catalog().to_json(path)
         '''# Construire le dictionnaire des informations du dataset
         dataset_info = {
             "alias": alias,
@@ -179,7 +179,7 @@ class MultiSourceDatasetManager:
 
         return json_str'''
 
-    def all_to_file(self, output_dir: str):
+    def all_to_json(self, output_dir: str):
         """
         Exporte les informations de tous les datasets au format JSON.
 
@@ -202,8 +202,8 @@ class MultiSourceDatasetManager:
             json_filename = f"{alias}.json"
             json_path = os.path.join(output_dir, json_filename)
 
-            # Appeler la méthode to_file() pour chaque dataset
-            self.to_file(alias, path=json_path)
+            # Appeler la méthode to_json() pour chaque dataset
+            self.to_json(alias, path=json_path)
 
             logger.info(f"Dataset '{alias}' exporté au format JSON dans '{json_path}'.")
 

@@ -143,13 +143,14 @@ class EvaluationDataloader:
 
     def open_pred(self, pred_entry: str) -> xr.Dataset:
         pred_data = self.pred_manager.open(pred_entry)
-        return pred_data
 
+        from datetime import datetime
+        start_time_glorys = datetime.fromisoformat(str(pred_data["time"][0].values))
+        return pred_data
 
     def open_ref(self, ref_entry: str) -> xr.Dataset:
         ref_data = self.pred_manager.open(ref_entry)
         return ref_data
-
 
 
     '''def _find_matching_reference(self, pred_row: pd.Series) -> Optional[xr.Dataset]:

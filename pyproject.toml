@@ -40,6 +40,7 @@ dependencies = [
     "nbformat>=5.10.4",
     "tabulate",
     "pyarrow",
+    "cartopy>=0.24.1",
 ]
 
 [project.urls]

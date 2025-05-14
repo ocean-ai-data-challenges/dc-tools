@@ -11,13 +11,15 @@ import pandas as pd
 from shapely import geometry
 import xarray as xr
 
-from dctools.data.connection.config import (
+'''from dctools.data.connection.config import (
     S3ConnectionConfig,
     WasabiS3ConnectionConfig,
     CMEMSConnectionConfig,
     LocalConnectionConfig,
     GlonetConnectionConfig
-)
+)'''
+from dctools.data.datasets.dataset import get_dataset_from_config
+
 #from dctools.data.connection.connection_manager import (
 #    S3Manager,
 #    CMEMSManager,
@@ -54,10 +56,16 @@ class TestPipeline:
         config = load_config_file(config_file)
 
         # Ajouter des chemins spécifiques pour les tests
+        config["data_directory"] = os.path.join("tests", "data")
         config["glonet_data_dir"] = os.path.join("tests", "data", "glonet")
         config["glorys_data_dir"] = os.path.join("tests", "data", "glorys")
         config["catalog_dir"] = os.path.join("tests", "data")
         config["regridder_weights"] = os.path.join("tests", "data", "weights")
+
+        if not os.path.exists(config["data_directory"]):
+            os.mkdir(config["data_directory"])
+        if not os.path.exists(config["catalog_dir"]):
+            os.mkdir(config["catalog_dir"])
         if os.path.exists(config["regridder_weights"]):
             os.remove(config["regridder_weights"])
         return SimpleNamespace(**config)
@@ -70,12 +78,12 @@ class TestPipeline:
         """Fixture pour configurer les datasets."""
 
         '''ds_test = xr.open_dataset(
-            f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/2024-01-03.zarr",
+            f"https://minio.dive.edito.eu/project-glonet/public/glonet_refull_2024/20240103.zarr",
             engine="zarr",
         )
         logger.debug(f"ds_test: {ds_test}")'''
 
-        glorys_dataset_name = "glorys"
+        '''glorys_dataset_name = "glorys"
         glonet_dataset_name = "glonet"
         glonet_wasabi_dataset_name = "glonet_wasabi"
         glorys_catalog_path = os.path.join(
@@ -136,7 +144,7 @@ class TestPipeline:
 
 
         # Glonet
-        '''glonet_connection_config = GlonetConnectionConfig(
+        glonet_connection_config = GlonetConnectionConfig(
             local_root=test_config.glonet_data_dir,
             endpoint_url=test_config.glonet_base_url,
             glonet_s3_bucket=test_config.glonet_s3_bucket,
@@ -157,18 +165,36 @@ class TestPipeline:
             )
         glonet_dataset = RemoteDataset(glonet_config)'''
 
-
-        '''glonet_local_config = DatasetConfig(
-            name="glonet_local",
-            connection_config=LocalConnectionConfig(
-                local_root=test_config.glonet_local_dir,
-                max_samples=test_config.max_samples,
-            ),
-        )'''
-        #glonet_local_dataset = LocalDataset(glonet_local_config)
+        for source in test_config.sources:
+            source_name = source['dataset']
+            if source_name == "glorys":
+                glorys_dataset = get_dataset_from_config(
+                    source,
+                    test_config.data_directory,
+                    test_config.catalog_dir,
+                    test_config.max_samples,
+                    use_json_catalog,
+                )
+            elif source_name == "glonet":
+                #logger.debug(f"data_directory: {test_config.data_directory}")
+                glonet_dataset = get_dataset_from_config(
+                    source,
+                    test_config.data_directory,
+                    test_config.catalog_dir,
+                    test_config.max_samples,
+                    use_json_catalog
+                )
+            elif source_name == "glonet_wasabi":
+                glonet_wasabi_dataset = get_dataset_from_config(
+                    source,
+                    test_config.data_directory,
+                    test_config.catalog_dir,
+                    test_config.max_samples,
+                    use_json_catalog,
+                )
 
         return {
-            #"glonet": glonet_dataset,
+            "glonet": glonet_dataset,
             #"glonet_local": glonet_local_dataset,
             "glonet_wasabi": glonet_wasabi_dataset,
             "glorys": glorys_dataset,
@@ -222,7 +248,7 @@ class TestPipeline:
 
         logger.info("Setup datasets manager")
         # Ajouter les datasets avec des alias
-        # manager.add_dataset("glonet", setup_datasets["glonet"])
+        manager.add_dataset("glonet", setup_datasets["glonet"])
         manager.add_dataset("glorys", setup_datasets["glorys"])
         #manager.add_dataset("glonet_local", setup_datasets["glonet_local"])
         manager.add_dataset("glonet_wasabi", setup_datasets["glonet_wasabi"])
@@ -231,7 +257,7 @@ class TestPipeline:
         logger.info("Build catalog")
         manager.build_catalogs()
 
-        manager.all_to_file(output_dir=test_config.catalog_dir)
+        manager.all_to_json(output_dir=test_config.catalog_dir)
         manager = self.filter_data(manager, test_config)
         return manager
 
@@ -279,7 +305,7 @@ class TestPipeline:
             ref_transform=glonet_transform,
         )"""
         dataloader = setup_manager.get_dataloader(
-            pred_alias="glonet_wasabi",
+            pred_alias="glonet",
             ref_alias=None,
             batch_size=test_config.batch_size,
             pred_transform=None,
@@ -342,13 +368,3 @@ class TestPipeline:
             assert "metric" in result
             assert "result" in result
         logger.info(f"Test Results: {results}")
-
-
-'''import folium
-import geopandas as gpd
-
-m = folium.Map(zoom_start=2)
-for _, row in catalog.iterrows():
-    geojson = gpd.GeoSeries([row.geometry]).to_json()
-    folium.GeoJson(geojson, tooltip=row.path).add_to(m)
-'''
