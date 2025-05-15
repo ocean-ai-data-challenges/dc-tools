@@ -342,7 +342,7 @@ def get_dataset_from_config(
     root_data_folder: str,
     root_catalog_folder: str,
     max_samples: Optional[int] = 0,
-    use_catalog: bool = False,
+    use_catalog: bool = True,
 ) -> RemoteDataset:
     """Get dataset from config."""
     # Load config

@@ -121,8 +121,11 @@ class DatasetCatalog:
                     self.entries.append(entry)
                 else:
                     logger.warning(f"Ignoring invalid entry: {entry}")
+            crs = entries[0].crs
             # Convertir les entrées en GeoDataFrame
-            self.gdf = gpd.GeoDataFrame([asdict(entry) for entry in self.entries])
+            self.gdf = gpd.GeoDataFrame(
+                [asdict(entry) for entry in self.entries], crs=crs
+            )
         if not dataframe.empty:
             self.gdf = dataframe
 
@@ -503,6 +506,8 @@ class DatasetCatalog:
         if not isinstance(region, gpd.GeoSeries):
             logger.warning("Region must be a GeoSeries.")
             return
+        logger.debug(f"region1 crs: {region.crs}")
+        logger.debug(f"fdg crs: {self.gdf.crs}")
         self.gdf = self.gdf[self.gdf.intersects(region)]
 
     def filter_by_variables(self, variables: List[str]) -> None:

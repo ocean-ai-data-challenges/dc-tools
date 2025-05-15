@@ -341,9 +341,10 @@ class TestPipeline:
         dask_cluster = setup_dask(test_config)
 
         metrics = [
-            MetricComputer(metric_name="rmse"),
-            #MetricComputer(metric_name="euclid_dist"),
-            #MetricComputer(metric_name="energy_cascad"),
+            MetricComputer(metric_name="lagrangian"),
+            MetricComputer(metric_name="rmsd_geostrophic_currents"),
+            MetricComputer(metric_name="rmsd_mld"),
+            MetricComputer(metric_name="rmsd"),
         ]
         return Evaluator(
             dask_cluster=dask_cluster,
@@ -367,4 +368,5 @@ class TestPipeline:
             assert "date" in result
             assert "metric" in result
             assert "result" in result
-        logger.info(f"Test Results: {results}")
+        for res in results:
+            logger.info(f"Test Results: {res}")

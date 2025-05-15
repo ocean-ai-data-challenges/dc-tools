@@ -166,7 +166,16 @@ class BaseConnectionManager(ABC):
             )
 
             # Associer les variables à leurs dimensions
-            variables = {var: list(ds[var].dims) for var in ds.data_vars}
+            variables = {
+                var: {
+                    "dims": list(ds[var].dims), "std_name": ds[var].attrs.get("standard_name",'')
+                }
+                for var in ds.data_vars
+            }
+            for var in ds.data_vars:
+                long_name = ds[var].attrs.get("long_name",'')
+                standard_name = ds[var].attrs.get("standard_name",'')
+                logger.info(f"Variable: {var}, std name: {standard_name},  long_name: {long_name}")
 
             global_metadata = {
                 "variables": variables,
