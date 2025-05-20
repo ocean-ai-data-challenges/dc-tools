@@ -11,6 +11,7 @@ from cartopy import crs as ccrs
 from cartopy.feature import NaturalEarthFeature
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from shapely.geometry import mapping, Polygon
 import xarray as xr
@@ -76,6 +77,67 @@ def visualize_netcdf_with_geometry(
 
     # Afficher la carte
     plt.show()
+
+def walk_obj(obj):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from walk_obj(value)
+    elif isinstance(obj, (list, tuple, set)):
+        for item in obj:
+            yield from walk_obj(item)
+    else:
+        yield obj
+
+def transform_in_place(obj, func):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            obj[k] = transform_in_place(v, func)
+        return obj
+    elif isinstance(obj, list):
+        for i in range(len(obj)):
+            obj[i] = transform_in_place(obj[i], func)
+        return obj
+    else:
+        # Pour les types immuables : appliquer la fonction directement
+        return func(obj)
+
+def make_serializable(obj):
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    if isinstance(obj, pd.DataFrame) or isinstance(obj, gpd.GeoDataFrame):
+        return obj.to_json()
+    return obj
+
+
+
+def add_noise_with_snr(signal: np.ndarray, snr_db: float, seed: int = None) -> np.ndarray:
+    """
+    Add Gaussian noise to a NumPy array to achieve a desired SNR (in decibels).
+
+    Parameters
+    ----------
+    signal : np.ndarray
+        Input signal array.
+    snr_db : float
+        Desired Signal-to-Noise Ratio in decibels (dB).
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    noisy_signal : np.ndarray
+        The signal with added Gaussian noise.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    signal_power = np.mean(signal ** 2)
+    snr_linear = 10 ** (snr_db / 10)
+    noise_power = signal_power / snr_linear
+
+    noise = np.random.normal(loc=0.0, scale=np.sqrt(noise_power), size=signal.shape)
+    noisy_signal = signal + noise
+    return noisy_signal
 
 '''import folium
 import geopandas as gpd

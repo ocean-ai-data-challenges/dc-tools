@@ -8,7 +8,7 @@ import xarray as xr
 from loguru import logger
 
 from dctools.metrics.oceanbench_metrics import OceanbenchMetrics
-
+from dctools.utilities.misc_utils import add_noise_with_snr
 
 
 class MetricComputer(OceanbenchMetrics):
@@ -17,6 +17,7 @@ class MetricComputer(OceanbenchMetrics):
             **kwargs,
         ):
         super().__init__(**kwargs)
+        self.add_noise = kwargs.get("add_noise", False)
 
     def compute(
         self, pred_data: xr.Dataset, ref_data: xr.Dataset
@@ -26,6 +27,8 @@ class MetricComputer(OceanbenchMetrics):
                 pred_data,
                 ref_data,
             )
+            if self.add_noise:
+                result = add_noise_with_snr(result, snr_db=10)
             if isinstance(result, xr.Dataset) or isinstance(result, xr.DataArray):
                 return "plot.jpeg"
             else:
@@ -38,13 +41,3 @@ class MetricComputer(OceanbenchMetrics):
             )
             return None
         #return self.metrics_results
-
-    def post_process_result(self, result: Any):
-        if isinstance(result, xr.Dataset) or isinstance(result, xr.DataArray):
-            formatted_res = result.to_dict()
-        elif isinstance(result, np.ndarray):
-            formatted_res = result.tolist()
-        else:
-            formatted_res = result
-        return formatted_res
-

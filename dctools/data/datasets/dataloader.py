@@ -30,6 +30,7 @@ class EvaluationDataloader:
         ref_catalog: DatasetCatalog,
         pred_manager: BaseConnectionManager,
         ref_manager: BaseConnectionManager,
+        pred_alias: str,
         batch_size: int = 1,
         pred_transform: Optional[CustomTransforms] = None,
         ref_transform: Optional[CustomTransforms] = None,
@@ -48,6 +49,7 @@ class EvaluationDataloader:
         self.ref_catalog = ref_catalog
         self.pred_manager = pred_manager
         self.ref_manager = ref_manager
+        self.pred_alias = pred_alias
         self.batch_size = batch_size
         self.pred_transform = pred_transform
         self.ref_transform = ref_transform

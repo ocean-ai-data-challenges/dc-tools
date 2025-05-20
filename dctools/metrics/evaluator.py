@@ -4,12 +4,19 @@ from typing import Any, Dict, List, Optional
 
 import dask
 from dask.distributed import Client
+import json
 from loguru import logger
+import numpy as np
+import traceback
+import xarray as xr
 
 # from dctools.data.datasets.dataloader import DatasetLoader
 from dctools.data.datasets.dataloader import EvaluationDataloader
 from dctools.metrics.oceanbench_metrics import DCMetric
 from dctools.metrics.metrics import MetricComputer
+from dctools.utilities.misc_utils import (
+    walk_obj, transform_in_place, make_serializable
+)
 
 
 class Evaluator:
@@ -18,6 +25,7 @@ class Evaluator:
         dask_cluster: object,
         metrics: List[MetricComputer],
         dataloader: EvaluationDataloader,
+        json_path: Optional[str] = None,
     ):
         """
         Initialise l'évaluateur.
@@ -30,7 +38,9 @@ class Evaluator:
         self.dask_cluster = dask_cluster
         self.metrics = metrics
         self.dataloader = dataloader
+        self.alias = dataloader.pred_alias
         self.results = []
+        self.json_path = json_path
 
     def evaluate(self) -> List[Dict[str, Any]]:
         """
@@ -46,8 +56,7 @@ class Evaluator:
                     self.results.extend(batch_results)
             return self.results
         except Exception as exc:
-            logger.error(f"Evaluation failed: {repr(exc)}")
-            return []
+            logger.error(f"Evaluation failed: {traceback.format_exc()}")
 
     def _evaluate_batch(
         self, batch: List[Dict[str, Any]],
@@ -83,7 +92,7 @@ class Evaluator:
                 # Construire les tâches pour chaque métrique
                 for metric in self.metrics:
                     task = dask.delayed(self._compute_metric)(
-                        metric, pred_future, ref_future, date
+                        self.alias, metric, pred_future, ref_future, date
                     )
                     tasks.append(task)
             except Exception as exc:
@@ -92,10 +101,18 @@ class Evaluator:
 
         # Exécuter les tâches et récupérer les résultats
         futures = dask_client.compute(tasks)
-        return dask_client.gather(futures)
+        results = dask_client.gather(futures)
+        if self.json_path:
+            self.to_json(results, self.json_path)
+        return results
 
     @staticmethod
-    def _compute_metric(metric: MetricComputer, pred_data, ref_data, date: str) -> Dict[str, Any]:
+    def _compute_metric(
+        model: str,
+        metric: MetricComputer,
+        pred_data, ref_data,
+        date: str
+    ) -> Dict[str, Any]:
         """
         Calcule une métrique pour un lot de données.
 
@@ -110,7 +127,18 @@ class Evaluator:
         """
         try:
             result = metric.compute(pred_data, ref_data)
-            return {"date": date, "metric": metric.get_metric_name(), "result": result}
+            return {
+                "model": model, "date": date, "metric": metric.get_metric_name(), "result": result}
         except Exception as exc:
             logger.error(f"Error computing metric {metric.get_metric_name()} for date {date}: {repr(exc)}")
             return {"date": date, "metric": metric.get_metric_name(), "result": None}
+
+
+
+    def to_json(self, result: Any, file_path: str):
+        # Convert the formatted result to a JSON-serializable format
+        # For example, if the result is a dictionary, you can use json.dumps
+        transform_in_place(result, make_serializable)
+        json_res = json.dumps(result)
+        with open(file_path, 'w') as json_file:
+            json_file.write(json_res)

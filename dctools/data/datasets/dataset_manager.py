@@ -304,6 +304,7 @@ class MultiSourceDatasetManager:
             ref_catalog=ref_catalog,
             pred_manager=pred_manager,
             ref_manager=ref_manager,
+            pred_alias = pred_alias,
             batch_size=batch_size,
             pred_transform=pred_transform,
             ref_transform=ref_transform,

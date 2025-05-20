@@ -3177,7 +3177,7 @@ optional = false
 python-versions = ">=3.11.0,<3.14.0"
 groups = ["custom"]
 files = []
-develop = true
+develop = false
 
 [package.dependencies]
 aiohttp = ">=3.0.0"
@@ -3193,8 +3193,10 @@ xarray = ">=2024"
 zarr = "2.18.4"
 
 [package.source]
-type = "directory"
-url = "../oceanbench"
+type = "git"
+url = "ssh://git@github.com/aitmohandk/oceanbench"
+reference = "main"
+resolved_reference = "d39bdc70695250d30cbcb31b5fc9edcb2fb1f059"
 
 [[package]]
 name = "omegaconf"
@@ -5701,4 +5703,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11.0,<3.14.0"
-content-hash = "f0ff9754e3b477f34c2efa790cf0c6ce555d093833b92eca6536a6accfab14d7"
+content-hash = "d25e3d9f21aac60cf08b79125d68ffe0883ea81ab8fa6e4251ba37ed6a3f5e15"
