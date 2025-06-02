@@ -22,13 +22,14 @@ from dctools.dcio.loader import FileLoader
 from dctools.data.datasets.dc_catalog import DatasetCatalog
 
 from dctools.data.connection.config import (
+    ARGOConnectionConfig,
     BaseConnectionConfig,
-    LocalConnectionConfig,
     CMEMSConnectionConfig,
-    S3ConnectionConfig,
-    WasabiS3ConnectionConfig,
     FTPConnectionConfig,
     GlonetConnectionConfig,
+    LocalConnectionConfig,
+    S3ConnectionConfig,
+    WasabiS3ConnectionConfig,
 )
 
 from dctools.data.connection.connection_manager import (
@@ -39,6 +40,7 @@ from dctools.data.connection.connection_manager import (
     S3WasabiManager,
     FTPManager,
     GlonetManager,
+    ArgoManager,
 )
 
 
@@ -55,6 +57,7 @@ class DatasetConfig:
         WasabiS3ConnectionConfig: S3WasabiManager,
         FTPConnectionConfig: FTPManager,
         GlonetConnectionConfig: GlonetManager,
+        ARGOConnectionConfig: ArgoManager,
     }
 
     def __init__(
@@ -62,6 +65,8 @@ class DatasetConfig:
         alias: str,
         connection_config: BaseConnectionConfig,
         catalog_options: Optional[Dict[str, Any]] = None,
+        keep_variables: Optional[str] = None,
+        eval_variables: Optional[str] = None,
     ):
         """
         Configuration pour un dataset.
@@ -71,24 +76,28 @@ class DatasetConfig:
             connection_config (BaseConnectionConfig): Configuration de connexion.
             catalog_options (Optional[Dict[str, Any]]): Options pour le catalogue (e.g., filtres par défaut).
         """
+        # logger.info(f"DatasetConfig __init__: {alias}")
         self.alias = alias
         self.connection_config = connection_config
         self.catalog_options = catalog_options or {}
-        self.connection_manager = self._create_connection_manager()
+        self.keep_variables = keep_variables
+        self.eval_variables = eval_variables
+        # self.connection_manager = self._create_connection_manager()
 
-    def _create_connection_manager(self) -> BaseConnectionManager:
+    '''def _create_connection_manager(self) -> BaseConnectionManager:
         """
         Instancie le ConnectionManager approprié en fonction du type de configuration.
 
         Returns:
             BaseConnectionManager: Instance du ConnectionManager correspondant.
         """
+        logger.info(f"_create_connection_manager: {self.alias}")
         config_type = type(self.connection_config)
         if config_type not in self.CONNECTION_MANAGER_MAP:
             raise ValueError(f"Unsupported connection configuration type: {config_type}")
 
         manager_class = self.CONNECTION_MANAGER_MAP[config_type]
-        return manager_class(self.connection_config)
+        return manager_class # (self.connection_config)'''
 
 class BaseDataset(ABC):
     def __init__(self, config: DatasetConfig):
@@ -99,17 +108,20 @@ class BaseDataset(ABC):
             config (DatasetConfig): Configuration du dataset.
         """
         # Utiliser CONNECTION_MANAGER_MAP pour instancier le bon ConnectionManager
+        # logger.info(f"Initializing BaseDataset with alias: {config.alias}")
         connection_manager_class = DatasetConfig.CONNECTION_MANAGER_MAP.get(type(config.connection_config))
         if not connection_manager_class:
             raise ValueError(f"Unsupported connection configuration type: {type(config.connection_config)}")
-
+        # logger.info(f"Instantiating connection manager: {connection_manager_class.__name__} for dataset {config.alias}")
         self.connection_manager = connection_manager_class(config.connection_config)
         self.alias = config.alias
         self.catalog_type = ""
+        self.keep_variables = config.keep_variables
+        self.eval_variables = config.eval_variables
         # Vérifier si un fichier de catalogue JSON est spécifié dans catalog_options
         catalog_path = config.catalog_options.get("catalog_path") if config.catalog_options else None
         if catalog_path and Path(catalog_path).exists():
-            logger.info(f"Loading catalog from JSON file: {catalog_path}")
+            # logger.info(f"Loading catalog from JSON file: {catalog_path}")
             self.catalog = DatasetCatalog.from_json(catalog_path)
             #self._metadata = self.catalog.entries
             self._paths = self.catalog.list_paths()
@@ -120,6 +132,7 @@ class BaseDataset(ABC):
             self._metadata = self.connection_manager.list_files_with_metadata()  # Récupérer les métadonnées
             self._paths = [entry.path for entry in self._metadata]
             self.build_catalog()  # Construire le catalogue à partir des métadonnées
+            self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
             self.catalog_type = "from_data"
 
     def list_paths(self) -> List[str]:
@@ -323,8 +336,6 @@ class RemoteDataset(BaseDataset):
                 local_file.write(remote_file.read())
 
 
-
-
 class LocalDataset(BaseDataset):
     """Dataset pour les fichiers locaux (NetCDF ou autres)."""
     #def __init__(self, config: DatasetConfig):
@@ -336,19 +347,21 @@ class LocalDataset(BaseDataset):
         pass
 
 
-
 def get_dataset_from_config(
     source: dict,
     root_data_folder: str,
     root_catalog_folder: str,
     max_samples: Optional[int] = 0,
+    file_pattern: Optional[str] = None,
     use_catalog: bool = True,
 ) -> RemoteDataset:
     """Get dataset from config."""
     # Load config
     dataset_name = source['dataset']
     config_name = source['config']
-    connection_type = source['connection_type']
+    keep_variables = source.get('keep_variables', None)
+    eval_variables = source.get('eval_variables', None)
+    # connection_type = source['connection_type']
 
     data_root = os.path.join(
         root_data_folder,
@@ -365,31 +378,67 @@ def get_dataset_from_config(
     if not os.path.exists(root_catalog_folder):
         os.mkdir(root_catalog_folder)
 
+    '''logger.debug(f"connection_type: {source["connection_type"]}")
+    logger.debug(f"config_name: {source["config"]}")
+    logger.debug(f"dataset_name: {dataset_name}")'''
+
     match config_name:
         case "cmems":
             cmems_connection_config = CMEMSConnectionConfig(
                 local_root=data_root,
                 dataset_id=source['cmems_product_name'],
                 max_samples=max_samples,
+                file_pattern=file_pattern,
             )
             if os.path.exists(catalog_path) and use_catalog:
                 # Load dataset metadata from catalog
                 cmems_config = DatasetConfig(
                     alias=dataset_name,
                     connection_config=cmems_connection_config,
-                    catalog_options={"catalog_path": catalog_path}
+                    catalog_options={"catalog_path": catalog_path},
+                    keep_variables=keep_variables,
+                    eval_variables=eval_variables,
                 )
             else:
                 # create dataset
                 cmems_config = DatasetConfig(
                     alias=dataset_name,
                     connection_config=cmems_connection_config,
+                    keep_variables=keep_variables,
+                    eval_variables=eval_variables,
                 )
             # Création du dataset
             dataset = RemoteDataset(cmems_config)
 
+        case "argopy":
+            argo_connection_config = ARGOConnectionConfig(
+                local_root=data_root,
+                #dataset_id=source['cmems_product_name'],
+                max_samples=max_samples,
+                file_pattern=file_pattern,
+            )
+            if os.path.exists(catalog_path) and use_catalog:
+                # Load dataset metadata from catalog
+                argo_config = DatasetConfig(
+                    alias=dataset_name,
+                    connection_config=argo_connection_config,
+                    catalog_options={"catalog_path": catalog_path},
+                    keep_variables=keep_variables,
+                    eval_variables=eval_variables,
+                )
+            else:
+                # create dataset
+                argo_config = DatasetConfig(
+                    alias=dataset_name,
+                    connection_config=argo_connection_config,
+                    keep_variables=keep_variables,
+                    eval_variables=eval_variables,
+                )
+            # Création du dataset
+            dataset = RemoteDataset(argo_config)
         case "s3":
-            if "wasabi" in dataset_name:
+            # logger.debug(f"Creating S3 dataset with config: {source}")
+            if source["connection_type"] == "wasabi":
                 s3_connection_config = WasabiS3ConnectionConfig(
                     local_root=data_root,
                     bucket=source['s3_bucket'],
@@ -398,6 +447,8 @@ def get_dataset_from_config(
                     secret_key=source['s3_secret_key'],
                     endpoint_url=source['url'],
                     max_samples=max_samples,
+                    file_pattern=file_pattern,
+                    groups=source['groups'] if 'groups' in source else None,
                 )
             elif dataset_name == "glonet":
                 s3_connection_config = GlonetConnectionConfig(
@@ -406,23 +457,33 @@ def get_dataset_from_config(
                     glonet_s3_bucket=source['s3_bucket'],
                     s3_glonet_folder=source['s3_folder'],
                     max_samples=max_samples,
+                    file_pattern=file_pattern,
                 )
-
+            # logger.debug(f"CATALOG ?")
             if os.path.exists(catalog_path) and use_catalog:
                 # Load dataset metadata from catalog
+                # logger.debug(f"DATASET CONFIG 1")
                 s3_config = DatasetConfig(
                     alias=dataset_name,
                     connection_config=s3_connection_config,
-                    catalog_options={"catalog_path": catalog_path}
+                    catalog_options={"catalog_path": catalog_path},
+                    keep_variables=keep_variables,
+                    eval_variables=eval_variables,
                 )
             else:
+                # logger.debug(f"DATASET CONFIG 2")
                 # create dataset
                 s3_config = DatasetConfig(
                     alias=dataset_name,
                     connection_config=s3_connection_config,
+                    keep_variables=keep_variables,
+                    eval_variables=eval_variables,
                 )
             # Création du dataset
+            # logger.debug(f"REMOTE DATASET")
             dataset = RemoteDataset(s3_config)
+        case "_":
+            raise ValueError(f"Unknown dataset config name: {config_name}")
 
 
     return dataset

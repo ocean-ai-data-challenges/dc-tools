@@ -29,6 +29,8 @@ class LocalConnectionConfig(BaseConnectionConfig):
     def __init__(
         self, local_root: str,
         max_samples: Optional[int] = None,
+        file_pattern: Optional[str] = "**/*.nc",
+        groups: Optional[list[str]] = None,
     ):
         """Init.
         Args:
@@ -36,7 +38,11 @@ class LocalConnectionConfig(BaseConnectionConfig):
         """
         fs = fsspec.filesystem("file")
         super().__init__(
-            "file", local_root=local_root, fs=fs, max_samples=max_samples
+            "file", local_root=local_root,
+            fs=fs,
+            max_samples=max_samples,
+            file_pattern=file_pattern,
+            groups=groups,
         )
 
     #def to_dict(self):
@@ -50,6 +56,8 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
         dataset_id: str,
         cmems_credentials_path: Optional[str] = None,
         max_samples: Optional[int] = None,
+        file_pattern: Optional[str] = "**/*.nc",
+        groups: Optional[list[str]] = None,
     ):
         """Init.
 
@@ -71,6 +79,8 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
             "cmems", local_root=local_root, dataset_id=dataset_id,
             cmems_credentials=cmems_credentials, fs=fs,
             max_samples=max_samples,
+            file_pattern=file_pattern,
+            groups=groups,
         )
 
     #def to_dict(self):
@@ -83,6 +93,8 @@ class FTPConnectionConfig(BaseConnectionConfig):
         folder: str,
         user: str = None, password: str = None,
         max_samples: Optional[int] = None,
+        file_pattern: Optional[str] = "**/*.nc",
+        groups: Optional[list[str]] = None,
     ):
         fs = fsspec.filesystem("ftp", host=host, username=user, password=password)
         super().__init__(
@@ -90,6 +102,8 @@ class FTPConnectionConfig(BaseConnectionConfig):
             user=user, password=password, fs=fs,
             ftp_folder=folder,
             max_samples=max_samples,
+            file_pattern=file_pattern,
+            groups=groups,
         )
 
     #def to_dict(self):
@@ -106,6 +120,8 @@ class S3ConnectionConfig(BaseConnectionConfig):
         secret_key: Optional[str] = None,
         endpoint_url: Optional[str] = None,
         max_samples: Optional[int] = None,
+        file_pattern: Optional[str] = "**/*.nc",
+        groups: Optional[list[str]] = None,
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
         if not key or not secret_key:
@@ -121,6 +137,8 @@ class S3ConnectionConfig(BaseConnectionConfig):
             key=key, secret_key=secret_key,
             endpoint_url=endpoint_url,
             fs=fs, max_samples=max_samples,
+            file_pattern=file_pattern,
+            groups=groups,
         )
 
     #def to_dict(self):
@@ -137,7 +155,12 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
         secret_key: Optional[str] = None,
         endpoint_url: Optional[str] = None,
         max_samples: Optional[int] = None,
+        file_pattern: Optional[str] = "**/*.nc",
+        groups: Optional[list[str]] = None,
     ):
+        '''logger.info("Using Wasabi S3 connection")
+        logger.debug(f"\n\nkey: {key}")
+        logger.debug(f"secret_key: {secret_key}")'''
         super().__init__(
             local_root=local_root,
             bucket=bucket,
@@ -145,6 +168,8 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
             key=key, secret_key=secret_key,
             endpoint_url=endpoint_url,
             max_samples=max_samples,
+            file_pattern=file_pattern,
+            groups=groups,
         )
 
 class GlonetConnectionConfig(BaseConnectionConfig):
@@ -155,6 +180,8 @@ class GlonetConnectionConfig(BaseConnectionConfig):
         glonet_s3_bucket: str,
         s3_glonet_folder: str,
         max_samples: Optional[int] = None,
+        file_pattern: Optional[str] = "**/*.nc",
+        groups: Optional[list[str]] = None,
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
         fs = fsspec.filesystem('s3', anon=True, client_kwargs=client_kwargs)
@@ -166,4 +193,33 @@ class GlonetConnectionConfig(BaseConnectionConfig):
             glonet_s3_bucket=glonet_s3_bucket,
             s3_glonet_folder=s3_glonet_folder,
             max_samples=max_samples,
+            file_pattern=file_pattern,
+            groups=groups,
+        )
+
+
+class ARGOConnectionConfig(BaseConnectionConfig):
+    def __init__(
+        self,
+        local_root: str,
+        #endpoint_url: str,
+        #glonet_s3_bucket: str,
+        #s3_glonet_folder: str,
+        max_samples: Optional[int] = None,
+        file_pattern: Optional[str] = "**/*.nc",
+        groups: Optional[list[str]] = None,
+    ):
+        #client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
+        #fs = fsspec.filesystem('s3', anon=True, client_kwargs=client_kwargs)
+        fs = fsspec.filesystem("file")
+
+        super().__init__(
+            "argo", local_root=local_root,
+            fs=fs,
+            #endpoint_url=endpoint_url,
+            #glonet_s3_bucket=glonet_s3_bucket,
+            #s3_glonet_folder=s3_glonet_folder,
+            max_samples=max_samples,
+            file_pattern=file_pattern,
+            groups=groups,
         )

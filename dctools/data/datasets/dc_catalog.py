@@ -15,21 +15,11 @@ from loguru import logger
 import pandas as pd
 from shapely.geometry import mapping, shape, Polygon
 
-# from dctools.data.coordinates import CoordinateSystem
 
-'''@dataclass
-class CatalogEntry:
-    path: str
-    date_start: str  # Format ISO 8601 (e.g., "2024-01-01")
-    date_end: str
-    variables: Dict[str, List[str]]  # Nom des variables et leurs dimensions associées
-    dimensions: Dict[str, str]  # Dimensions sous forme de {standard_name: real_name}
-    coord_type: str    # Type de coordonnées (e.g., "geographic", "polar")
-    crs: str  # Système de référence de coordonnées (e.g., "EPSG:4326")
-    geometry: Polygon
-    #dimensions: Dict[str, str]  # Dimensions sous forme de {standard_name: real_name}
-    resolution: Optional[Dict[str, float]] = None  # Résolution (lat, lon) en degrés, time
-    # alias: Optional[str] = None  # Ajout du champ alias'''
+METADATA_VARIABLES = [
+    "variables", "variables_rename_dict",
+    "dimensions", "coord_type", "crs", "resolution"
+]
 
 @dataclass
 class CatalogEntry:
@@ -37,7 +27,10 @@ class CatalogEntry:
     date_start: pd.Timestamp
     date_end: pd.Timestamp
     variables: Dict[str, List[str]]
+    variables_dict: Dict[str, List[str]]
+    variables_rename_dict: Dict[str, str]
     dimensions: Dict[str, str]
+    # dimensions_rename_dict: Dict[str, str]
     coord_type: str
     crs: str
     geometry: gpd.GeoSeries
@@ -98,7 +91,7 @@ class DatasetCatalog:
         self,
         entries: Optional[List[Union[CatalogEntry, Dict[str, Any]]]] = None,
         dataframe: Optional[gpd.GeoDataFrame] = gpd.GeoDataFrame(),
-    ):  
+    ):
         """
         Initialise le catalogue avec une liste d'entrées.
 
@@ -119,19 +112,35 @@ class DatasetCatalog:
                     self.entries.append(CatalogEntry(**entry))"""
                 if isinstance(entry, CatalogEntry):
                     self.entries.append(entry)
+                    # logger.debug(f"Adding entry: {entry}")
+                elif isinstance(entry, dict):
+                    self.entries.append(CatalogEntry(**entry))
+                    # logger.debug(f"Adding entry: {entry}")
                 else:
                     logger.warning(f"Ignoring invalid entry: {entry}")
-            crs = entries[0].crs
+            # logger.debug(f"Entries0: {entries[0]}")
+            '''if isinstance(entry, CatalogEntry):
+                crs = entries[0].crs
+            elif isinstance(entry, dict):
+                crs = entries[0].get('crs')'''
             # Convertir les entrées en GeoDataFrame
             self.gdf = gpd.GeoDataFrame(
-                [asdict(entry) for entry in self.entries], crs=crs
+                [asdict(entry) for entry in self.entries]
             )
+            #    geometry="geometry", crs=crs
+            #)
         if not dataframe.empty:
             self.gdf = dataframe
 
         if not self.gdf.empty:
             self.gdf = self._clean_dataframe(self.gdf)
+        
 
+        # get global metadata
+        first_row = self.gdf.iloc[0]
+        self.global_metadata = {}
+        for metadata_var in METADATA_VARIABLES:
+            self.global_metadata[metadata_var] = first_row[metadata_var]
 
     def to_json(self, path: Optional[str] = None) -> str:
         """
@@ -506,8 +515,8 @@ class DatasetCatalog:
         if not isinstance(region, gpd.GeoSeries):
             logger.warning("Region must be a GeoSeries.")
             return
-        logger.debug(f"region1 crs: {region.crs}")
-        logger.debug(f"fdg crs: {self.gdf.crs}")
+        # logger.debug(f"region1 crs: {region.crs}")
+        # logger.debug(f"fdg crs: {self.gdf.crs}")
         self.gdf = self.gdf[self.gdf.intersects(region)]
 
     def filter_by_variables(self, variables: List[str]) -> None:

@@ -57,25 +57,63 @@ catalog_path: ""
 # Datasets
 batch_size: 8
 
-
 sources:
   - dataset: glonet
     config: "s3"
     connection_type: "anonymous"
     url: "https://minio.dive.edito.eu"
-    s3_bucket: "project-glonet"
-    s3_folder: "public/glonet_refull_2024"
+    s3_bucket: "project-oceanbench"
+    s3_folder: "public/glonet_full_2024"
+    file_pattern: "**/*.nc"
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
 
   - dataset: glorys
     config: "cmems"
     connection_type:
     cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
-  
+    file_pattern: "**/*.nc"
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+
   - dataset: glonet_wasabi
     config: "s3"
-    connection_type: "key"
+    connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
     s3_bucket: "ppr-ocean-climat"
     s3_folder: "DC1/Glonet_forecast"
-    s3_key: 
-    s3_secret_key: 
+    s3_key: "EG5GYSEYI5C20O6IHNEJ"
+    s3_secret_key: "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
+    file_pattern: "**/*.zarr"
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"

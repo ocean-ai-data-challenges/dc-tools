@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 import numpy as np
 import xarray as xr
 
-from dctools.utilities.xarray_utils import get_grid_coord_names
+from dctools.data.coordinates import CoordinateSystem
 
 class ArgoDataProcessor:
     """Processor for argo data."""
@@ -19,6 +19,7 @@ class ArgoDataProcessor:
         lat_range: Optional[Tuple[float, float]] = None,
         lon_range: Optional[Tuple[float, float]] = None,
         time_range: Optional[Tuple[np.datetime64, np.datetime64]] = None,
+        coord_name_dict: Optional[dict] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.
@@ -38,7 +39,9 @@ class ArgoDataProcessor:
         """
         result = data
         # We can't use .sel since argopy data is only indexed by N_POINTS
-        coord_name_dict = get_grid_coord_names(data)
+        if not coord_name_dict:
+            coord_sys = CoordinateSystem.get_coordinate_system(data)
+            coord_name_dict = coord_sys.coordinates
 
         # Create mask for .where
         mask = xr.ones_like(data[coord_name_dict["lat"]])

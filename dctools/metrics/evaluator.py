@@ -82,8 +82,12 @@ class Evaluator:
 
                 if dataloader.pred_transform:
                     pred_data = dataloader.pred_transform(pred_data)
-                if dataloader.ref_transform:
-                    ref_data = dataloader.ref_transform(pred_data)
+
+                if ref_data and dataloader.ref_transform:
+                    ref_data = dataloader.ref_transform(ref_data)
+
+                logger.debug(f"pred_data : {pred_data}")
+                logger.debug(f"ref_data : {ref_data}")
 
                 # Partager les données entre les workers
                 pred_future = dask_client.scatter(pred_data, broadcast=True)

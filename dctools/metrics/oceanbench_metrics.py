@@ -18,26 +18,11 @@ from oceanbench.core.derived_quantities import add_mixed_layer_depth
 from oceanbench.core.derived_quantities import add_geostrophic_currents
 import xarray as xr
 
-from dctools.utilities.xarray_utils import (
-    get_vars_dims,
-    LIST_VARS_GLONET,
-    LIST_VARS_GLONET_NO_DIMS,
+from dctools.data.coordinates import (
+    EVAL_VARIABLES_GLONET,
+    GLOBAL_ZONE_COORDINATES,
+    COORD_ALIASES,
 )
-
-EVAL_VARIABLES_GLONET = [
-    Variable.HEIGHT,
-    Variable.TEMPERATURE,
-    Variable.SALINITY,
-    Variable.NORTHWARD_VELOCITY,
-    Variable.EASTWARD_VELOCITY,
-]
-
-GLOBAL_ZONE_COORDINATES = ZoneCoordinates(
-        minimum_latitude=-90,
-        maximum_latitude=90,
-        minimum_longitude=-180,
-        maximum_longitude=180,
-    )
 
 class DCMetric(ABC):
     def __init__(self, **kwargs: Dict[str, Any]) -> None:
@@ -130,23 +115,37 @@ class OceanbenchMetrics(DCMetric):
         Returns:
             ndarray, optional: computed metric (if any)
         """
+        logger.debug(f"Computing metric {self.metric_name} with variables: {eval_variables}")
+        if eval_variables:
+            has_depth = any(depth_alias in eval_variables for depth_alias in COORD_ALIASES)
+        if eval_variables and not has_depth:
+            if self.metric_name == "lagrangian":
+                logger.warning("Lagrangian metric requires 'depth' variable.")
+                return None
+        if self.metric_name not in self.metrics_set:
+            logger.warning(f"Metric {self.metric_name} is not defined in the metrics set.")
+            return None
         try:
             if ref_dataset:
                 metric_func = self.metrics_set[self.metric_name]["func_with_ref"]
                 add_kwargs_list = self.metrics_set[self.metric_name]["kwargs_with_ref"]
                 if "preprocess_ref" in self.metrics_set[self.metric_name]:
                     ref_dataset = self.metrics_set[self.metric_name]["preprocess_ref"]([ref_dataset])
-                    #logger.info(f"Preprocessed ref dataset: {ref_dataset}")
-                    kwargs = {
-                        "challenger_datasets": [eval_dataset],
-                        "reference_datasets": [ref_dataset],
-                    }
+                kwargs = {
+                    "challenger_datasets": [eval_dataset],
+                    "reference_datasets": [ref_dataset],
+                    # "variables": eval_variables,
+                }
             else:
+                logger.debug(f"Computing metric {self.metric_name} without reference dataset.")
                 metric_func = self.metrics_set[self.metric_name]["func_no_ref"]
                 add_kwargs_list = None
                 kwargs = {
-                    "challenger_datasets": [eval_dataset]
+                    "challenger_datasets": [eval_dataset],
+                    # "variables": eval_variables,
                 }
+            if eval_variables and ref_dataset:
+                kwargs["variables"] = eval_variables
             add_kwargs = {}
             if add_kwargs_list:
                 if "vars" in add_kwargs_list:
@@ -155,6 +154,7 @@ class OceanbenchMetrics(DCMetric):
                     kwargs["zone"] = zone
 
                 kwargs.update(add_kwargs)
+            logger.debug(f"Calling metric function {metric_func.__name__} with kwargs: {kwargs}")
             return metric_func(**kwargs)
         
         except Exception as exc:

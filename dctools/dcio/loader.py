@@ -3,20 +3,138 @@
 
 """Classes and functions for loading xarray datasets."""
 
-from typing import Any, Optional
+from typing import Any, List, Optional, Union
 
+from fsspec import FSMap
 from loguru import logger
 import netCDF4
+import traceback
 import xarray as xr
-import zarr
+# import zarr
 
 # from dctools.utilities.xarray_utils import standard_rename_coords
+
+'''def collect_all_groups(nc_path):
+    def walk_group(grp, prefix=""):
+        data_vars = {}
+        coords = {}
+        try:
+            for varname, var in grp.variables.items():
+                # Préfixe avec le chemin du groupe (remplace / par __ pour xarray)
+                full_name = f"{prefix}/{varname}" if prefix else varname
+                xr_name = full_name.replace("/", "__")
+                dims = var.dimensions
+                data = var[:]
+                # On distingue les coordonnées (dimensions) des variables
+                if varname in grp.dimensions:
+                    coords[xr_name] = (dims, data)
+                else:
+                    data_vars[xr_name] = (dims, data)
+            for name, subgrp in grp.groups.items():
+                sub_prefix = f"{prefix}/{name}" if prefix else name
+                sub_vars, sub_coords = walk_group(subgrp, sub_prefix)
+                data_vars.update(sub_vars)
+                coords.update(sub_coords)
+            return data_vars, coords
+        except Exception as exc:
+            logger.error(f"Failed to open dataset {nc_path}: {traceback.format_exc()}")
+            raise
+
+    with netCDF4.Dataset(nc_path, "r") as nc:
+        all_vars, all_coords = walk_group(nc)
+    # On fusionne les coords et les data_vars dans le Dataset
+    ds = xr.Dataset(
+        {k: (v[0], v[1]) for k, v in all_vars.items()},
+        coords={k: (v[0], v[1]) for k, v in all_coords.items()}
+    )
+    return ds'''
+
+def list_all_group_paths(nc_path: str) -> List[str]:
+    def walk(grp, prefix=""):
+        paths = []
+        for name, subgrp in grp.groups.items():
+            full = f"{prefix}/{name}" if prefix else name
+            paths.append(full)
+            paths.extend(walk(subgrp, full))
+        return paths
+    with netCDF4.Dataset(nc_path, "r") as nc:
+        return walk(nc)
+
+
+def open_and_concat_groups(
+    source: Union[FSMap, str],
+    group_paths: List[str] = None,
+    **xr_kwargs
+) -> xr.Dataset:
+    """
+    Ouvre récursivement les groupes NetCDF imbriqués et concatène leurs variables dans un seul Dataset.
+    Les noms de variables sont préfixés par le chemin du groupe (avec '__' comme séparateur).
+
+    Args:
+        source (Union[FSMap, str]): Chemin du fichier NetCDF ou FSMap (fsspec).
+        group_paths (List[str] or None): Liste des chemins complets des groupes à ouvrir (ex: ["ku", "group_data_01/ku"]).
+        **xr_kwargs: Arguments additionnels pour xr.open_dataset.
+
+    Returns:
+        xr.Dataset: Dataset concaténé.
+    """
+    if not group_paths:
+        return xr.open_dataset(source, **xr_kwargs)
+
+    datasets = []
+    for group_path in group_paths:
+        ds = xr.open_dataset(source, group=group_path, **xr_kwargs)
+        prefix = group_path.replace("/", "__")
+        ds = ds.rename({var: f"{prefix}__{var}" for var in ds.data_vars})
+        datasets.append(ds)
+
+    ds_merged = xr.merge(datasets, compat="no_conflicts", join="outer")
+    return ds_merged
+
+
+'''def open_and_concat_groups(
+    source: Union[FSMap, str],
+    groups: list[str] = None,
+    **xr_kwargs
+) -> xr.Dataset:
+    """
+    Ouvre un NetCDF et concatène les variables de tous les groupes listés dans un seul Dataset.
+    Les noms de variables sont préfixés par le nom du groupe pour éviter les collisions.
+
+    Args:
+        source (Union[FSMap, str]): Chemin du fichier NetCDF ou FSMap (fsspec).
+        groups (list[str] or None): Liste des groupes à ouvrir. Si None, ouvre le fichier normalement.
+        **xr_kwargs: Arguments additionnels pour xr.open_dataset.
+
+    Returns:
+        xr.Dataset: Dataset concaténé.
+    """
+
+    datasets = []
+    for group in groups:
+        logger.debug(f"Opening group: {group}")
+        logger.debug(f"Source: {source}, Group: {group}, xr_kwargs: {xr_kwargs}")
+        ds = xr.open_dataset(source, group=group, **xr_kwargs)
+        # Préfixe les variables par le nom du groupe
+        prefix = group.replace("/", "__")
+        ds = ds.rename({var: f"{prefix}__{var}" for var in ds.data_vars})
+        datasets.append(ds)
+
+    # Fusionne tous les datasets sur les dimensions communes (outer join)
+    ds_merged = xr.merge(datasets, compat="no_conflicts", join="outer")
+    return ds_merged'''
+
 
 class FileLoader:
     """Loading NetCDF or Zarr files."""
 
     @staticmethod
-    def open_dataset_auto(path: str, manager: Any) -> xr.Dataset:
+    def open_dataset_auto(
+        path: str,
+        manager: Any,
+        groups: Optional[list[str]] = None,
+        engine: Optional[str] = "netcdf4",
+    ) -> xr.Dataset:
         """
         Open a dataset automatically, handling both NetCDF and Zarr formats.
 
@@ -32,16 +150,33 @@ class FileLoader:
                 #logger.info(f"Opening Zarr dataset: {path}")
                 return xr.open_zarr(manager.params.fs.get_mapper(path))
             else:
-                #logger.info(f"Opening NetCDF dataset: {path}")
-                return xr.open_dataset(manager.params.fs.open(path), engine="netcdf4")
+                group_paths = list_all_group_paths(path)
+                if group_paths:
+                    ds = open_and_concat_groups(
+                        # manager.params.fs.get_mapper(path),
+                        path,
+                        group_paths=group_paths,
+                        chunks='auto',
+                        engine=engine,
+                    )
+                    return ds
+                else:
+                    # logger.info(f"Opening NetCDF dataset: {path}")
+                    # logger.debug(f"Using engine: {engine}")
+                    # logger.debug(f"Using fs: {manager.params.fs}")
+                    # return xr.open_dataset(manager.params.fs.open(path), engine=engine)
+                    return xr.open_dataset(path, engine=engine)
+                # return collect_all_groups(manager.params.fs.open(path), engine="netcdf4")
         except Exception as exc:
-            logger.error(f"Failed to open dataset {path}: {repr(exc)}")
+            logger.error(f"Failed to open dataset {path}: {traceback.format_exc()}")
             raise
 
     @staticmethod
     def load_dataset(
         file_path: str,
         adaptive_chunking: bool = False,
+        groups: Optional[list[str]] = None,
+        engine: Optional[str] = "netcdf4",
     ) -> xr.Dataset | None:
         """Load a dataset from a local NetCDF or Zarr file.
 
@@ -69,7 +204,14 @@ class FileLoader:
                 #logger.info(
                 #    f"Loading dataset from NetCDF file: {file_path}"
                 #)
-                ds = xr.open_dataset(file_path, chunks='auto')
+                group_paths = list_all_group_paths(file_path)
+                if group_paths:
+                    ds = open_and_concat_groups(
+                        file_path, group_paths=group_paths, chunks='auto',
+                        engine=engine,
+                    )
+                else:
+                    ds = xr.open_dataset(file_path, chunks='auto')
 
                 if adaptive_chunking:
                     if "latitude" in ds.dims and "time" in ds.dims:
@@ -90,6 +232,6 @@ class FileLoader:
 
         except Exception as error:
             logger.error(
-                f"Error when loading file {file_path}: {repr(error)}"
+                f"Error when loading file {file_path}: {traceback.print_exc()}"
             )
             return None

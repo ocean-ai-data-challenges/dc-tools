@@ -1,6 +1,7 @@
 
 import os
 import pytest
+import sys
 from types import SimpleNamespace
 
 import geopandas as gpd
@@ -16,18 +17,17 @@ from dctools.metrics.evaluator import Evaluator
 from dctools.metrics.metrics import MetricComputer
 from dctools.utilities.init_dask import setup_dask
 from dctools.utilities.file_utils import load_config_file
-from dctools.utilities.xarray_utils import (
-    DICT_RENAME_CMEMS,
-    LIST_VARS_GLONET,
+from dctools.data.coordinates import (
     RANGES_GLONET,
     GLONET_DEPTH_VALS,
 )
-
 
 class TestPipeline:
 
     @pytest.fixture(scope="class")
     def test_config(self):
+        logger.remove()  # Supprime les handlers existants
+        logger.add(sys.stderr, level="INFO")  # N'affiche que INFO et plus grave (masque DEBUG)
         """Fixture pour configurer les variables de test."""
         config_file = os.path.join("tests", "config", "test_config.yaml")
 
@@ -40,6 +40,14 @@ class TestPipeline:
         config["glorys_data_dir"] = os.path.join("tests", "data", "glorys")
         config["catalog_dir"] = os.path.join("tests", "data")
         config["regridder_weights"] = os.path.join("tests", "data", "weights")
+
+
+        # logger.debug(f"Test config loaded: {config.keys()}")
+        keep_vars = {}
+        for source in config["sources"]:
+            source_name = source['dataset']
+            keep_vars[source_name] = source['keep_variables']
+        config["keep_vars"] = keep_vars
 
         if not os.path.exists(config["data_directory"]):
             os.mkdir(config["data_directory"])
@@ -64,20 +72,25 @@ class TestPipeline:
 
         for source in test_config.sources:
             source_name = source['dataset']
+            file_pattern = source['file_pattern']
+            logger.debug(f"\n\n\t\t\t\t\t**************  LOADING DATASET: {source_name}  ***************\n\n")
             if source_name == "glorys":
                 glorys_dataset = get_dataset_from_config(
                     source,
                     test_config.data_directory,
                     test_config.catalog_dir,
                     test_config.max_samples,
+                    file_pattern,
                     use_json_catalog,
                 )
+
             elif source_name == "glonet":
                 glonet_dataset = get_dataset_from_config(
                     source,
                     test_config.data_directory,
                     test_config.catalog_dir,
                     test_config.max_samples,
+                    file_pattern,
                     use_json_catalog
                 )
             elif source_name == "glonet_wasabi":
@@ -86,8 +99,10 @@ class TestPipeline:
                     test_config.data_directory,
                     test_config.catalog_dir,
                     test_config.max_samples,
+                    file_pattern,
                     use_json_catalog,
                 )
+            logger.debug(f"\n\n\t\t\t\t\t**************  LOADED DATASET: {source_name}  ***************\n\n")
 
         return {
             "glonet": glonet_dataset,
@@ -157,9 +172,16 @@ class TestPipeline:
 
     @pytest.fixture(scope="function")
     def setup_transforms(
-        self, test_config: SimpleNamespace
+        self,
+        test_config: SimpleNamespace,
+        setup_datasets: dict,
     ):
         """Fixture pour configurer les transformations."""
+        global_metadata = setup_datasets["glonet"].get_catalog().global_metadata
+        logger.debug(f"Metadata variables: {global_metadata}")
+        coords_rename_dict = global_metadata.get("dimensions")
+        vars_rename_dict = global_metadata.get("variables_rename_dict")
+        glonet_vars = test_config.keep_vars["glonet"]
         # Configurer les transformations
         glonet_transform = CustomTransforms(
             transform_name="glorys_to_glonet",
@@ -167,18 +189,19 @@ class TestPipeline:
             depth_coord_vals=GLONET_DEPTH_VALS,
             interp_ranges=RANGES_GLONET,
         )
-        # Configurer les transformations
-        """pred_transform = CustomTransforms(
-            transform_name="rename_subset_vars",
-            dict_rename={"longitude": "lon", "latitude": "lat"},
-            list_vars=["uo", "vo", "zos"],
+
+        pred_transform_glonet = CustomTransforms(
+            transform_name="standardize_dataset",
+            list_vars=glonet_vars,
+            coords_rename_dict=coords_rename_dict,
+            vars_rename_dict=vars_rename_dict,
         )
 
-        ref_transform = CustomTransforms(
+        """ref_transform = CustomTransforms(
             transform_name="interpolate",
             interp_ranges={"lat": np.arange(-10, 10, 0.25), "lon": np.arange(-10, 10, 0.25)},
         )"""
-        return {"glonet": glonet_transform}
+        return {"glonet": pred_transform_glonet}
 
     @pytest.fixture(scope="function")
     def setup_dataloader(
@@ -194,7 +217,7 @@ class TestPipeline:
             pred_alias="glonet",
             ref_alias=None,
             batch_size=test_config.batch_size,
-            pred_transform=None,
+            pred_transform=transform_glonet,
             ref_transform=None,
         )
 
@@ -227,10 +250,26 @@ class TestPipeline:
         dask_cluster = setup_dask(test_config)
         add_noise = False  # True = create fake_results
         metrics = [
-            MetricComputer(metric_name="lagrangian", add_noise=add_noise),
-            MetricComputer(metric_name="rmsd_geostrophic_currents", add_noise=add_noise),
-            MetricComputer(metric_name="rmsd_mld", add_noise=add_noise),
-            MetricComputer(metric_name="rmsd", add_noise=add_noise),
+            MetricComputer(
+                metric_name="lagrangian",
+                add_noise=add_noise,
+                eval_variables=setup_dataloader.eval_variables,
+            ),
+            MetricComputer(
+                metric_name="rmsd_geostrophic_currents",
+                add_noise=add_noise,
+                eval_variables=setup_dataloader.eval_variables,
+            ),
+            MetricComputer(
+                metric_name="rmsd_mld",
+                add_noise=add_noise,
+                eval_variables=setup_dataloader.eval_variables,
+            ),
+            MetricComputer(
+                metric_name="rmsd",
+                add_noise=add_noise,
+                eval_variables=setup_dataloader.eval_variables,
+            ),
         ]
         return Evaluator(
             dask_cluster=dask_cluster,
@@ -245,7 +284,9 @@ class TestPipeline:
         setup_evaluator: Evaluator,
     ):
         """Test de l'évaluation des métriques."""
+        logger.debug(f"\n\n\t\t\t\t\t\t********************  STARTING EVALUATION  ********************\n\n")
         results = setup_evaluator.evaluate()
+        logger.debug(f"\n\n\t\t\t\t\t\t********************  ENDED EVALUATION  ********************\n\n")
 
         # Vérifier que les résultats existent
         assert len(results) > 0

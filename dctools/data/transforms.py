@@ -2,20 +2,24 @@
 
 from typing import Any, Dict, List, Optional
 
+import ast
 # import kornia
 from loguru import logger
 import numpy as np
 from torchvision import transforms
 import xarray as xr
 
+from dctools.data.coordinates import (
+    CoordinateSystem,
+    LIST_VARS_GLONET,
+)
 from dctools.utilities.xarray_utils import (
     rename_coordinates,
+    rename_coords_and_vars,
     subset_variables,
     interpolate_dataset,
-    create_coords_rename_dict,
     assign_coordinate,
     reset_time_coordinates,
-    LIST_VARS_GLONET,
 )
 
 
@@ -33,17 +37,23 @@ class TransformWrapper:
         return self.transf(sample), time_axis
 
 
-class RenameCoordsTransform:
+class RenameCoordsVarsTransform:
     """ a custom transform dependent on time axis """
-    def __init__(self, rename_dict: Optional[Dict] = None):
-        self.rename_dict = rename_dict
+    def __init__(
+        self,
+        coords_rename_dict: Optional[Dict] = None,
+        vars_rename_dict: Optional[Dict] = None
+    ):
+        self.coords_rename_dict = coords_rename_dict
+        self.vars_rename_dict = vars_rename_dict
 
     def __call__(self, data):
-        if not self.rename_dict:
-            self.rename_dict = create_coords_rename_dict(data)
-
-        renamed_dataset = rename_coordinates(data, self.rename_dict)
-        return renamed_dataset
+        #if not self.rename_dict:
+        #    coord_sys = CoordinateSystem.get_coordinate_system(data)
+        #    self.rename_dict = coord_sys.coordinates
+        return rename_coords_and_vars(
+            data, self.coords_rename_dict, self.vars_rename_dict
+        )
 
 class SelectVariablesTransform:
     def __init__(self, variables: List[str]):
@@ -139,6 +149,7 @@ class SubsetCoordTransform:
 class CustomTransforms:
     def __init__(self, transform_name: str, **kwargs):
         self.transform_name = transform_name
+        logger.debug(f"Creating transform {self.transform_name} with kwargs: {kwargs}")
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -160,6 +171,10 @@ class CustomTransforms:
                 return self.transform_subset_dataset(
                     dataset
                 )
+            case "standardize_dataset":
+                return self.transform_standardize_dataset(
+                    dataset
+                )
             case _:
                 return dataset
 
@@ -168,12 +183,51 @@ class CustomTransforms:
         dataset: xr.Dataset,
     ) -> xr.Dataset:
         assert(hasattr(self, "dict_rename") and hasattr(self, "list_vars"))
-
+        if isinstance(self.dict_rename, str):
+            dict_rename = ast.literal_eval(self.dict_rename)
+        else:
+            dict_rename = self.dict_rename
         transform=transforms.Compose([
-            RenameCoordsTransform(self.dict_rename),
+            RenameCoordsVarsTransform(rename_coords_dict=dict_rename),
             SelectVariablesTransform(self.list_vars),
         ])
         transf_dataset = transform(dataset)
+        return transf_dataset
+
+    def transform_standardize_dataset(
+        self,
+        dataset: xr.Dataset,
+    ) -> xr.Dataset:
+        assert(hasattr(self, "coords_rename_dict") and hasattr(self, "vars_rename_dict"))
+        assert(hasattr(self, "list_vars"))
+
+        # Convert string representations of dictionaries to actual dictionaries
+        if isinstance(self.coords_rename_dict, str):
+            coords_rename_dict = ast.literal_eval(self.coords_rename_dict)
+        else:
+            coords_rename_dict = self.coords_rename_dict
+        if isinstance(self.vars_rename_dict, str):
+            vars_rename_dict = ast.literal_eval(self.vars_rename_dict)
+        else:
+            vars_rename_dict = self.vars_rename_dict
+
+        transform=transforms.Compose([
+            SelectVariablesTransform(self.list_vars),
+            RenameCoordsVarsTransform(
+                coords_rename_dict=coords_rename_dict,
+                vars_rename_dict=vars_rename_dict,
+            ),
+        ])
+        logger.info(
+            f"Renaming coordinates and variables with {self.coords_rename_dict} and {self.vars_rename_dict}"
+        )
+        logger.debug(
+            f"Dataset variables before renaming: {list(dataset.dims)}"
+        )
+        transf_dataset = transform(dataset)
+        logger.debug(
+            f"Dataset variables after renaming: {list(transf_dataset.dims)}"
+        )
         return transf_dataset
 
     def transform_interpolate(
@@ -199,7 +253,7 @@ class CustomTransforms:
         list_vars = self.list_vars if hasattr(self, "list_vars") else LIST_VARS_GLONET
 
         transform=transforms.Compose([
-            RenameCoordsTransform(dict_rename),
+            RenameCoordsVarsTransform(coords_rename_dict=dict_rename),
             SelectVariablesTransform(list_vars),
             SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
             #AssignCoordsTransform(time_coord_name, time_coord_vals, time_coord_attrs),

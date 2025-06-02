@@ -143,7 +143,9 @@ class MultiSourceDatasetManager:
         """
         for alias, _ in self.datasets.items():
             logger.info(f"Filtrage du dataset '{alias}' par variables : {variables}")
+            logger.debug(f"Dataset {alias} variables: {self.datasets[alias].eval_variables}")
             self.filter_by_variable(alias, variables)
+            logger.debug(f"Filtered Dataset {alias} variables: {self.datasets[alias].eval_variables}")
 
     def to_json(self, alias: str, path: Optional[str] = None) -> str:
         """
@@ -291,6 +293,7 @@ class MultiSourceDatasetManager:
         # logger.debug(f"Filtered catalogs: {pred_catalog}, {ref_catalog}")
         # logger.debug(f"Pred catalog: {pred_catalog.get_dataframe()}")
         # logger.debug(f"Ref catalog: {ref_catalog.get_dataframe()}")
+        eval_variables = pred_dataset.eval_variables
 
 
         if pred_catalog.get_dataframe().empty:
@@ -308,6 +311,7 @@ class MultiSourceDatasetManager:
             batch_size=batch_size,
             pred_transform=pred_transform,
             ref_transform=ref_transform,
+            eval_variables=eval_variables,
         )
 
     def _filter_catalog_by_alias(self, alias: str) -> DatasetCatalog:

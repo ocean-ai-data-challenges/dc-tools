@@ -34,6 +34,7 @@ class EvaluationDataloader:
         batch_size: int = 1,
         pred_transform: Optional[CustomTransforms] = None,
         ref_transform: Optional[CustomTransforms] = None,
+        eval_variables: Optional[List[str]] = None,
     ):
         """
         Initialise le dataloader pour les ensembles de données.
@@ -53,6 +54,7 @@ class EvaluationDataloader:
         self.batch_size = batch_size
         self.pred_transform = pred_transform
         self.ref_transform = ref_transform
+        self.eval_variables = eval_variables
 
         # Aligner les catalogues
         self._align_catalogs()
@@ -73,6 +75,8 @@ class EvaluationDataloader:
         if not self.ref_catalog:
             logger.warning("No ref catalog. Cancel alignment.")
             return
+        self.pred_catalog.filter_by_variables(self.eval_variables)
+        self.ref_catalog.filter_by_variables(self.eval_variables)
         pred_df = self.pred_catalog.get_dataframe()
         ref_df = self.ref_catalog.get_dataframe()
 

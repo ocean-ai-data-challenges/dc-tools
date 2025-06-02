@@ -3,18 +3,21 @@ from abc import ABC, abstractmethod
 from typing import (
     Any, Dict, List, Optional, Union
 )
-
+from argopy import ArgoIndex, DataFetcher, IndexFetcher
 import copernicusmarine
+from dataclasses import dataclass, asdict
 import datetime
 import fsspec
-# import geopandas as gpd
+import geopandas as gpd
 from loguru import logger
 import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
+
 # import random
 # from shapely.geometry import box, Point
+from shapely.geometry import box
 # import string
 import xarray as xr
 
@@ -22,17 +25,15 @@ from dctools.data.connection.config import BaseConnectionConfig
 from dctools.data.datasets.dc_catalog import CatalogEntry
 from dctools.data.coordinates import (
     get_dataset_geometry,
-    get_coordinate_system,
     CoordinateSystem,
 )
 # from dctools.dcio.saver import DataSaver
 from dctools.dcio.loader import FileLoader
 from dctools.utilities.file_utils import read_file_tolist
 # from dctools.processing.cmems_data import extract_dates_from_filename
-from dctools.utilities.xarray_utils import (
-    get_grid_coord_names,
-    extract_spatial_bounds,
-    extract_variables,
+from dctools.data.coordinates import (
+    VARIABLES_ALIASES,
+    GLONET_DEPTH_VALS,
 )
 
 
@@ -40,8 +41,15 @@ class BaseConnectionManager(ABC):
     def __init__(self, connect_config: BaseConnectionConfig):
         self.params = connect_config.to_dict()
         self._list_files = self.list_files()
+        if not self.params.file_pattern:
+            self.params.file_pattern = "**/*.nc"
+        if not self.params.groups:
+            self.params.groups = None
 
-    def open(self, path: str, mode: str = "rb", try_remote_open=True) -> xr.Dataset:
+    def open(
+        self, path: str,
+        mode: str = "rb",
+    ) -> xr.Dataset:
         """
         Open a file, prioritizing remote access via S3. If the file is not available remotely,
         attempt to download it locally and open it.
@@ -55,15 +63,17 @@ class BaseConnectionManager(ABC):
         """
         # Tenter d'ouvrir le fichier en local
         if LocalConnectionManager.supports(path):
+            # logger.info(f"Open local file: {path}")
             dataset = self.open_local(path)
             if dataset:
                 return dataset
         # Tenter d'ouvrir le fichier en ligne
         elif self.supports(path):
+            # logger.info(f"Open remote file: {path}")
             dataset = self.open_remote(path, mode)
             if dataset:
                 return dataset
-
+        # logger.info(f"Ok file open")
         # Télécharger le fichier en local, puis l'ouvrir
         try:
             local_path = self._get_local_path(path)
@@ -75,7 +85,10 @@ class BaseConnectionManager(ABC):
             logger.error(f"Failed to open file: {path}. Error: {repr(exc)}")
             raise
 
-    def open_local(self, local_path: str) -> Optional[xr.Dataset]:
+    def open_local(
+        self,
+        local_path: str,
+    ) -> Optional[xr.Dataset]:
         """
         Open a file locally if it exists.
 
@@ -88,11 +101,17 @@ class BaseConnectionManager(ABC):
         if Path(local_path).exists():
             # logger.info(f"Opening local file: {local_path}")
 
-            return FileLoader.load_dataset(local_path)
-            # return open_dataset_auto(local_path, self)
+            #return FileLoader.load_dataset(local_path)
+            return FileLoader.open_dataset_auto(
+                local_path, self,
+                groups=self.params.groups,
+            )
         return None
 
-    def open_remote(self, path: str, mode: str = "rb") -> Optional[xr.Dataset]:
+    def open_remote(
+        self, path: str,
+        mode: str = "rb",
+    ) -> Optional[xr.Dataset]:
         """
         Open a file remotely if the source supports it.
 
@@ -104,10 +123,18 @@ class BaseConnectionManager(ABC):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            logger.info(f"Open remote file: {path}")
-            return FileLoader.open_dataset_auto(path, self)
+            extension = Path(path).suffix
+            if extension != '.zarr':
+                return None
+            #logger.info(f"Open remote file: {path}")
+            return FileLoader.open_dataset_auto(
+                path, self,
+                groups=self.params.groups,
+            )
         except Exception as exc:
-            logger.warning(f"Failed to open remote file: {path}. Error: {repr(exc)}")
+            logger.warning(
+                f"Failed to open remote file: {path}. Error: {repr(exc)}"
+            )
             return None
 
     def download_file(self, remote_path: str, local_path: str):
@@ -119,7 +146,7 @@ class BaseConnectionManager(ABC):
             local_path (str): Local path to save the file.
         """
 
-        remote_file = remote_file.replace("ftp://ftp.ifremer.fr", "")
+        remote_path = remote_path.replace("ftp://ftp.ifremer.fr", "")
         with self.params.fs.open(remote_path, "rb") as remote_file:
             with open(local_path, "wb") as local_file:
                 local_file.write(remote_file.read())
@@ -149,14 +176,17 @@ class BaseConnectionManager(ABC):
             raise FileNotFoundError("Empty file list! No files to extract metadata from.")
 
         first_file = files[0]
-        logger.info(f"Extracting global metadata from {first_file}")
+        # logger.info(f"Extracting global metadata from {first_file}")
 
         # Charger le fichier avec xarray
-        logger.info(f"Opening file: {first_file}")
+        # logger.info(f"Opening first file: {first_file}")
+
         with self.open(first_file, "rb") as ds:
             # Extraire les métadonnées globales
 
-            coord_sys = get_coordinate_system(ds)
+            coord_sys = CoordinateSystem.get_coordinate_system(ds)
+            dimensions = coord_sys.coordinates
+            dimensions_rename_dict = {v: k for k, v in dimensions.items()}
 
             #logger.info(f"Dimensions: {coord_sys.coordinates}")
 
@@ -164,23 +194,44 @@ class BaseConnectionManager(ABC):
             dict_resolution = self.estimate_resolution(
                 ds, coord_sys
             )
+            # logger.info(f"DATASET: {ds}")
 
             # Associer les variables à leurs dimensions
-            variables = {
+            variables = {}
+            for var_name, var in ds.variables.items():
+                variables[var_name] = {
+                    "dims": list(var.dims),
+                    "std_name": var.attrs.get("standard_name", ""),
+                }
+            '''variables = {
                 var: {
                     "dims": list(ds[var].dims), "std_name": ds[var].attrs.get("standard_name",'')
                 }
                 for var in ds.data_vars
-            }
-            for var in ds.data_vars:
+            }'''
+            logger.debug(f"Variables found: {variables}")
+            variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
+            variables_rename_dict = {v: k for k, v in variables_dict.items() if v is not None}
+            # dimensions = dict(ds.dims)
+
+            logger.info(f"\n\nDetected oceanographic variables: {variables_rename_dict}\n\n")
+
+            # logger.info(f"\nDataset variables: {list(ds.data_vars)}\n\n")
+            #import sys
+            #sys.exit()
+
+            '''for var in ds.data_vars:
                 long_name = ds[var].attrs.get("long_name",'')
                 standard_name = ds[var].attrs.get("standard_name",'')
-                logger.info(f"Variable: {var}, std name: {standard_name},  long_name: {long_name}")
+                print(f"Variable: {var}, std name: {standard_name}")'''
 
             global_metadata = {
                 "variables": variables,
+                "variables_dict": variables_dict,
+                "variables_rename_dict": variables_rename_dict,
                 "resolution": dict_resolution,
                 "coord_system": coord_sys,
+                #"dimensions_rename_dict": dimensions_rename_dict,
             }
         return global_metadata
 
@@ -220,8 +271,11 @@ class BaseConnectionManager(ABC):
                     date_start=date_start,
                     date_end=date_end,
                     variables=global_metadata.get("variables"),
+                    variables_dict=global_metadata.get("variables_dict"),
+                    variables_rename_dict=global_metadata.get("variables_rename_dict"),
                     #dimensions=global_metadata.get("dimensions"),
                     dimensions=global_metadata.get("coord_system").coordinates,
+                    # dimensions_rename_dict=global_metadata.get("dimensions_rename_dict"),
                     coord_type=global_metadata.get("coord_system").coord_type,
                     crs=global_metadata.get("coord_system").crs,
                     resolution=global_metadata.get(
@@ -308,7 +362,7 @@ class BaseConnectionManager(ABC):
                 metadata_entry = self.extract_metadata(path, global_metadata)
                 metadata_list.append(metadata_entry)
                 if len(metadata_list) >= limit:
-                    logger.info(f"Reached the limit of {limit} metadata entries.")
+                    # logger.info(f"Reached the limit of {limit} metadata entries.")
                     break
             except Exception as exc:
                 logger.warning(f"Failed to extract metadata for file {path}: {repr(exc)}")
@@ -331,18 +385,17 @@ class BaseConnectionManager(ABC):
 
 
 class LocalConnectionManager(BaseConnectionManager):
-    def list_files(self, pattern="**/*.nc") -> List[str]:
+    def list_files(self) -> List[str]:
         """
-        List files in the local filesystem matching the given pattern.
+        List files in the local filesystem matching pattern.
 
         Args:
-            pattern (str): Glob pattern to filter files.
 
         Returns:
             List[str]: List of file paths on local disk".
         """
         root = self.params.local_root
-        files = [p for p in sorted(self.params.fs.glob(f"{root}/{pattern}"))]
+        files = [p for p in sorted(self.params.fs.glob(f"{root}/{self.params.file_pattern}"))]
         return [f"{file}" for file in files]
 
     @classmethod
@@ -438,26 +491,8 @@ class CMEMSManager(BaseConnectionManager):
         except Exception as exc:
             logger.error(f"logout from CMEMS failed: {repr(exc)}")
         return None
-
-
-    '''def list_files(self, pattern="**/*.nc") -> List[str]:
-        """List files in the Copernicus Marine directory."""
-        logger.info("Listing files in Copernicus Marine directory.")
-        tmp_filepath = os.path.join(
-            self.params.local_root, "files.txt"
-        )
-        try:
-            copernicusmarine.get(
-                dataset_id=self.params.dataset_id, create_file_list=tmp_filepath
-            )
-            self._files = read_file_tolist(tmp_filepath, max_lines=2)
-            logger.info(f"List of files: {self._files}")
-            return self._files
-        except Exception as exc:
-            logger.error(f"Failed to list files from CMEMS: {repr(exc)}")
-            return []'''
     
-    def list_files(self, pattern="**/*.nc") -> List[str]:
+    def list_files(self) -> List[str]:
         """List files in the Copernicus Marine directory."""
         logger.info("Listing files in Copernicus Marine directory.")
         tmp_filepath = os.path.join(self.params.local_root, "files.txt")
@@ -575,12 +610,11 @@ class FTPManager(BaseConnectionManager):
         # FTP does not support remote opening
         return None
 
-    def list_files(self, pattern: str = "**/*.nc") -> List[str]:
+    def list_files(self) -> List[str]:
         """
         Liste les fichiers disponibles sur le serveur FTP correspondant au motif donné.
 
         Args:
-            pattern (str): Motif de recherche pour filtrer les fichiers (par défaut "**/*.nc").
 
         Returns:
             List[str]: Liste des chemins des fichiers correspondant au motif.
@@ -589,16 +623,15 @@ class FTPManager(BaseConnectionManager):
             # Accéder au système de fichiers FTP via fsspec
             fs = self.params.fs
 
-            remote_path = f"ftp://{self.params.host}/{self.params.ftp_folder}{pattern}"
-            # remote_path = f"{self.params.ftp_folder}" #{pattern}"
-            logger.info(f"\n\nListing files in: {remote_path}\n\n")
+            remote_path = f"ftp://{self.params.host}/{self.params.ftp_folder}{self.params.file_pattern}"
+            # logger.info(f"\n\nListing files in: {remote_path}\n\n")
             # Lister les fichiers correspondant au motif
             #files = fs.glob(f"{remote_path}")
             files = sorted(fs.glob(remote_path))
-            logger.info(f"Files found: {files}")
+            logger.info(f"Files found in {remote_path} : {files}")
 
             if not files:
-                logger.warning(f"Aucun fichier trouvé sur le serveur FTP avec le motif : {pattern}")
+                logger.warning(f"Aucun fichier trouvé sur le serveur FTP avec le motif : {self.params.file_pattern}")
             return [ f"ftp://{self.params.host}{file}" for file in files ]
         except Exception as exc:
             logger.error(f"Erreur lors de la liste des fichiers sur le serveur FTP : {repr(exc)}")
@@ -610,12 +643,11 @@ class S3Manager(BaseConnectionManager):
     def supports(cls, path: str) -> bool:
         return path.startswith("s3://")
 
-    def list_files(self, pattern="*.zarr") -> List[str]:
+    def list_files(self) -> List[str]:
         """
-        List files matching the given pattern.
+        List files matching pattern.
 
         Args:
-            pattern (str): Glob pattern to filter files.
 
         Returns:
             List[str]: List of file paths.
@@ -625,8 +657,8 @@ class S3Manager(BaseConnectionManager):
                 logger.info(f"Accessing bucket: {self.params.bucket}")
 
             # Construire le chemin distant
-            remote_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}/{pattern}"
-            logger.info(f"Listing files in: {remote_path}")
+            remote_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}/{self.params.file_pattern}"
+            # logger.info(f"Listing files in: {remote_path}")
 
             # Utiliser fsspec pour accéder aux fichiers
             files = sorted(self.params.fs.glob(remote_path))
@@ -648,14 +680,17 @@ class S3Manager(BaseConnectionManager):
                 files = [
                     f"s3://{self.params.endpoint_url}/{self.params.bucket}/{obj['Key']}"
                     for obj in self.params.fs.ls(remote_path, detail=True)
-                    if obj["Key"].endswith(pattern.split("*")[-1])
+                    if obj["Key"].endswith(self.params.file_pattern.split("*")[-1])
                 ]
                 return files
             except Exception as exc:
                 logger.error(f"Failed to list files using object-level access: {repr(exc)}")
                 raise
 
-    def open_remote(self, path: str, mode: str = "rb") -> Optional[xr.Dataset]:
+    def open_remote(
+        self, path: str,
+        mode: str = "rb",
+    ) -> Optional[xr.Dataset]:
         """
         Open a file remotely from an S3 bucket.
 
@@ -670,15 +705,25 @@ class S3Manager(BaseConnectionManager):
             # logger.info(f"Open S3 file: {path}")
             # return xr.open_dataset(self.params.fs.open(path, mode))
             # return xr.open_zarr(path)
-            return(FileLoader.open_dataset_auto(path, self))
+            extension = Path(path).suffix
+            if extension != '.zarr':
+                return None
+            # logger.info(f"Open S3 file: {path}")
+            return(
+                FileLoader.open_dataset_auto(
+                    path, self, groups=self.params.groups
+                )
+            )
         except Exception as exc:
             logger.warning(f"Failed to open S3 file: {path}. Error: {repr(exc)}")
             return None
 
 
-
 class S3WasabiManager(S3Manager):
-    def open_remote(self, path: str, mode: str = "rb") -> Optional[xr.Dataset]:
+    def open_remote(
+        self,
+        path: str, mode: str = "rb",
+    ) -> Optional[xr.Dataset]:
         """
         Open a file remotely from an S3 bucket.
 
@@ -693,7 +738,7 @@ class S3WasabiManager(S3Manager):
             # logger.info(f"Open Wasabi S3 file: {path}")
             # return xr.open_dataset(self.params.fs.open(path, mode))
         
-            s3_mapper = fsspec.get_mapper(
+            """s3_mapper = fsspec.get_mapper(
                 # "s3://ppr-ocean-climat/DC3/IABP/LEVEL1_2023.zarr",
                 path,
                 client_kwargs = {
@@ -701,12 +746,19 @@ class S3WasabiManager(S3Manager):
                     "aws_secret_access_key": self.params.secret_key,
                     "endpoint_url": self.params.endpoint_url,
                     }
-                )
+                )"""
             """return xr.open_zarr(
                 s3_mapper,
                 #engine="zarr"
             )"""
-            return(FileLoader.open_dataset_auto(path, self))
+            extension = Path(path).suffix
+            if extension != '.zarr':
+                return None
+            return(
+                FileLoader.open_dataset_auto(
+                    path, self, groups=self.params.groups
+                )
+            )
         except Exception as exc:
             logger.warning(f"Failed to open Wasabi S3 file: {path}. Error: {repr(exc)}")
             return None
@@ -719,21 +771,20 @@ class GlonetManager(BaseConnectionManager):
 
     def list_files(self) -> List[str]:
         """
-        List files matching the given pattern.
+        List files matching pattern.
 
         Args:
-            pattern (str): Glob pattern to filter files.
 
         Returns:
             List[str]: List of file paths.
         """
         start_date = "20240103"
         date = datetime.datetime.strptime(start_date, "%Y%m%d")
-        list_files = []
+        list_f = []
         while True:
             if date.year < 2025:
                 date_str = date.strftime("%Y%m%d")
-                list_files.append(
+                list_f.append(
                     f"{self.params.endpoint_url}/{self.params.glonet_s3_bucket}/{self.params.s3_glonet_folder}/{date_str}.zarr"
                     #f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
                     #f"s3://project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
@@ -742,13 +793,19 @@ class GlonetManager(BaseConnectionManager):
             else:
                 break
         #logger.info(f"List of files: {list_files}")
-        return list_files
+        return list_f
 
 
-    def open(self, path: str, mode: str = "rb") -> xr.Dataset:
+    def open(
+        self,
+        path: str,
+        mode: str = "rb",
+    ) -> xr.Dataset:
         return self.open_remote(path)
 
-    def open_remote(self, path: str) -> Optional[xr.Dataset]:
+    def open_remote(
+        self, path: str
+    ) -> Optional[xr.Dataset]:
         """
         Open a file remotely from an S3 bucket.
 
@@ -777,3 +834,371 @@ class GlonetManager(BaseConnectionManager):
         except Exception as exc:
             logger.warning(f"Failed to open Glonet file: {path}. Error: {repr(exc)}")
             return None
+
+
+class ArgoManager(BaseConnectionManager):
+
+    @classmethod
+    def supports(cls, path: str) -> bool:
+        return True
+
+    def filter_by_geometry(catalog_gdf: gpd.GeoDataFrame, polygon: gpd.GeoSeries) -> gpd.GeoDataFrame:
+        return catalog_gdf[catalog_gdf.geometry.centroid.within(polygon.unary_union)]
+
+    def spatial_filter(catalog_gdf: gpd.GeoDataFrame, region_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        return gpd.sjoin(catalog_gdf, region_gdf, how="inner", predicate="intersects")
+
+
+    def group_profiles_daily(self, df: pd.DataFrame, spatial_res: float = 5.0):
+        df["grid_lat"] = (df["lat"] // spatial_res) * spatial_res
+        df["grid_lon"] = (df["lon"] // spatial_res) * spatial_res
+        df["date_bin"] = df["date"].dt.date  # résolution = 1 jour
+        return df.groupby(["grid_lat", "grid_lon", "date_bin"])
+
+
+    def get_argo_date_range(self) -> tuple[pd.Timestamp, pd.Timestamp]:
+        """Return the min/max dates available in the ARGO index."""
+        index = IndexFetcher().to_dataframe()
+        min_date = index['date'].min()
+        max_date = index['date'].max()
+        return pd.to_datetime(min_date), pd.to_datetime(max_date)
+
+    '''def generate_catalog(
+        self,
+        geometry_filter: Optional[gpd.GeoDataFrame] = None,
+        time_start: Optional[str] = None,
+        time_end: Optional[str] = None,
+        lon_step=20,
+        lat_step=20,
+        time_step_days=1,
+        save_path: Optional[str] = None,
+        format: Optional[str] = None  # 'json' or 'parquet'
+    ) -> List[CatalogEntry]:
+        
+        if time_start is None or time_end is None:
+            time_start, time_end = self.get_argo_date_range()
+
+        time_start = pd.Timestamp(time_start)
+        time_end = pd.Timestamp(time_end)
+        dates = pd.date_range(time_start, time_end, freq=f"{time_step_days}D")
+
+        catalog: List[CatalogEntry] = []
+
+        # Définir les limites géographiques selon le filtre (ou monde entier)
+        if geometry_filter is not None:
+            bounds = geometry_filter.total_bounds
+            lon_range = (bounds[0], bounds[2])
+            lat_range = (bounds[1], bounds[3])
+        else:
+            lon_range = (-180, 180)
+            lat_range = (-90, 90)
+
+        for lon_min in np.arange(*lon_range, lon_step):
+            for lat_min in np.arange(*lat_range, lat_step):
+                tile = box(lon_min, lat_min, lon_min + lon_step, lat_min + lat_step)
+
+                # Si un filtre géométrique est fourni, vérifier l’intersection
+                if geometry_filter is not None:
+                    if not geometry_filter.intersects(tile).any():
+                        continue
+
+                for i in range(len(dates) - 1):
+                    start = dates[i]
+                    end = dates[i + 1]
+
+                    try:
+                        ds = DataFetcher().region([lon_min, lon_min + lon_step,
+                                                lat_min, lat_min + lat_step,
+                                                start.strftime("%Y-%m-%d"),
+                                                end.strftime("%Y-%m-%d")]).to_xarray()
+
+                        if ds.dims.get("N_PROF", 0) == 0:
+                            continue
+
+                        variables = {v: list(ds[v].dims) for v in ds.data_vars}
+                        dimensions = dict(ds.dims)
+                        geometry = gpd.GeoSeries([tile])
+
+                        entry = CatalogEntry(
+                            path=f"argo://{start.date()}_{lon_min}_{lat_min}",
+                            date_start=start,
+                            date_end=end,
+                            variables=variables,
+                            dimensions=dimensions,
+                            coord_type="geographic",
+                            crs="EPSG:4326",
+                            geometry=geometry,
+                            resolution={"lon": lon_step, "lat": lat_step, "time": time_step_days}
+                        )
+                        catalog.append(entry)
+
+                    except Exception as e:
+                        print(f"Erreur sur tuile ({lon_min},{lat_min}) et dates {start}–{end}: {e}")
+                        continue
+
+        catalog.sort(key=lambda x: x.date_start)
+
+        if save_path and format:
+            df = gpd.GeoDataFrame([{
+                **asdict(e),
+                "geometry": e.geometry.values[0]
+            } for e in catalog])
+
+            if format == "json":
+                df.to_file(save_path, driver="GeoJSON")
+            elif format == "parquet":
+                df.to_parquet(save_path)
+            else:
+                raise ValueError(f"Unsupported format: {format}")
+
+        return catalog'''
+
+
+    def load_argo_profile_from_url(wmo: int, cycle: int) -> xr.Dataset:
+        """
+        Télécharge et charge un profil Argo à partir de son WMO et numéro de cycle.
+
+        Parameters
+        ----------
+        wmo : int
+            Numéro WMO de la flotte.
+        cycle : int
+            Numéro de cycle du profil.
+
+        Returns
+        -------
+        xr.Dataset
+            Profil Argo avec temps décodé.
+        """
+        # Construire l'URL standard Ifremer
+        filename = f"D{wmo}_{str(cycle).zfill(3)}.nc"
+        url = f"https://data-argo.ifremer.fr/dac/coriolis/{wmo}/profiles/{filename}"
+        import requests
+        import tempfile
+        # Télécharger dans un fichier temporaire
+        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
+            response = requests.get(url)
+            if response.status_code != 200:
+                raise RuntimeError(f"Erreur {response.status_code} pour l'URL : {url}")
+            tmp.write(response.content)
+            tmp_path = Path(tmp.name)
+
+        # Ouvrir le fichier avec xarray (sans décodage)
+        ds = xr.open_dataset(tmp_path, decode_times=False)
+
+        # Décodage manuel du temps à partir de JULD
+        if "JULD" in ds:
+            ref_time = pd.Timestamp("1950-01-01")
+            ds["time"] = ref_time + pd.to_timedelta(ds["JULD"].values, unit="D")
+            ds = ds.assign_coords(time=ds["time"])
+
+        return ds
+
+
+    def list_files_with_metadata(
+            self,
+            #geometry_filter: Optional[gpd.GeoDataFrame] = None,
+            lon_range: Optional[tuple[float, float]] = (-180, 180),
+            lat_range: Optional[tuple[float, float]] = (-90, 90),
+            lon_step: Optional[float]=1.0,
+            lat_step: Optional[float]=1.0,
+            depth_values: Optional[List[float]] = GLONET_DEPTH_VALS,
+            time_step_days: Optional[int]=1,
+    ) -> List[CatalogEntry]:
+        """
+        List all files with their metadata by combining global metadata and file-specific information.
+
+        Args:
+            geometry_filter (Optional[gpd.GeoDataFrame]): Geometry filter to apply on the catalog.
+
+        Returns:
+            List[CatalogEntry]: List of metadata entries for each file.
+        """
+        list_dates = self._list_files
+
+        # 1. Récupérer l’index complet (cela peut être long !)
+        # df = IndexFetcher().to_dataframe()
+        # 2. Convertir la colonne 'date' en datetime (si nécessaire)
+        #import sys
+        #sys.exit(0)
+
+        #time_start, time_end = self.get_argo_date_range()
+
+        #time_start = pd.Timestamp(time_start)
+        #time_end = pd.Timestamp(time_end)
+        #dates = pd.date_range(time_start, time_end, freq=f"{time_step_days}D")
+
+        metadata_list: List[CatalogEntry] = []
+
+        # Définir les limites géographiques selon le filtre (ou monde entier)
+        #lon_range = (-180, 180)
+        #lat_range = (-90, 90)
+        first_elem = True
+
+        for n_elem, start_date in enumerate(list_dates):
+            end_date = start_date + pd.Timedelta(days=1)
+            # logger.info(f"Processing element: {elem.to_markdown()}")
+            # logger.info(f"Processing date: {start_date} to {end_date}")
+            #wmo_number = elem["wmo"]
+            #cycle_number = elem["cyc"]
+            #logger.info(f"Processing WMO number: {wmo_number}")
+            #if not wmo_number:
+            #    continue
+            #argopy.set_options(ds='phy', src='erddap', mode='research'):
+            #params = 'all'  # eg: 'DOXY' or ['DOXY', 'BBP700']
+            #logger.info(f"Fetching data for WMO number: {wmo_number}")
+            # ds = DataFetcher().float(wmo_number).to_xarray()
+            argo_loader = DataFetcher()
+            #logger.info(f"Fetching ARGO data for WMO number: {wmo_number}")
+
+            # ds = argo_loader.float(wmo_number).to_xarray(
+            
+            #ds = argo_loader.profile(wmo_number, cycle_number).load().data
+            profile = argo_loader.region([
+                min(lon_range), max(lon_range),
+                min(lat_range), max(lat_range),
+                min(depth_values),
+                max(depth_values),
+                start_date, end_date
+            ])
+            logger.info(f"Fetched ARGO data : {profile}")
+            ds = profile.load().data
+            # ds = ds.to_xarray() # decode_times=False)
+            logger.info(f"Dataset : {ds}")
+            # get coordinate system
+            if first_elem:
+                coord_sys = CoordinateSystem.get_coordinate_system(ds)
+                first_elem = False
+            variables = {v: list(ds[v].dims) for v in ds.data_vars}
+            variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
+            variables_rename_dict = {v: k for k, v in variables_dict.items()}
+            # dimensions = dict(ds.dims)
+
+            coord_sys = CoordinateSystem.get_coordinate_system(ds)
+            dimensions = coord_sys.coordinates
+            # dimensions_rename_dict = {v: k for k, v in dimensions.items()}
+            # geometry = gpd.GeoSeries([tile])
+            geometry = get_dataset_geometry(ds, coord_sys)
+            date_start = pd.to_datetime(
+                ds.time.min().values
+            ) if "time" in ds.coords else None
+            date_end = pd.to_datetime(
+                ds.time.max().values
+            ) if "time" in ds.coords else None
+
+            entry = CatalogEntry(
+                #path=f"argo://{df['file']}",
+                date_start=date_start,
+                date_end=date_end,
+                variables=variables,
+                variables_dict=variables_dict,
+                variables_rename_dict=variables_rename_dict,
+                dimensions=dimensions,
+                # dimensions_rename_dict=dimensions_rename_dict,
+                coord_type="geographic",
+                crs="EPSG:4326",
+                geometry=geometry,
+                resolution={"lon": lon_step, "lat": lat_step, "time": time_step_days}
+            )
+            metadata_list.append(entry)
+
+
+        #metadata_list.sort(key=lambda x: x.date_start)
+
+        return metadata_list
+ 
+    '''       # Récupérer les métadonnées globales
+            global_metadata = self.get_global_metadata()
+
+            # Initialiser une liste pour stocker les métadonnées
+            metadata_list = []
+
+            # Parcourir tous les fichiers et extraire leurs métadonnées
+            for path in self._list_files:
+                try:
+                    metadata_entry = self.extract_metadata(path, global_metadata)
+                    if geometry_filter is not None:
+                        if not geometry_filter.intersects(metadata_entry.geometry).any():
+                            continue
+                    metadata_list.append(metadata_entry)
+                except Exception as exc:
+                    logger.warning(f"Failed to extract metadata for file {path}: {repr(exc)}")
+
+            if not metadata_list:
+                logger.error("No valid metadata entries were generated.")
+                raise ValueError("No valid metadata entries were generated.")
+
+            return metadata_list
+    '''
+
+    def list_files(self) -> List[str]:
+
+        #idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="core", cache=True)
+        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="bgc-b", cache=True)
+        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="bgc-s", cache=True)
+        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="meta", cache=True)
+        # idx = ArgoIndex()
+
+        # idx = ArgoIndex(host="https://data-argo.ifremer.fr")  # Default host
+        idx = ArgoIndex(host="ftp://ftp.ifremer.fr/ifremer/argo", index_file="ar_index_global_prof.txt")  # Default index
+        # idx = ArgoIndex(index_file="bgc-s")  # Use keywords instead of exact file names
+        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="bgc-b", cache=True)  # Use cache for performances
+        # idx = ArgoIndex(host=".", index_file="dummy_index.txt", convention="core")  # Load your own index
+
+        '''df = pd.read_csv(
+            url,
+            skiprows=9,
+            names=["file", "date", "lat", "lon", "ocean", "profiler", "institution", "update"]
+        )'''
+
+
+
+        limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
+        logger.info(f"Loading ARGO index with limit: {limit}")
+
+        idx = idx.load(nrows=limit)
+        logger.info(f"\n\nARGO Index: {idx}")
+        df = idx.to_dataframe(index=True)
+        logger.info(f"\n\nsize List of files 1: {idx.uri_full_index}")
+
+        # 3. Trier les données par date croissante
+        #df_sorted = df.sort_values(by='date').reset_index(drop=True)
+        df["date"] = pd.to_datetime(df["date"])
+        #df["date_update"] = pd.to_datetime(df["date_update"])
+        # 4. Afficher les premières lignes
+        #print(df_sorted.head().to_markdown())
+
+        # Générer une série de dates journalières entre min et max
+        list_dates = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')
+
+        return list_dates   # idx.uri_full_index
+
+
+    def open(
+        self, path: str,
+        mode: str = "rb",
+    ) -> xr.Dataset:
+        """
+        Open an Argo dataset from a given path.
+
+        Args:
+            path (str): Path to the Argo dataset.
+            mode (str): Mode to open the file (default is "rb").
+
+        Returns:
+            xr.Dataset: Opened Argo dataset.
+        """
+        # On suppose que le chemin est un URI Argo
+        if not path.startswith("argo://"):
+            raise ValueError(f"Unsupported path format: {path}")
+
+        # Extraire les informations du chemin
+        parts = path.split("/")
+        if len(parts) < 3:
+            raise ValueError(f"Invalid Argo path: {path}")
+
+        # Charger le dataset avec argopy
+        from argopy import DataFetcher
+        ds = DataFetcher().region(parts[1:]).to_xarray()
+        return ds
+

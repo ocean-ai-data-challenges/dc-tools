@@ -14,42 +14,17 @@ from pathlib import Path
 import xarray as xr
 import xesmf as xe
 
-from dctools.data.coordinates import CoordinateSystem
+from dctools.data.coordinates import (
+    CoordinateSystem,
+    GEO_STD_COORDS
+)
 
-# Possible names of coordinates that we want to check for
-LATITUDE_NAMES = ["lat", "latitude", "LAT", "LATITUDE"]
-LONGITUDE_NAMES = ["lon", "longitude", "LON", "LONGITUDE"]
-DEPTH_NAMES = ["depth", "DEPTH", "height", "HEIGHT"]
-TIME_NAMES = ["time", "TIME"]
-DICT_RENAME_CMEMS = dict(longitude="lon", latitude="lat")
-LIST_VARS_GLONET = ["thetao", "zos", "uo", "vo", "so", "depth", "lat", "lon", "time"]
-LIST_VARS_GLONET_NO_DIMS = ["thetao", "zos", "uo", "vo", "so"]
-LIST_VARS_GLONET_UNITTEST = ["thetao", "zos", "uo"]
-GLONET_DEPTH_VALS = [0.494025, 47.37369, 92.32607, 155.8507, 222.4752, 318.1274, 380.213, 
-        453.9377, 541.0889, 643.5668, 763.3331, 902.3393, 1245.291, 1684.284, 
-        2225.078, 3220.82, 3597.032, 3992.484, 4405.224, 4833.291, 5274.784]
-
-GLONET_TIME_VALS = range(0, 10)
-
-RANGES_GLONET = {
-    "lat": np.arange(-78, 90, 0.25),
-    "lon": np.arange(-180, 180, 0.25),
-    "depth": GLONET_DEPTH_VALS,
-    #"time": GLONET_TIME_VALS,
-}
-
-GLONET_ENCODING = {"depth": {"dtype": "float32"},
-                   "lat": {"dtype": "float64"},
-                   "lon": {"dtype": "float64"},
-                   "time": {"dtype": "str"},
-                   "so": {"dtype": "float32"},
-                   "thetao": {"dtype": "float32"},
-                   "uo": {"dtype": "float32"},
-                   "vo": {"dtype": "float32"},
-                   "zos": {"dtype": "float32"},
-}
-
-STD_COORDS_NAMES = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
+from oceanbench.core.climate_forecast_standard_names import (
+    StandardDimension, StandardVariable
+)
+from oceanbench.core.dataset_utils import (
+    Variable, Dimension, DepthLevel
+)
 
 def create_empty_dataset(dimensions: dict) -> xr.Dataset:
     """
@@ -65,7 +40,7 @@ def create_empty_dataset(dimensions: dict) -> xr.Dataset:
     coords = {dim: range for dim, range in dimensions.items()}
     return xr.Dataset(coords=coords)
 
-def get_grid_coord_names(
+'''def get_grid_coord_names(
     data: xr.Dataset | xr.DataArray,
 ) -> Dict[str, str | None]:
     """
@@ -97,9 +72,9 @@ def get_grid_coord_names(
     time_set = set(TIME_NAMES).intersection(list_coords)
     coord_name_dict["time"] = None if len(time_set) == 0 else next(iter(time_set))
 
-    return coord_name_dict
+    return coord_name_dict'''
 
-def create_coords_rename_dict(ds: xr.Dataset):
+'''def create_coords_rename_dict(ds: xr.Dataset):
     ds_coords = get_grid_coord_names(ds)
     dict_rename = {
         ds_coords["lon"]: STD_COORDS_NAMES["lon"],
@@ -107,24 +82,50 @@ def create_coords_rename_dict(ds: xr.Dataset):
         ds_coords["depth"]: STD_COORDS_NAMES["depth"],
         ds_coords["time"]: STD_COORDS_NAMES["time"],
     }
-    return dict_rename
+    return dict_rename'''
 
-def standard_rename_coords(ds: xr.Dataset):
-    """Rename coordinates to standard names."""
-    dict_rename = create_coords_rename_dict(ds)
-    # Remove None values from the dictionary
-    dict_rename = {k: v for k, v in dict_rename.items() if v is not None}
-    # Rename coordinates
-    ds = rename_coordinates(ds, dict_rename)
-    return ds
-
-def rename_coordinates(ds: xr.Dataset, rename_dict):
+def rename_coordinates(ds: xr.Dataset, rename_dict: Optional[dict] = None):
     """Rename coordinates according to a given dictionary."""
-    return ds.rename(rename_dict)
+    if not rename_dict:
+        logger.debug("No rename dictionary provided, using CoordinateSystem to detect coordinates.")
+        coord_sys = CoordinateSystem.get_coordinate_system(ds)
+        rename_dict = coord_sys.coordinates
+    logger.debug(f"Renaming coordinates with dictionary: {rename_dict}")
+    # Remove None values from the dictionary
+    #rename_dict = {k: v for k, v in rename_dict.items() if v is not None}
+    # remove entries when key is same as value, and None values
+    rename_dict = {k: v for k, v in rename_dict.items() if k != v  and v is not None}
+    logger.debug(f"Filtered renaming dictionary: {rename_dict}")
+    if len (rename_dict) == 0:
+        return ds
+    ds = ds.rename_dims(rename_dict)
+    logger.debug(f"Dataset dimensions after renaming coordinates: {list(ds.dims)}")
+    return ds.rename_dims(rename_dict)
 
-def rename_variables(ds: xr.Dataset, rename_dict):
+def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict]= None):
     """Rename variables according to a given dictionary."""
+    if not rename_dict:
+        variables = {v: list(ds[v].dims) for v in ds.data_vars}
+        rename_dict = CoordinateSystem.detect_oceanographic_variables(variables)
+    # Remove invalid values from the dictionary
+    rename_dict = {k: v for k, v in rename_dict.items() if k != v and v is not None}
+
+    if len (rename_dict) == 0:
+        return ds
+    logger.debug(f"Renaming variables with dict: {rename_dict}")
     return ds.rename_vars(rename_dict)
+
+
+def rename_coords_and_vars(
+    ds: xr.Dataset,
+    rename_coords_dict: Optional[dict] = None,
+    rename_vars_dict: Optional[dict] = None,
+):
+    """Rename variables and coordinates according to given dictionaries."""
+    logger.debug(f"Renaming coordinates in dataset with dictionary: {rename_coords_dict}")
+    rename_ds = rename_coordinates(ds, rename_coords_dict)
+    logger.debug(f"Renaming variables in dataset with dictionary: {rename_vars_dict}")
+    return rename_variables(rename_ds, rename_vars_dict)
 
 def subset_variables(ds: xr.Dataset, list_vars: List[str]):
     """Extract a sub-dataset containing only listed variables."""
@@ -140,7 +141,7 @@ def interpolate_dataset(
     out_dict = {}
     for key in ranges.keys():
         out_dict[key] = ranges[key]
-    for dim in STD_COORDS_NAMES.keys():
+    for dim in GEO_STD_COORDS.keys():
         if dim not in out_dict.keys():
             out_dict[dim] = ds.coords[dim].values
     ds_out = create_empty_dataset(out_dict)
@@ -150,7 +151,7 @@ def interpolate_dataset(
 
     if weights_filepath and Path(weights_filepath).is_file():
         # Use precomputed weights
-        logger.info(f"Using precomputed weights from {weights_filepath}")
+        logger.info(f"Using interpolation precomputed weights from {weights_filepath}")
         regridder = xe.Regridder(
             ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
         )
@@ -178,7 +179,9 @@ def get_glonet_time_attrs(start_date: str):
     }
     return glonet_time_attrs
 
-def get_vars_dims(ds: xr.Dataset) -> Tuple[List[str]]:
+'''def get_vars_dims(
+    ds: xr.Dataset,
+) -> Tuple[List[str]]:
     """
     Get the variables and their dimensions from an xarray dataset.
     """
@@ -186,14 +189,16 @@ def get_vars_dims(ds: xr.Dataset) -> Tuple[List[str]]:
     vars_3d = []
     for var in ds.data_vars:
         # dims = list(ds[var].dims)
-        dict_coords = get_grid_coord_names(ds[var])
+        coord_sys = CoordinateSystem.get_coordinate_system(ds[var])
+        dict_coords = coord_sys.coordinates
+        
 
         if "lat" in dict_coords and "lon" in dict_coords:
             if "depth" not in dict_coords:
                 vars_2d.append(var)
             else:
                 vars_3d.append(var)
-    return (vars_2d, vars_3d)
+    return (vars_2d, vars_3d)'''
 
 def get_time_info(ds: xr.Dataset):
     """
