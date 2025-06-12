@@ -75,8 +75,6 @@ class EvaluationDataloader:
         if not self.ref_catalog:
             logger.warning("No ref catalog. Cancel alignment.")
             return
-        self.pred_catalog.filter_by_variables(self.eval_variables)
-        self.ref_catalog.filter_by_variables(self.eval_variables)
         pred_df = self.pred_catalog.get_dataframe()
         ref_df = self.ref_catalog.get_dataframe()
 

@@ -16,7 +16,6 @@ import pandas as pd
 from shapely.geometry import mapping, Polygon
 import xarray as xr
 
-from dctools.data.datasets.dc_catalog import CatalogEntry
 
 def get_dates_from_startdate(start_date: str, ndays: int) -> List[str]:
     """Get dates of n days after start_date.

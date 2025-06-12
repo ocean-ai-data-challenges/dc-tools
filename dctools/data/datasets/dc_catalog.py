@@ -7,18 +7,22 @@ from typing import (
     Optional, Tuple, Union,
 )
 
-
-import copy
 import geopandas as gpd
 import json
 from loguru import logger
 import pandas as pd
-from shapely.geometry import mapping, shape, Polygon
+from shapely.geometry import mapping, shape
 
 
-METADATA_VARIABLES = [
-    "variables", "variables_rename_dict",
-    "dimensions", "coord_type", "crs", "resolution"
+GLOBAL_METADATA = [
+    "coord_type", "crs", "dimensions", "keep_variables",
+     "resolution", "variables", "variables_rename_dict",
+]
+      
+ALL_METADATA = [
+    "coord_type", "crs", "date_end", "date_start", 
+    "dimensions", "geometry", "keep_variables", "path", 
+    "resolution", "variables", 
 ]
 
 @dataclass
@@ -27,14 +31,14 @@ class CatalogEntry:
     date_start: pd.Timestamp
     date_end: pd.Timestamp
     variables: Dict[str, List[str]]
-    variables_dict: Dict[str, List[str]]
-    variables_rename_dict: Dict[str, str]
-    dimensions: Dict[str, str]
-    # dimensions_rename_dict: Dict[str, str]
-    coord_type: str
-    crs: str
+    # variables_dict: Dict[str, List[str]]
+    # variables_rename_dict: Dict[str, str]
+    # dimensions: Dict[str, str]
+    # keep_variables: List[str]
+    # coord_type: str
+    # crs: str
     geometry: gpd.GeoSeries
-    resolution: Optional[Dict[str, float]] = None
+    # resolution: Optional[Dict[str, float]] = None
 
     def to_dict(self):
         try:
@@ -56,34 +60,6 @@ class CatalogEntry:
         return cls(**data_copy)
 
 
-'''@dataclass
-class SharedCatalogEntry:
-    local: CatalogEntry
-    shared: Dict[str, Any]
-
-    def __getattr__(self, name: str) -> Any:
-        if hasattr(self.local, name):
-            val = getattr(self.local, name)
-            shared_val = self.shared.get(name)
-            return shared_val if val is None else val
-        raise AttributeError(f"'CatalogEntry' object has no attribute '{name}'")
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in ("local", "shared"):
-            super().__setattr__(name, value)
-        else:
-            setattr(self.local, name, value)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "local": self.local.to_dict()
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any], shared: Dict[str, Any]):
-        return cls(local=CatalogEntry.from_dict(data["local"]), shared=shared)'''
-
-
 class DatasetCatalog:
     """Structured catalog to hold and filter dataset metadata entries."""
 
@@ -103,13 +79,10 @@ class DatasetCatalog:
             self.entries = []
             self.gdf = gpd.GeoDataFrame()
             return
-        #logger.info(f"\n\nENTRIES: {entries}\n\n")
-        # Convertir les dictionnaires en CatalogEntry si nécessaire
+
         if entries:
             self.entries = []
             for entry in entries:
-                """if isinstance(entry, dict):
-                    self.entries.append(CatalogEntry(**entry))"""
                 if isinstance(entry, CatalogEntry):
                     self.entries.append(entry)
                     # logger.debug(f"Adding entry: {entry}")
@@ -118,29 +91,17 @@ class DatasetCatalog:
                     # logger.debug(f"Adding entry: {entry}")
                 else:
                     logger.warning(f"Ignoring invalid entry: {entry}")
-            # logger.debug(f"Entries0: {entries[0]}")
-            '''if isinstance(entry, CatalogEntry):
-                crs = entries[0].crs
-            elif isinstance(entry, dict):
-                crs = entries[0].get('crs')'''
+
             # Convertir les entrées en GeoDataFrame
             self.gdf = gpd.GeoDataFrame(
                 [asdict(entry) for entry in self.entries]
             )
-            #    geometry="geometry", crs=crs
-            #)
         if not dataframe.empty:
             self.gdf = dataframe
 
         if not self.gdf.empty:
             self.gdf = self._clean_dataframe(self.gdf)
         
-
-        # get global metadata
-        first_row = self.gdf.iloc[0]
-        self.global_metadata = {}
-        for metadata_var in METADATA_VARIABLES:
-            self.global_metadata[metadata_var] = first_row[metadata_var]
 
     def to_json(self, path: Optional[str] = None) -> str:
         """
@@ -153,11 +114,6 @@ class DatasetCatalog:
             str: Représentation JSON complète de l'instance.
         """
         try:
-            """gdf = self.gdf.copy()
-            for col in ["date_start", "date_end"]:  # Colonnes contenant des dates
-                if col in gdf.columns:
-                    gdf[col] = gdf[col].dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # Format ISO 8601"""
-
             self.gdf.to_file(path, driver="GeoJSON")
 
             #return json_str
@@ -169,50 +125,47 @@ class DatasetCatalog:
     @classmethod
     def from_json(cls, path: str) -> 'DatasetCatalog':
         """
-        Reconstruit une instance de DatasetCatalog à partir d'un fichier JSON.
-
-        Args:
-            path (str): Chemin vers le fichier JSON.
-
-        Returns:
-            DatasetCatalog: Instance reconstruite.
+        Reconstruit une instance de DatasetCatalog à partir d'un fichier GeoJSON.
         """
         try:
-            # Charger le contenu JSON
-            gdf = gpd.read_file(path)
-            return cls(dataframe=gdf)
+            with open(path, "r") as f:
+                data = json.load(f)
+            features = data["features"]
+            # Extraire les propriétés et la géométrie
+            records = []
+            for feat in features:
+                props = feat.get("properties", {})
+                geom = shape(feat["geometry"])
+
+                if geom is not None:
+                    from shapely.geometry.base import BaseGeometry
+                    try:
+                        geom_obj = shape(geom)
+                        if not isinstance(geom_obj, BaseGeometry):
+                            logger.warning(f"Invalid geometry: {geom}")
+                            continue
+                        props["geometry"] = geom_obj
+                        records.append(props)
+                    except Exception as exc:
+                        logger.warning(f"Could not parse geometry: {geom} ({exc})")
+                        continue
+                else:
+                    logger.warning("Feature without geometry, skipping.")
+
+            # Créer le GeoDataFrame
+            gdf = gpd.GeoDataFrame(records, geometry="geometry")
+            if "keep_variables" in gdf.columns:
+                gdf["keep_variables"] = gdf["keep_variables"].apply(
+                    lambda x: json.loads(x) if isinstance(x, str) and x.startswith("[") else x
+                )
+            # Créer l'instance
+            instance = cls(dataframe=gdf)
+            return instance
         except Exception as exc:
-            logger.error(f"Erreur lors du chargement depuis JSON : {repr(exc)}")
+            import traceback
+            logger.error(f"Erreur lors du chargement depuis JSON : {traceback.format_exc(exc)}")
             raise
 
-    '''def to_json(self, path: str):
-        data = {
-            "shared": self.shared_fields,
-            "entries": [
-                {
-                    "geometry": mapping(row.geometry),
-                    "entry": row[self.entry_column].to_dict()
-                }
-                for _, row in self.gdf.iterrows()
-            ]
-        }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-
-    @classmethod
-    def from_json(cls, path: str) -> "DatasetCatalog":
-        logger.info(f"Loading catalog from {path}")
-        with open(path, "r") as jf:
-            data = json.load(jf)
-
-        entries = []
-
-        for item in data:
-            geom = shape(item["geometry"])
-            item["geometry"] = geom
-            entries.append(item)
-
-        return cls(entries)'''
 
     def filter_attrs(
         self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
@@ -229,189 +182,18 @@ class DatasetCatalog:
                     raise ValueError(
                         f"Expected a gpd.GeoSeries for {key}, got {type(roi)}"
                     )
-                #gdf = gdf[gdf[key].intersects(roi)]
                 gdf = gdf[roi]
-                logger.debug(f"Filtered DataFrame shape: {gdf.shape}")
+                #logger.debug(f"Filtered DataFrame shape: {gdf.shape}")
 
             if not key in gdf.columns:
                 raise KeyError(f"{key} not found in catalog columns")
             elif key == "variables":
                 # Special case for variables filtering
-                # gdf = df[df[key].apply(func)]
                 gdf = gdf[func(key)]
-                logger.debug(f"Filtered DataFrame shape: {gdf.shape}") 
             else:
-                # gdf = df[df[key].apply(func)]
                 gdf = gdf[func(gdf[key])]
-                logger.debug(f"Filtered DataFrame: {gdf}")
 
         self.gdf = gdf
-        # catalog[catalog.intersects(roi)]
-
-    '''def __init__(self, entries: Union[List[CatalogEntry], gpd.GeoDataFrame], entry_column: str = "entry"):
-        self.entry_column = entry_column
-        self.shared_fields: Dict[str, Any] = {}
-
-        if isinstance(entries, gpd.GeoDataFrame):
-            self.gdf = entries.copy()
-        elif isinstance(entries, list):
-            self.entries = []
-            # On construit un GeoDataFrame à partir de la liste de CatalogEntry
-            for entry in entries:
-                if isinstance(entry, CatalogEntry):
-                    self.entries.append(entry)
-                else:
-                    logger.warning(f"Ignoring invalid entry: {entry}")
-            self.gdf = gpd.GeoDataFrame([asdict(entry) for entry in self.entries])
-            #geometries = [entry.geometry for entry in entries]
-            #self.gdf = gpd.GeoDataFrame({entry_column: entries}, geometry=geometries)
-            logger.debug(f"self.gdf: {self.gdf.to_markdown()}")
-        else:
-            raise TypeError("entries must be either a list of CatalogEntry or a GeoDataFrame")
-        self.factorize()
-
-    def factorize(self):
-        """Identifie les champs communs et optimise les CatalogEntry via délégation."""
-        entries: List[CatalogEntry] = self.gdf[self.entry_column].tolist()
-        if not entries:
-            return
-
-        shared = {}
-        field_names = [f for f in CatalogEntry.__dataclass_fields__.keys() if f != "geometry"]
-
-        for field_name in field_names:
-            values = [getattr(entry, field_name) for entry in entries]
-            first = values[0]
-            if all(v == first for v in values):
-                shared[field_name] = copy.deepcopy(first)
-                for entry in entries:
-                    setattr(entry, field_name, None)
-
-        self.shared_fields = shared
-        self.gdf[self.entry_column] = [
-            SharedCatalogEntry(local=entry, shared=self.shared_fields) for entry in entries
-        ]'''
-
-    '''def __init__(self, entries: Union[List[CatalogEntry], gpd.GeoDataFrame], entry_column: str = "entry"):
-        logger.debug(f"entries: {entries}")
-        self.entry_column = entry_column
-        self.shared_fields: Dict[str, Any] = {}
-        if isinstance(entries, gpd.GeoDataFrame):
-            self.gdf = entries.copy()
-        elif isinstance(entries, list):
-            logger.debug(f"entries!")
-            geometries = [entry.geometry for entry in entries]
-            self.gdf = gpd.GeoDataFrame({entry_column: entries}, geometry=geometries)
-            logger.debug(f"self.df 0: {self.gdf.to_markdown()}")
-        else:
-            raise TypeError("entries must be either a list of CatalogEntry or a GeoDataFrame")
-        logger.debug(f"factorize!")
-        self.factorize()
-        logger.debug(f"\n\nself.df 1: {self.gdf.to_markdown()}\n\n")
-
-    def factorize(self):
-        """Identifie les champs communs et optimise les CatalogEntry via délégation."""
-        entries: List[CatalogEntry] = self.gdf[self.entry_column].tolist()
-        if not entries:
-            return
-
-        shared = {}
-        field_names = [f for f in CatalogEntry.__dataclass_fields__.keys() if f != "geometry"]
-
-        for field_name in field_names:
-            values = [getattr(entry, field_name) for entry in entries]
-            first = values[0]
-            if all(v == first for v in values):
-                shared[field_name] = copy.deepcopy(first)
-                for entry in entries:
-                    setattr(entry, field_name, None)
-
-        self.shared_fields = shared
-        self.gdf[self.entry_column] = [
-            SharedCatalogEntry(local=entry, shared=self.shared_fields) for entry in entries
-        ]
-
-
-    def to_json(self, path: str):
-        data = {
-            "shared": self.shared_fields,
-            "entries": [
-                {
-                    "geometry": mapping(row.geometry),
-                    "entry": row[self.entry_column].to_dict()
-                }
-                for _, row in self.gdf.iterrows()
-            ]
-        }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-
-    @classmethod
-    def from_json(cls, path: str, entry_column: str = "entry") -> "DatasetCatalog":
-        logger.info(f"Loading catalog from {path}")
-        with open(path, "r") as jf:
-            data = json.load(jf)
-
-        shared = data["shared"]
-        entries = []
-        geometries = []
-
-        for item in data["entries"]:
-            geom = shape(item["geometry"])
-            entry = SharedCatalogEntry.from_dict(item["entry"], shared)
-            entries.append(entry)
-            geometries.append(geom)
-
-        gdf = gpd.GeoDataFrame({entry_column: entries}, geometry=geometries)
-        collection = cls(gdf, entry_column=entry_column)
-        collection.shared_fields = shared
-        return collection
-
-    @property
-    def df(self) -> gpd.GeoDataFrame:
-        """
-        Returns a flat GeoDataFrame with all shared and local fields expanded
-        for filtering, selection, etc.
-        """
-        rows = []
-        for row in self.gdf.itertuples(index=False):
-            entry = getattr(row, self.entry_column)
-            flat = {}
-
-            for field in CatalogEntry.__dataclass_fields__.keys():
-                val = getattr(entry, field)
-                if val is None and field in self.shared_fields:
-                    val = self.shared_fields[field]
-                flat[field] = val
-
-            rows.append(flat)
-
-        gdf = pd.DataFrame(rows)
-        gdf["geometry"] = self.gdf.geometry.values
-        return gpd.GeoDataFrame(gdf, geometry="geometry")
-
-    @df.setter
-    def df(self, value: gpd.GeoDataFrame):
-        """
-        Allows replacing the internal GeoDataFrame by a filtered one.
-        Assumes that filtering did not break object structure.
-        """
-        new_gdf = value.copy()
-        new_entries = []
-
-        for row in new_gdf.itertuples(index=False):
-            logger.debug(f"row: {row}")
-            for f in CatalogEntry.__dataclass_fields__.keys():
-                logger.debug(f"     f: {f}")
-                ff = getattr(row.val, f)
-                logger.debug(f"     ff: {ff}")
-            data = {f: getattr(row, f) for f in CatalogEntry.__dataclass_fields__.keys()}
-            data["geometry"] = getattr(row.val, "geometry")
-            entry = CatalogEntry(**data)
-            wrapped = SharedCatalogEntry(entry, self.shared_fields)
-            new_entries.append(wrapped)
-
-        self.gdf = gpd.GeoDataFrame({self.entry_column: new_entries}, geometry=new_gdf.geometry)'''
 
     def get_dataframe(self) -> gpd.GeoDataFrame:
         """
@@ -441,21 +223,10 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: GeoDataFrame nettoyé et structuré.
         """
-        required = [
-            "path", "date_start", "date_end",
-            "coord_type", "dimensions", "crs", 
-            "variables", "resolution",
-            "geometry",
-        ]
-        for col in required:
-            if col not in gdf:
-                gdf[col] = pd.NA
         gdf["date_start"] = pd.to_datetime(gdf["date_start"], errors="coerce")
         gdf["date_end"] = pd.to_datetime(gdf["date_end"], errors="coerce")
-        # gdf["geometry"] = gdf.apply(
-        #    lambda row: box(row["lon_min"], row["lat_min"], row["lon_max"], row["lat_max"]), axis=1
-        #)
-        return gdf  #gpd.GeoDataFrame(gdf, crs=gdf.crs)
+
+        return gdf
 
     def append(self, metadata: Union[CatalogEntry, Dict[str, Any]]):
         """
@@ -532,7 +303,6 @@ class DatasetCatalog:
         if not variables or len(variables) == 0:
             logger.warning("No variables provided for filtering.")
             return
-
         self.gdf = self.gdf[self.gdf["variables"].apply(lambda vars: any(var in vars for var in variables))]
 
     def to_geodataframe(self) -> gpd.GeoDataFrame:

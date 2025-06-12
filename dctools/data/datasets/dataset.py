@@ -8,19 +8,17 @@ from typing import (
     Union,
 )
 
+import ast
 import datetime
 import geopandas as gpd
-import json
+
 from loguru import logger
-import pandas as pd
+
 from pathlib import Path
-from shapely.geometry import box
 import xarray as xr
 
-from dctools.dcio.loader import FileLoader
 
 from dctools.data.datasets.dc_catalog import DatasetCatalog
-
 from dctools.data.connection.config import (
     ARGOConnectionConfig,
     BaseConnectionConfig,
@@ -31,7 +29,6 @@ from dctools.data.connection.config import (
     S3ConnectionConfig,
     WasabiS3ConnectionConfig,
 )
-
 from dctools.data.connection.connection_manager import (
     BaseConnectionManager,
     LocalConnectionManager,
@@ -84,20 +81,6 @@ class DatasetConfig:
         self.eval_variables = eval_variables
         # self.connection_manager = self._create_connection_manager()
 
-    '''def _create_connection_manager(self) -> BaseConnectionManager:
-        """
-        Instancie le ConnectionManager approprié en fonction du type de configuration.
-
-        Returns:
-            BaseConnectionManager: Instance du ConnectionManager correspondant.
-        """
-        logger.info(f"_create_connection_manager: {self.alias}")
-        config_type = type(self.connection_config)
-        if config_type not in self.CONNECTION_MANAGER_MAP:
-            raise ValueError(f"Unsupported connection configuration type: {config_type}")
-
-        manager_class = self.CONNECTION_MANAGER_MAP[config_type]
-        return manager_class # (self.connection_config)'''
 
 class BaseDataset(ABC):
     def __init__(self, config: DatasetConfig):
@@ -108,11 +91,9 @@ class BaseDataset(ABC):
             config (DatasetConfig): Configuration du dataset.
         """
         # Utiliser CONNECTION_MANAGER_MAP pour instancier le bon ConnectionManager
-        # logger.info(f"Initializing BaseDataset with alias: {config.alias}")
         connection_manager_class = DatasetConfig.CONNECTION_MANAGER_MAP.get(type(config.connection_config))
         if not connection_manager_class:
             raise ValueError(f"Unsupported connection configuration type: {type(config.connection_config)}")
-        # logger.info(f"Instantiating connection manager: {connection_manager_class.__name__} for dataset {config.alias}")
         self.connection_manager = connection_manager_class(config.connection_config)
         self.alias = config.alias
         self.catalog_type = ""
@@ -121,15 +102,14 @@ class BaseDataset(ABC):
         # Vérifier si un fichier de catalogue JSON est spécifié dans catalog_options
         catalog_path = config.catalog_options.get("catalog_path") if config.catalog_options else None
         if catalog_path and Path(catalog_path).exists():
-            # logger.info(f"Loading catalog from JSON file: {catalog_path}")
             self.catalog = DatasetCatalog.from_json(catalog_path)
-            #self._metadata = self.catalog.entries
             self._paths = self.catalog.list_paths()
             self.catalog_type = "from_catalog_file"
         else:
             logger.info("No catalog JSON file found. Generating metadata from the dataset.")
         
             self._metadata = self.connection_manager.list_files_with_metadata()  # Récupérer les métadonnées
+
             self._paths = [entry.path for entry in self._metadata]
             self.build_catalog()  # Construire le catalogue à partir des métadonnées
             self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
@@ -143,6 +123,31 @@ class BaseDataset(ABC):
             List[str]: Liste des chemins des fichiers.
         """
         return self._paths
+
+    def get_global_metadata(self) -> Dict[str, Any]:
+        """
+        Retourne les métadonnées globales du dataset.
+
+        Returns:
+            Dict[str, Any]: Métadonnées globales.
+        """
+        if hasattr(self, "_global_metadata"):
+            return self._global_metadata
+        else:
+            return self.connection_manager.get_global_metadata()
+
+    def standardize_names(
+        self,
+        coord_rename_dict: Dict[str, str],
+        variable_rename_dict: Dict[str, str],
+    ) -> None:
+        logger.info(f"Standardizing names for dataset {self.alias}")
+        if isinstance(coord_rename_dict, str):
+            coord_rename_dict = ast.literal_eval(coord_rename_dict)
+        if isinstance(variable_rename_dict, str):
+            variable_rename_dict = ast.literal_eval(variable_rename_dict)
+        self.eval_variables = [variable_rename_dict.get(x, x) for x in self.eval_variables]
+        self.keep_variables = [variable_rename_dict.get(x, x) for x in self.keep_variables]
 
     def get_connection_manager(self) -> BaseConnectionManager:
         """
@@ -199,19 +204,6 @@ class BaseDataset(ABC):
             with open(local_path, 'wb') as local_file:
                 local_file.write(remote_file.read())
 
-    '''def load_item(self, index: int) -> xr.Dataset:
-        """
-        Charge un fichier en tant que dataset Xarray.
-
-        Args:
-            index (int): Index du fichier.
-
-        Returns:
-            xr.Dataset: Dataset chargé.
-        """
-        path = self.get_path(index)
-        return FileLoader.open_dataset_auto(path, self.connection_manager)'''
-
     def iter_data(self) -> Iterator[xr.Dataset]:
         """
         Itère sur les fichiers du dataset et les charge en tant que datasets Xarray.
@@ -233,7 +225,6 @@ class BaseDataset(ABC):
             logger.info("Le catalogue existe déjà (chargé à partir d'un fichier)")
             return
         self.catalog = DatasetCatalog(entries=self._metadata)
-        #return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
 
     '''def filter_attrs(
@@ -307,7 +298,7 @@ class BaseDataset(ABC):
         """
         try:
             logger.info(f"Exportation de BaseDataset en JSON dans {path}")
-            logger.info(f"Catalogue : {self.catalog}")
+            # logger.debug(f"Catalogue : {self.catalog}")
             # Sauvegarder le catalogue en JSON
             self.catalog.to_json(str(path))
             # Construire un dictionnaire pour les attributs de BaseDataset
@@ -352,15 +343,15 @@ def get_dataset_from_config(
     root_data_folder: str,
     root_catalog_folder: str,
     max_samples: Optional[int] = 0,
-    file_pattern: Optional[str] = None,
     use_catalog: bool = True,
 ) -> RemoteDataset:
     """Get dataset from config."""
     # Load config
-    dataset_name = source['dataset']
-    config_name = source['config']
+    dataset_name = source.get('dataset', None)
+    config_name = source.get('config', None)
     keep_variables = source.get('keep_variables', None)
     eval_variables = source.get('eval_variables', None)
+    file_pattern = source.get('file_pattern', None)
     # connection_type = source['connection_type']
 
     data_root = os.path.join(
@@ -389,6 +380,7 @@ def get_dataset_from_config(
                 dataset_id=source['cmems_product_name'],
                 max_samples=max_samples,
                 file_pattern=file_pattern,
+                keep_variables=keep_variables,
             )
             if os.path.exists(catalog_path) and use_catalog:
                 # Load dataset metadata from catalog
@@ -413,9 +405,9 @@ def get_dataset_from_config(
         case "argopy":
             argo_connection_config = ARGOConnectionConfig(
                 local_root=data_root,
-                #dataset_id=source['cmems_product_name'],
                 max_samples=max_samples,
                 file_pattern=file_pattern,
+                keep_variables=keep_variables,
             )
             if os.path.exists(catalog_path) and use_catalog:
                 # Load dataset metadata from catalog
@@ -449,6 +441,7 @@ def get_dataset_from_config(
                     max_samples=max_samples,
                     file_pattern=file_pattern,
                     groups=source['groups'] if 'groups' in source else None,
+                    keep_variables=keep_variables,
                 )
             elif dataset_name == "glonet":
                 s3_connection_config = GlonetConnectionConfig(
@@ -458,11 +451,10 @@ def get_dataset_from_config(
                     s3_glonet_folder=source['s3_folder'],
                     max_samples=max_samples,
                     file_pattern=file_pattern,
+                    keep_variables=keep_variables,
                 )
-            # logger.debug(f"CATALOG ?")
             if os.path.exists(catalog_path) and use_catalog:
                 # Load dataset metadata from catalog
-                # logger.debug(f"DATASET CONFIG 1")
                 s3_config = DatasetConfig(
                     alias=dataset_name,
                     connection_config=s3_connection_config,
@@ -471,7 +463,6 @@ def get_dataset_from_config(
                     eval_variables=eval_variables,
                 )
             else:
-                # logger.debug(f"DATASET CONFIG 2")
                 # create dataset
                 s3_config = DatasetConfig(
                     alias=dataset_name,
@@ -480,10 +471,8 @@ def get_dataset_from_config(
                     eval_variables=eval_variables,
                 )
             # Création du dataset
-            # logger.debug(f"REMOTE DATASET")
             dataset = RemoteDataset(s3_config)
         case "_":
             raise ValueError(f"Unknown dataset config name: {config_name}")
-
 
     return dataset

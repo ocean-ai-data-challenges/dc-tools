@@ -63,23 +63,23 @@ class BaseConnectionManager(ABC):
         """
         # Tenter d'ouvrir le fichier en local
         if LocalConnectionManager.supports(path):
-            # logger.info(f"Open local file: {path}")
             dataset = self.open_local(path)
             if dataset:
                 return dataset
         # Tenter d'ouvrir le fichier en ligne
         elif self.supports(path):
-            # logger.info(f"Open remote file: {path}")
+            # logger.debug(f"Open remote file: {path}")
             dataset = self.open_remote(path, mode)
             if dataset:
                 return dataset
-        # logger.info(f"Ok file open")
+
         # Télécharger le fichier en local, puis l'ouvrir
         try:
             local_path = self._get_local_path(path)
             if not os. path. isfile(local_path):
-                # logger.info(f"Downloading file to local path: {local_path}")
+                # logger.debug(f"Downloading file to local path: {local_path}")
                 self.download_file(path, local_path)
+
             return self.open_local(local_path)
         except Exception as exc:
             logger.error(f"Failed to open file: {path}. Error: {repr(exc)}")
@@ -99,9 +99,8 @@ class BaseConnectionManager(ABC):
             Optional[xr.Dataset]: Opened dataset, or None if the file does not exist.
         """
         if Path(local_path).exists():
-            # logger.info(f"Opening local file: {local_path}")
+            # logger.debug(f"Opening local file: {local_path}")
 
-            #return FileLoader.load_dataset(local_path)
             return FileLoader.open_dataset_auto(
                 local_path, self,
                 groups=self.params.groups,
@@ -166,6 +165,18 @@ class BaseConnectionManager(ABC):
 
     def get_global_metadata(self) -> Dict[str, Any]:
         """
+        Get global metadata for all files in the connection manager.
+
+        Returns:
+            Dict[str, Any]: Global metadata including spatial bounds and variable names.
+        """
+        if not self._list_files:
+            raise FileNotFoundError("No files found to extract global metadata.")
+
+        return self._global_metadata if hasattr(self, "_global_metadata") else self.extract_global_metadata()
+
+    def extract_global_metadata(self) -> Dict[str, Any]:
+        """
         Extract global metadata (common to all files) from a single file.
 
         Returns:
@@ -185,45 +196,31 @@ class BaseConnectionManager(ABC):
             # Extraire les métadonnées globales
 
             coord_sys = CoordinateSystem.get_coordinate_system(ds)
-            dimensions = coord_sys.coordinates
-            dimensions_rename_dict = {v: k for k, v in dimensions.items()}
+            # dimensions = coord_sys.coordinates
+            # dimensions_rename_dict = {v: k for k, v in dimensions.items()}
 
-            #logger.info(f"Dimensions: {coord_sys.coordinates}")
+            # logger.debug(f"Dimensions: {coord_sys.coordinates}")
 
             # Inférer la résolution spatiale et temporelle
             dict_resolution = self.estimate_resolution(
                 ds, coord_sys
             )
-            # logger.info(f"DATASET: {ds}")
 
             # Associer les variables à leurs dimensions
             variables = {}
             for var_name, var in ds.variables.items():
-                variables[var_name] = {
-                    "dims": list(var.dims),
-                    "std_name": var.attrs.get("standard_name", ""),
-                }
-            '''variables = {
-                var: {
-                    "dims": list(ds[var].dims), "std_name": ds[var].attrs.get("standard_name",'')
-                }
-                for var in ds.data_vars
-            }'''
-            logger.debug(f"Variables found: {variables}")
+
+                if var_name in self.params.keep_variables:
+                    variables[var_name] = {
+                        "dims": list(var.dims),
+                        "std_name": var.attrs.get("standard_name", ""),
+                    }
+
             variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
             variables_rename_dict = {v: k for k, v in variables_dict.items() if v is not None}
             # dimensions = dict(ds.dims)
 
-            logger.info(f"\n\nDetected oceanographic variables: {variables_rename_dict}\n\n")
-
-            # logger.info(f"\nDataset variables: {list(ds.data_vars)}\n\n")
-            #import sys
-            #sys.exit()
-
-            '''for var in ds.data_vars:
-                long_name = ds[var].attrs.get("long_name",'')
-                standard_name = ds[var].attrs.get("standard_name",'')
-                print(f"Variable: {var}, std name: {standard_name}")'''
+            # logger.debug(f"\nDetected oceanographic variables: {variables_rename_dict}\n")
 
             global_metadata = {
                 "variables": variables,
@@ -231,6 +228,7 @@ class BaseConnectionManager(ABC):
                 "variables_rename_dict": variables_rename_dict,
                 "resolution": dict_resolution,
                 "coord_system": coord_sys,
+                "keep_variables": self.params.keep_variables,
                 #"dimensions_rename_dict": dimensions_rename_dict,
             }
         return global_metadata
@@ -248,22 +246,14 @@ class BaseConnectionManager(ABC):
         """
         try:
             with self.open(path, "rb") as ds:
-                #ds = xr.open_dataset(f)
                 date_start = pd.to_datetime(
                     ds.time.min().values
                 ) if "time" in ds.coords else None
                 date_end = pd.to_datetime(
                     ds.time.max().values
                 ) if "time" in ds.coords else None
-                #date_start = ds.time.min().values if "time" in ds.coords else None
-                #date_end = ds.time.max().values if "time" in ds.coords else None
 
                 ds_region = get_dataset_geometry(ds, global_metadata.get('coord_system'))
-
-                '''from dctools.utilities.misc_utils import visualize_netcdf_with_geometry
-                visualize_netcdf_with_geometry(
-                    ds, ds_region, global_metadata.get("coord_system").coordinates
-                )'''
 
                 # Créer une instance de CatalogEntry
                 return CatalogEntry(
@@ -271,16 +261,6 @@ class BaseConnectionManager(ABC):
                     date_start=date_start,
                     date_end=date_end,
                     variables=global_metadata.get("variables"),
-                    variables_dict=global_metadata.get("variables_dict"),
-                    variables_rename_dict=global_metadata.get("variables_rename_dict"),
-                    #dimensions=global_metadata.get("dimensions"),
-                    dimensions=global_metadata.get("coord_system").coordinates,
-                    # dimensions_rename_dict=global_metadata.get("dimensions_rename_dict"),
-                    coord_type=global_metadata.get("coord_system").coord_type,
-                    crs=global_metadata.get("coord_system").crs,
-                    resolution=global_metadata.get(
-                        "resolution"
-                    ),
                     geometry=ds_region,
                 )
         except Exception as exc:
@@ -350,7 +330,8 @@ class BaseConnectionManager(ABC):
             List[CatalogEntry]: List of metadata entries for each file.
         """
         # Récupérer les métadonnées globales
-        global_metadata = self.get_global_metadata()
+        global_metadata = self.extract_global_metadata()
+        self._global_metadata = global_metadata
 
         # Initialiser une liste pour stocker les métadonnées
         metadata_list = []
@@ -415,8 +396,8 @@ class CMEMSManager(BaseConnectionManager):
         """
         super().__init__(connect_config)  # Appeler l'initialisation de la classe parente
 
-        # logger.info(f"CMEMS file : {self.params.cmems_credentials}")
-        self.cmems_login()  # Appeler la fonction cmems_login pour initialiser la connexion
+        # logger.debug(f"CMEMS file : {self.params.cmems_credentials}")
+        self.cmems_login()
 
     def get_credentials(self):
         """Get CMEMS credentials.
@@ -481,7 +462,6 @@ class CMEMSManager(BaseConnectionManager):
                 copernicusmarine.login()
         except Exception as exc:
             logger.error(f"login to CMEMS failed: {repr(exc)}")
-        # return self.params.cmems_credentials
 
     def cmems_logout(self) -> None:
         """Logout from Copernicus Marine."""
@@ -537,13 +517,6 @@ class CMEMSManager(BaseConnectionManager):
         Returns:
             Optional[xr.Dataset]: Opened dataset, or None if remote opening fails.
         """
-        '''try:
-            logger.info(f"Attempting to open remote S3 file: {path}")
-            fs = fsspec.filesystem("s3", anon=True)  # Access S3 anonymously
-            with fs.open(path, mode) as f:
-                return xr.open_dataset(f, engine="netcdf4")
-        except Exception as exc:
-            logger.warning(f"Failed to open remote S3 file: {path}. Error: {repr(exc)}")'''
         return None
 
     def download_file(self, path: str, local_path: str):
@@ -622,11 +595,9 @@ class FTPManager(BaseConnectionManager):
         try:
             # Accéder au système de fichiers FTP via fsspec
             fs = self.params.fs
-
             remote_path = f"ftp://{self.params.host}/{self.params.ftp_folder}{self.params.file_pattern}"
-            # logger.info(f"\n\nListing files in: {remote_path}\n\n")
+
             # Lister les fichiers correspondant au motif
-            #files = fs.glob(f"{remote_path}")
             files = sorted(fs.glob(remote_path))
             logger.info(f"Files found in {remote_path} : {files}")
 
@@ -658,7 +629,6 @@ class S3Manager(BaseConnectionManager):
 
             # Construire le chemin distant
             remote_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}/{self.params.file_pattern}"
-            # logger.info(f"Listing files in: {remote_path}")
 
             # Utiliser fsspec pour accéder aux fichiers
             files = sorted(self.params.fs.glob(remote_path))
@@ -676,7 +646,6 @@ class S3Manager(BaseConnectionManager):
 
             # Contourner le problème en listant les objets directement
             try:
-                #remote_path = f"{self.params.bucket}/{self.params.bucket_folder}/"
                 files = [
                     f"s3://{self.params.endpoint_url}/{self.params.bucket}/{obj['Key']}"
                     for obj in self.params.fs.ls(remote_path, detail=True)
@@ -702,13 +671,10 @@ class S3Manager(BaseConnectionManager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            # logger.info(f"Open S3 file: {path}")
-            # return xr.open_dataset(self.params.fs.open(path, mode))
-            # return xr.open_zarr(path)
+            # logger.debug(f"Open S3 file: {path}")
             extension = Path(path).suffix
             if extension != '.zarr':
                 return None
-            # logger.info(f"Open S3 file: {path}")
             return(
                 FileLoader.open_dataset_auto(
                     path, self, groups=self.params.groups
@@ -735,22 +701,6 @@ class S3WasabiManager(S3Manager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            # logger.info(f"Open Wasabi S3 file: {path}")
-            # return xr.open_dataset(self.params.fs.open(path, mode))
-        
-            """s3_mapper = fsspec.get_mapper(
-                # "s3://ppr-ocean-climat/DC3/IABP/LEVEL1_2023.zarr",
-                path,
-                client_kwargs = {
-                    "aws_access_key_id": self.params.key,
-                    "aws_secret_access_key": self.params.secret_key,
-                    "endpoint_url": self.params.endpoint_url,
-                    }
-                )"""
-            """return xr.open_zarr(
-                s3_mapper,
-                #engine="zarr"
-            )"""
             extension = Path(path).suffix
             if extension != '.zarr':
                 return None
@@ -818,17 +768,8 @@ class GlonetManager(BaseConnectionManager):
         """
         try:
             glonet_ds = xr.open_zarr(path)
-            #glonet_ds = FileLoader.open_dataset_auto(path, self)
-            # logger.info(f"Opened Glonet file: {path}")
-            """filename = os.path.basename(path)
-            filepath = os.path.join("/home/k24aitmo/IMT/software/tests/Glonet", filename)
-            logger.info(f"Saving Glonet file to: {filepath}")
-            DataSaver.save_dataset(
-                glonet_ds,
-                filepath,
-                file_format="zarr",
-                #file_format="netcdf",
-            )"""
+            # glonet_ds = FileLoader.open_dataset_auto(path, self)
+            # logger.debug(f"Opened Glonet file: {path}")
             return glonet_ds
 
         except Exception as exc:
@@ -855,104 +796,12 @@ class ArgoManager(BaseConnectionManager):
         df["date_bin"] = df["date"].dt.date  # résolution = 1 jour
         return df.groupby(["grid_lat", "grid_lon", "date_bin"])
 
-
     def get_argo_date_range(self) -> tuple[pd.Timestamp, pd.Timestamp]:
         """Return the min/max dates available in the ARGO index."""
         index = IndexFetcher().to_dataframe()
         min_date = index['date'].min()
         max_date = index['date'].max()
         return pd.to_datetime(min_date), pd.to_datetime(max_date)
-
-    '''def generate_catalog(
-        self,
-        geometry_filter: Optional[gpd.GeoDataFrame] = None,
-        time_start: Optional[str] = None,
-        time_end: Optional[str] = None,
-        lon_step=20,
-        lat_step=20,
-        time_step_days=1,
-        save_path: Optional[str] = None,
-        format: Optional[str] = None  # 'json' or 'parquet'
-    ) -> List[CatalogEntry]:
-        
-        if time_start is None or time_end is None:
-            time_start, time_end = self.get_argo_date_range()
-
-        time_start = pd.Timestamp(time_start)
-        time_end = pd.Timestamp(time_end)
-        dates = pd.date_range(time_start, time_end, freq=f"{time_step_days}D")
-
-        catalog: List[CatalogEntry] = []
-
-        # Définir les limites géographiques selon le filtre (ou monde entier)
-        if geometry_filter is not None:
-            bounds = geometry_filter.total_bounds
-            lon_range = (bounds[0], bounds[2])
-            lat_range = (bounds[1], bounds[3])
-        else:
-            lon_range = (-180, 180)
-            lat_range = (-90, 90)
-
-        for lon_min in np.arange(*lon_range, lon_step):
-            for lat_min in np.arange(*lat_range, lat_step):
-                tile = box(lon_min, lat_min, lon_min + lon_step, lat_min + lat_step)
-
-                # Si un filtre géométrique est fourni, vérifier l’intersection
-                if geometry_filter is not None:
-                    if not geometry_filter.intersects(tile).any():
-                        continue
-
-                for i in range(len(dates) - 1):
-                    start = dates[i]
-                    end = dates[i + 1]
-
-                    try:
-                        ds = DataFetcher().region([lon_min, lon_min + lon_step,
-                                                lat_min, lat_min + lat_step,
-                                                start.strftime("%Y-%m-%d"),
-                                                end.strftime("%Y-%m-%d")]).to_xarray()
-
-                        if ds.dims.get("N_PROF", 0) == 0:
-                            continue
-
-                        variables = {v: list(ds[v].dims) for v in ds.data_vars}
-                        dimensions = dict(ds.dims)
-                        geometry = gpd.GeoSeries([tile])
-
-                        entry = CatalogEntry(
-                            path=f"argo://{start.date()}_{lon_min}_{lat_min}",
-                            date_start=start,
-                            date_end=end,
-                            variables=variables,
-                            dimensions=dimensions,
-                            coord_type="geographic",
-                            crs="EPSG:4326",
-                            geometry=geometry,
-                            resolution={"lon": lon_step, "lat": lat_step, "time": time_step_days}
-                        )
-                        catalog.append(entry)
-
-                    except Exception as e:
-                        print(f"Erreur sur tuile ({lon_min},{lat_min}) et dates {start}–{end}: {e}")
-                        continue
-
-        catalog.sort(key=lambda x: x.date_start)
-
-        if save_path and format:
-            df = gpd.GeoDataFrame([{
-                **asdict(e),
-                "geometry": e.geometry.values[0]
-            } for e in catalog])
-
-            if format == "json":
-                df.to_file(save_path, driver="GeoJSON")
-            elif format == "parquet":
-                df.to_parquet(save_path)
-            else:
-                raise ValueError(f"Unsupported format: {format}")
-
-        return catalog'''
-
 
     def load_argo_profile_from_url(wmo: int, cycle: int) -> xr.Dataset:
         """
@@ -994,10 +843,8 @@ class ArgoManager(BaseConnectionManager):
 
         return ds
 
-
     def list_files_with_metadata(
             self,
-            #geometry_filter: Optional[gpd.GeoDataFrame] = None,
             lon_range: Optional[tuple[float, float]] = (-180, 180),
             lat_range: Optional[tuple[float, float]] = (-90, 90),
             lon_step: Optional[float]=1.0,
@@ -1016,23 +863,8 @@ class ArgoManager(BaseConnectionManager):
         """
         list_dates = self._list_files
 
-        # 1. Récupérer l’index complet (cela peut être long !)
-        # df = IndexFetcher().to_dataframe()
-        # 2. Convertir la colonne 'date' en datetime (si nécessaire)
-        #import sys
-        #sys.exit(0)
-
-        #time_start, time_end = self.get_argo_date_range()
-
-        #time_start = pd.Timestamp(time_start)
-        #time_end = pd.Timestamp(time_end)
-        #dates = pd.date_range(time_start, time_end, freq=f"{time_step_days}D")
-
         metadata_list: List[CatalogEntry] = []
 
-        # Définir les limites géographiques selon le filtre (ou monde entier)
-        #lon_range = (-180, 180)
-        #lat_range = (-90, 90)
         first_elem = True
 
         for n_elem, start_date in enumerate(list_dates):
@@ -1049,11 +881,10 @@ class ArgoManager(BaseConnectionManager):
             #logger.info(f"Fetching data for WMO number: {wmo_number}")
             # ds = DataFetcher().float(wmo_number).to_xarray()
             argo_loader = DataFetcher()
-            #logger.info(f"Fetching ARGO data for WMO number: {wmo_number}")
-
+            # logger.info(f"Fetching ARGO data for WMO number: {wmo_number}")
             # ds = argo_loader.float(wmo_number).to_xarray(
             
-            #ds = argo_loader.profile(wmo_number, cycle_number).load().data
+            # ds = argo_loader.profile(wmo_number, cycle_number).load().data
             profile = argo_loader.region([
                 min(lon_range), max(lon_range),
                 min(lat_range), max(lat_range),
@@ -1068,14 +899,26 @@ class ArgoManager(BaseConnectionManager):
             # get coordinate system
             if first_elem:
                 coord_sys = CoordinateSystem.get_coordinate_system(ds)
-                first_elem = False
-            variables = {v: list(ds[v].dims) for v in ds.data_vars}
-            variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
-            variables_rename_dict = {v: k for k, v in variables_dict.items()}
-            # dimensions = dict(ds.dims)
 
-            coord_sys = CoordinateSystem.get_coordinate_system(ds)
-            dimensions = coord_sys.coordinates
+                variables = {v: list(ds[v].dims) for v in ds.data_vars if v in self.params.keep_variables}
+                variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
+                variables_rename_dict = {v: k for k, v in variables_dict.items()}
+                # dimensions = dict(ds.dims)
+
+                coord_sys = CoordinateSystem.get_coordinate_system(ds)
+                # dimensions = coord_sys.coordinates
+                resolution={"lon": lon_step, "lat": lat_step, "time": time_step_days}
+
+                global_metadata = {
+                    "variables": variables,
+                    "variables_dict": variables_dict,
+                    "variables_rename_dict": variables_rename_dict,
+                    "resolution": resolution,
+                    "coord_system": coord_sys,
+                    "keep_variables": self.params.keep_variables,
+                }
+                self.global_metadata = global_metadata
+                first_elem = False
             # dimensions_rename_dict = {v: k for k, v in dimensions.items()}
             # geometry = gpd.GeoSeries([tile])
             geometry = get_dataset_geometry(ds, coord_sys)
@@ -1087,49 +930,16 @@ class ArgoManager(BaseConnectionManager):
             ) if "time" in ds.coords else None
 
             entry = CatalogEntry(
-                #path=f"argo://{df['file']}",
+                path=None,  #f"argo://{df['file']}",
                 date_start=date_start,
                 date_end=date_end,
                 variables=variables,
-                variables_dict=variables_dict,
-                variables_rename_dict=variables_rename_dict,
-                dimensions=dimensions,
-                # dimensions_rename_dict=dimensions_rename_dict,
-                coord_type="geographic",
-                crs="EPSG:4326",
                 geometry=geometry,
-                resolution={"lon": lon_step, "lat": lat_step, "time": time_step_days}
             )
             metadata_list.append(entry)
 
-
-        #metadata_list.sort(key=lambda x: x.date_start)
-
         return metadata_list
  
-    '''       # Récupérer les métadonnées globales
-            global_metadata = self.get_global_metadata()
-
-            # Initialiser une liste pour stocker les métadonnées
-            metadata_list = []
-
-            # Parcourir tous les fichiers et extraire leurs métadonnées
-            for path in self._list_files:
-                try:
-                    metadata_entry = self.extract_metadata(path, global_metadata)
-                    if geometry_filter is not None:
-                        if not geometry_filter.intersects(metadata_entry.geometry).any():
-                            continue
-                    metadata_list.append(metadata_entry)
-                except Exception as exc:
-                    logger.warning(f"Failed to extract metadata for file {path}: {repr(exc)}")
-
-            if not metadata_list:
-                logger.error("No valid metadata entries were generated.")
-                raise ValueError("No valid metadata entries were generated.")
-
-            return metadata_list
-    '''
 
     def list_files(self) -> List[str]:
 
@@ -1145,14 +955,6 @@ class ArgoManager(BaseConnectionManager):
         # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="bgc-b", cache=True)  # Use cache for performances
         # idx = ArgoIndex(host=".", index_file="dummy_index.txt", convention="core")  # Load your own index
 
-        '''df = pd.read_csv(
-            url,
-            skiprows=9,
-            names=["file", "date", "lat", "lon", "ocean", "profiler", "institution", "update"]
-        )'''
-
-
-
         limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
         logger.info(f"Loading ARGO index with limit: {limit}")
 
@@ -1164,9 +966,6 @@ class ArgoManager(BaseConnectionManager):
         # 3. Trier les données par date croissante
         #df_sorted = df.sort_values(by='date').reset_index(drop=True)
         df["date"] = pd.to_datetime(df["date"])
-        #df["date_update"] = pd.to_datetime(df["date_update"])
-        # 4. Afficher les premières lignes
-        #print(df_sorted.head().to_markdown())
 
         # Générer une série de dates journalières entre min et max
         list_dates = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')

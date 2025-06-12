@@ -108,12 +108,6 @@ def load_args_and_config(
         # initialize exception handler
         vars(args)['device'] = device
 
-        # TODO : Put these in config files:
-        # patch_size: Optional[Tuple[float, float]] = None
-        # stride_size: Optional[Tuple[float, float]] = None
-        # vars(args)['patch_size'] = patch_size
-        # vars(args)['stride_size'] = stride_size
-
         if config_filepath:
             config = load_configs(config_filepath)
             for key, value in config.items():

@@ -8,24 +8,17 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
-#import numpy as np
-#import pandas as pd
 import xarray as xr
-#import xesmf as xe
 
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
-#from dctools.utilities.errors import DCExceptionHandler
-#from dctools.processing.gridded_data import GriddedDataProcessor
 from dctools.utilities.xarray_utils import (
-    get_glonet_time_attrs, assign_coordinate,
-    #RANGES_GLONET, GLONET_ENCODING, rename_coordinates,\
+    get_glonet_time_attrs, assign_coordinate
 )
 
 def create_glorys_ndays_forecast(
     nc_path: str,
     list_nc_files: List[str],
-    # ref_data: xr.Dataset,
     start_date: str,
     zarr_path: str,
     transform_fct: Optional[callable],
@@ -74,7 +67,6 @@ def create_glorys_ndays_forecast(
             tmp_ds = transform_fct(tmp_ds)
             tmp_ds = assign_coordinate(
                 tmp_ds, "time", coord_vals=[time_step],
-                #tmp_ds, "time", coord_vals=[times[time_step]],
                 coord_attrs=get_glonet_time_attrs(start_date)
             )
             assert tmp_ds is not None, f"Error while loading dataset: {tmp_ds}."
@@ -82,7 +74,6 @@ def create_glorys_ndays_forecast(
             if time_step == 0:
                 DataSaver.save_dataset(
                     tmp_ds, zarr_path,
-                    #file_format="zarr", mode="r+",
                     file_format="zarr", mode="w",
                     compute=True,
                 )

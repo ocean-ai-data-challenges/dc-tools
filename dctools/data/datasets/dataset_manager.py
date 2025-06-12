@@ -11,6 +11,12 @@ from shapely.geometry import box
 import xarray as xr
 
 from dctools.data.connection.config import BaseConnectionConfig
+from dctools.data.coordinates import (
+    CoordinateSystem,
+    LIST_VARS_GLONET,
+    GLONET_DEPTH_VALS,
+    RANGES_GLONET,
+)
 from dctools.data.datasets.dataset import BaseDataset, DatasetConfig
 from dctools.data.transforms import CustomTransforms
 from dctools.data.datasets.dc_catalog import DatasetCatalog
@@ -142,10 +148,8 @@ class MultiSourceDatasetManager:
             variables (List[str]): Liste des variables à filtrer.
         """
         for alias, _ in self.datasets.items():
-            logger.info(f"Filtrage du dataset '{alias}' par variables : {variables}")
-            logger.debug(f"Dataset {alias} variables: {self.datasets[alias].eval_variables}")
+            # logger.debug(f"Filtrage du dataset '{alias}' par variables : {variables}")
             self.filter_by_variable(alias, variables)
-            logger.debug(f"Filtered Dataset {alias} variables: {self.datasets[alias].eval_variables}")
 
     def to_json(self, alias: str, path: Optional[str] = None) -> str:
         """
@@ -163,23 +167,6 @@ class MultiSourceDatasetManager:
 
         dataset = self.datasets[alias]
         dataset.get_catalog().to_json(path)
-        '''# Construire le dictionnaire des informations du dataset
-        dataset_info = {
-            "alias": alias,
-            #"connection_config": dataset.connection_manager.params,  # Configuration de connexion
-            "catalog": dataset.get_catalog().to_json(),  # Catalogue
-            #"catalog": dataset.get_catalog().get_dataframe().to_dict(orient="records"),  # Catalogue
-        }'''
-
-        '''# Convertir en JSON
-        json_str = json.dumps(dataset_info, indent=4)
-
-        # Sauvegarder dans un fichier si un chemin est fourni
-        if path:
-            with open(path, "w") as f:
-                f.write(json_str)
-
-        return json_str'''
 
     def all_to_json(self, output_dir: str):
         """
@@ -209,54 +196,23 @@ class MultiSourceDatasetManager:
 
             logger.info(f"Dataset '{alias}' exporté au format JSON dans '{json_path}'.")
 
-    '''@staticmethod
-    def add_from_json(json_paths: List[str]) -> 'MultiSourceDatasetManager':
+    def standardize_names(
+        self, alias: str,
+        coords_rename_dict: Dict[str, str],
+        vars_rename_dict: Dict[str, str],
+    ) -> None:
         """
-        Charge un gestionnaire multi-sources à partir d'une liste de fichiers JSON.
+        Standardise les noms des variables d'un dataset en fonction d'un dictionnaire de correspondance.
 
         Args:
-            json_paths (List[str]): Liste des chemins vers les fichiers JSON, chaque fichier
-                                    contenant les informations d'un dataset.
-
-        Returns:
-            MultiSourceDatasetManager: Instance du gestionnaire multi-sources.
+            alias (str): Alias du dataset à standardiser.
+            standard_names (Dict[str, str]): Dictionnaire de correspondance des noms.
         """
-        manager = MultiSourceDatasetManager()
-
-        try:
-            for json_path in json_paths:
-                # Charger le fichier JSON
-                with open(json_path, "r") as f:
-                    dataset_info = json.load(f)
-
-                # Extraire l'alias et vérifier sa présence
-                alias = dataset_info.get("alias")
-                if not alias:
-                    raise ValueError(f"Le fichier JSON '{json_path}' ne contient pas de champ 'alias'.")
-
-                # Charger la configuration du dataset
-                config = DatasetConfig(
-                    alias=dataset_info["alias"],
-                    connection_config=BaseConnectionConfig(**dataset_info["connection_config"]),
-                    # catalog_options=dataset_info.get("catalog_options", {}),
-                )
-
-                # Créer une instance de BaseDataset (ou une classe dérivée)
-                dataset = BaseDataset(config)
-
-                # Charger le catalogue du dataset
-                if "catalog" in dataset_info:
-                    catalog = DatasetCatalog(dataset_info["catalog"])
-                    dataset.catalog = catalog
-
-                # Ajouter le dataset au gestionnaire
-                manager.add_dataset(alias, dataset)
-
-        except Exception as exc:
-            logger.error(f"Erreur lors du chargement du gestionnaire depuis les fichiers JSON : {repr(exc)}")
-            raise
-
-        return manager'''
+        if alias not in self.datasets:
+            raise ValueError(f"Alias '{alias}' not found in the manager.")
+        # logger.debug(f"Standardizing names for dataset '{alias}' with coords: {coords_rename_dict} and vars: {vars_rename_dict}")
+        self.datasets[alias].standardize_names(coords_rename_dict, vars_rename_dict)
+        # logger.debug(f"Dataset {alias} eval_variables after standardization: {self.datasets[alias].eval_variables}")
 
     def get_dataloader(
         self,
@@ -281,7 +237,10 @@ class MultiSourceDatasetManager:
         """
 
         pred_dataset = self.datasets[pred_alias]
-        ref_dataset = self.datasets[ref_alias] if ref_alias else None
+        if not ref_alias:
+            ref_dataset = None
+        else:
+            ref_dataset = self.datasets[ref_alias]
 
         # Récupérer les ConnectionManager associés
         pred_manager = pred_dataset.get_connection_manager()
@@ -290,11 +249,7 @@ class MultiSourceDatasetManager:
         # Filtrer le catalogue pour les alias spécifiés
         pred_catalog = self.datasets[pred_alias].get_catalog()
         ref_catalog = self.datasets[ref_alias].get_catalog() if ref_alias else None
-        # logger.debug(f"Filtered catalogs: {pred_catalog}, {ref_catalog}")
-        # logger.debug(f"Pred catalog: {pred_catalog.get_dataframe()}")
-        # logger.debug(f"Ref catalog: {ref_catalog.get_dataframe()}")
         eval_variables = pred_dataset.eval_variables
-
 
         if pred_catalog.get_dataframe().empty:
             raise ValueError(f"Catalog entries for alias '{pred_alias}' are empty.")
@@ -324,5 +279,54 @@ class MultiSourceDatasetManager:
         Returns:
             DatasetCatalog: Catalogue filtré pour l'alias spécifié.
         """
+        filtered_df = self.datasets["alias"].get_dataframe()
+        global_metadata = self.catalog.get_global_metadata()
         filtered_df = self.catalog.get_dataframe()[self.catalog.get_dataframe()["alias"] == alias]
-        return DatasetCatalog(entries=filtered_df.to_dict(orient="records"))
+        return DatasetCatalog(entries=filtered_df.to_dict(orient="records"), global_metadata=global_metadata)
+
+
+    def get_transform(
+        self,
+        transform_name: str,
+        dataset_alias: str,
+        **kwargs,
+    ) -> Any:
+        """
+        Factory function to create a transform based on the given name and parameters.
+        """
+        logger.debug(f"Creating transform {transform_name} with kwargs: {kwargs}")
+
+        # catalog = self.get_catalog(dataset_alias)
+        global_metadata = self.datasets[dataset_alias].get_global_metadata()
+        coords_rename_dict = global_metadata.get("dimensions")
+        vars_rename_dict= global_metadata.get("variables_rename_dict")
+        keep_vars = global_metadata.get("keep_variables")
+
+
+        # Configurer les transformations
+        match transform_name:
+            case "standardize":
+                transform = CustomTransforms(
+                    transform_name="standardize_dataset",
+                    list_vars=keep_vars,
+                    coords_rename_dict=coords_rename_dict,
+                    vars_rename_dict=vars_rename_dict,
+                )
+                self.standardize_names(
+                    dataset_alias,
+                    coords_rename_dict,
+                    vars_rename_dict,
+                )
+            case "glorys_to_glonet":
+                regridder_weights = kwargs.get("regridder_weights", None)
+                assert(regridder_weights is not None), "Regridder weights path must be provided for GLONET transformation"
+                transform = CustomTransforms(
+                    transform_name="glorys_to_glonet",
+                    weights_path=regridder_weights,
+                    depth_coord_vals=GLONET_DEPTH_VALS,
+                    interp_ranges=RANGES_GLONET,
+                )
+            case _:
+                transform = None
+
+        return transform

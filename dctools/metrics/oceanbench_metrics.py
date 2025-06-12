@@ -24,6 +24,22 @@ from dctools.data.coordinates import (
     COORD_ALIASES,
 )
 
+# Dictionnaire des variables d'intérêt : {nom générique -> standard_name(s), alias courants}
+OCEANBENCH_VARIABLES = {
+    "sla": Variable.SEA_SURFACE_HEIGHT_ABOVE_SEA_LEVEL,
+    "sst": Variable.SEA_SURFACE_TEMPERATURE,
+    "sss": Variable.SEA_WATER_SALINITY,
+    "ssh": Variable.SEA_SURFACE_HEIGHT_ABOVE_GEOID,
+    "temperature": Variable.SEA_WATER_POTENTIAL_TEMPERATURE,
+    "salinity": Variable.SEA_WATER_SALINITY,
+    "u_current": Variable.NORTHWARD_SEA_WATER_VELOCITY,
+    "v_current": Variable.EASTWARD_SEA_WATER_VELOCITY,
+    "w_current": Variable.UPWARD_SEA_WATER_VELOCITY,
+    "mld": Variable.MIXED_LAYER_THICKNESS,
+    "mdt": Variable.MEAN_DYNAMIC_TOPOGRAPHY,
+}
+
+
 class DCMetric(ABC):
     def __init__(self, **kwargs: Dict[str, Any]) -> None:
         """Init func.
@@ -57,11 +73,10 @@ class DCMetric(ABC):
     def compute_metric(self, pred_data: xr.Dataset, ref_data: xr.Dataset):
         pass
 
+
 class OceanbenchMetrics(DCMetric):
     """Central class for calling Oceanbench functions."""
 
-    #def __init__(self,
-    #             metric_name: str, plot_result: bool=False, **kwargs: Dict[str, Any]) -> None:
     def __init__(self, **kwargs: Dict[str, Any]) -> None:
         """Init func.
 
@@ -73,19 +88,18 @@ class OceanbenchMetrics(DCMetric):
                 "func_with_ref": rmsd,
                 "kwargs_with_ref": ["vars"],
                 "func_no_ref": oceanbench_metrics.rmsd_of_variables_compared_to_glorys,
-                #"kwargs_no_ref": None,
             },
+
             "lagrangian": {
                 "func_with_ref": deviation_of_lagrangian_trajectories,
                 "kwargs_with_ref": ["zone"],
                 "func_no_ref": oceanbench_metrics.deviation_of_lagrangian_trajectories_compared_to_glorys,
-                #"kwargs_no_ref": None,
             },
+
             "rmsd_geostrophic_currents": {
                 "func_with_ref": rmsd,
                 "kwargs_with_ref": ["vars"],
                 "func_no_ref": oceanbench_metrics.rmsd_of_geostrophic_currents_compared_to_glorys,
-                #"kwargs_no_ref": None,
                 "preprocess_ref": add_geostrophic_currents,
             },
 
@@ -93,7 +107,6 @@ class OceanbenchMetrics(DCMetric):
                 "func_with_ref": rmsd,
                 "kwargs_with_ref": ["vars"],
                 "func_no_ref": oceanbench_metrics.rmsd_of_mixed_layer_depth_compared_to_glorys,
-                #"kwargs_no_ref": None,
                 "preprocess_ref": add_mixed_layer_depth,
             }
         }
@@ -115,9 +128,9 @@ class OceanbenchMetrics(DCMetric):
         Returns:
             ndarray, optional: computed metric (if any)
         """
-        logger.debug(f"Computing metric {self.metric_name} with variables: {eval_variables}")
+        # logger.debug(f"Computing metric {self.metric_name} with variables: {eval_variables}")
         if eval_variables:
-            has_depth = any(depth_alias in eval_variables for depth_alias in COORD_ALIASES)
+            has_depth = any(depth_alias in list(eval_dataset.dims) for depth_alias in COORD_ALIASES["depth"])
         if eval_variables and not has_depth:
             if self.metric_name == "lagrangian":
                 logger.warning("Lagrangian metric requires 'depth' variable.")
@@ -134,29 +147,49 @@ class OceanbenchMetrics(DCMetric):
                 kwargs = {
                     "challenger_datasets": [eval_dataset],
                     "reference_datasets": [ref_dataset],
-                    # "variables": eval_variables,
                 }
             else:
-                logger.debug(f"Computing metric {self.metric_name} without reference dataset.")
                 metric_func = self.metrics_set[self.metric_name]["func_no_ref"]
                 add_kwargs_list = None
                 kwargs = {
                     "challenger_datasets": [eval_dataset],
-                    # "variables": eval_variables,
                 }
+            oceanbench_eval_variables = [self.get_variable_alias(var) for var in eval_variables] if eval_variables else None
+
             if eval_variables and ref_dataset:
-                kwargs["variables"] = eval_variables
+                kwargs["variables"] = oceanbench_eval_variables
+
+            # Vérifier la présence de depth comme dimension
+            has_depth_dim = "depth" in eval_dataset.dims
+
+            # Vérifier la présence de depth comme coordonnée
+            has_depth_coord = "depth" in eval_dataset.coords
+            if not has_depth_dim and not has_depth_coord:
+                kwargs["depth_levels"] = None
             add_kwargs = {}
             if add_kwargs_list:
                 if "vars" in add_kwargs_list:
-                    add_kwargs["variables"] = eval_variables
+                    add_kwargs["variables"] = oceanbench_eval_variables
                 if "zone" in add_kwargs_list:
                     kwargs["zone"] = zone
 
                 kwargs.update(add_kwargs)
-            logger.debug(f"Calling metric function {metric_func.__name__} with kwargs: {kwargs}")
             return metric_func(**kwargs)
         
         except Exception as exc:
             logger.error(f"Failed to compute metric {self.metric_name}: {traceback.format_exc()}")
             raise
+
+    def get_variable_alias(self, variable: str) -> Variable | None:
+        """Get the alias for a given variable.
+
+        Args:
+            variable (Variable): The variable to get the alias for.
+
+        Returns:
+            Optional[str]: The alias of the variable, or None if not found.
+        """
+        for alias, var in OCEANBENCH_VARIABLES.items():
+            if alias == variable:
+                return var
+        return None

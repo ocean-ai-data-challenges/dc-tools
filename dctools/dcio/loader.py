@@ -10,44 +10,7 @@ from loguru import logger
 import netCDF4
 import traceback
 import xarray as xr
-# import zarr
 
-# from dctools.utilities.xarray_utils import standard_rename_coords
-
-'''def collect_all_groups(nc_path):
-    def walk_group(grp, prefix=""):
-        data_vars = {}
-        coords = {}
-        try:
-            for varname, var in grp.variables.items():
-                # Préfixe avec le chemin du groupe (remplace / par __ pour xarray)
-                full_name = f"{prefix}/{varname}" if prefix else varname
-                xr_name = full_name.replace("/", "__")
-                dims = var.dimensions
-                data = var[:]
-                # On distingue les coordonnées (dimensions) des variables
-                if varname in grp.dimensions:
-                    coords[xr_name] = (dims, data)
-                else:
-                    data_vars[xr_name] = (dims, data)
-            for name, subgrp in grp.groups.items():
-                sub_prefix = f"{prefix}/{name}" if prefix else name
-                sub_vars, sub_coords = walk_group(subgrp, sub_prefix)
-                data_vars.update(sub_vars)
-                coords.update(sub_coords)
-            return data_vars, coords
-        except Exception as exc:
-            logger.error(f"Failed to open dataset {nc_path}: {traceback.format_exc()}")
-            raise
-
-    with netCDF4.Dataset(nc_path, "r") as nc:
-        all_vars, all_coords = walk_group(nc)
-    # On fusionne les coords et les data_vars dans le Dataset
-    ds = xr.Dataset(
-        {k: (v[0], v[1]) for k, v in all_vars.items()},
-        coords={k: (v[0], v[1]) for k, v in all_coords.items()}
-    )
-    return ds'''
 
 def list_all_group_paths(nc_path: str) -> List[str]:
     def walk(grp, prefix=""):
@@ -90,39 +53,6 @@ def open_and_concat_groups(
 
     ds_merged = xr.merge(datasets, compat="no_conflicts", join="outer")
     return ds_merged
-
-
-'''def open_and_concat_groups(
-    source: Union[FSMap, str],
-    groups: list[str] = None,
-    **xr_kwargs
-) -> xr.Dataset:
-    """
-    Ouvre un NetCDF et concatène les variables de tous les groupes listés dans un seul Dataset.
-    Les noms de variables sont préfixés par le nom du groupe pour éviter les collisions.
-
-    Args:
-        source (Union[FSMap, str]): Chemin du fichier NetCDF ou FSMap (fsspec).
-        groups (list[str] or None): Liste des groupes à ouvrir. Si None, ouvre le fichier normalement.
-        **xr_kwargs: Arguments additionnels pour xr.open_dataset.
-
-    Returns:
-        xr.Dataset: Dataset concaténé.
-    """
-
-    datasets = []
-    for group in groups:
-        logger.debug(f"Opening group: {group}")
-        logger.debug(f"Source: {source}, Group: {group}, xr_kwargs: {xr_kwargs}")
-        ds = xr.open_dataset(source, group=group, **xr_kwargs)
-        # Préfixe les variables par le nom du groupe
-        prefix = group.replace("/", "__")
-        ds = ds.rename({var: f"{prefix}__{var}" for var in ds.data_vars})
-        datasets.append(ds)
-
-    # Fusionne tous les datasets sur les dimensions communes (outer join)
-    ds_merged = xr.merge(datasets, compat="no_conflicts", join="outer")
-    return ds_merged'''
 
 
 class FileLoader:
@@ -201,7 +131,7 @@ class FileLoader:
         """
         try:
             if file_path.endswith(".nc"):
-                #logger.info(
+                # logger.debug(
                 #    f"Loading dataset from NetCDF file: {file_path}"
                 #)
                 group_paths = list_all_group_paths(file_path)

@@ -57,6 +57,7 @@ class Evaluator:
             return self.results
         except Exception as exc:
             logger.error(f"Evaluation failed: {traceback.format_exc()}")
+            raise
 
     def _evaluate_batch(
         self, batch: List[Dict[str, Any]],
@@ -82,12 +83,8 @@ class Evaluator:
 
                 if dataloader.pred_transform:
                     pred_data = dataloader.pred_transform(pred_data)
-
                 if ref_data and dataloader.ref_transform:
                     ref_data = dataloader.ref_transform(ref_data)
-
-                logger.debug(f"pred_data : {pred_data}")
-                logger.debug(f"ref_data : {ref_data}")
 
                 # Partager les données entre les workers
                 pred_future = dask_client.scatter(pred_data, broadcast=True)
@@ -95,6 +92,7 @@ class Evaluator:
 
                 # Construire les tâches pour chaque métrique
                 for metric in self.metrics:
+                    #logger.debug(f"Computing metric: {metric.get_metric_name()} for date: {date}")
                     task = dask.delayed(self._compute_metric)(
                         self.alias, metric, pred_future, ref_future, date
                     )

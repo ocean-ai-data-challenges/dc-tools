@@ -23,15 +23,13 @@ class MetricComputer(OceanbenchMetrics):
         self, pred_data: xr.Dataset, ref_data: xr.Dataset
     ):
         try:
-            logger.info(f"Start computing metric {self.metric_name}")
             result = self.compute_metric(
                 pred_data,
                 ref_data,
                 self.eval_variables,
             )
-            logger.debug(f"Computed metric: {result}")
-            if self.add_noise:
-                result = add_noise_with_snr(result, snr_db=10)
+            if self.add_noise and result is not None:
+                result = add_noise_with_snr(result, snr_db=15)
             if isinstance(result, xr.Dataset) or isinstance(result, xr.DataArray):
                 return "plot.jpeg"
             else:
@@ -43,4 +41,3 @@ class MetricComputer(OceanbenchMetrics):
                 f"Error while computing metrics: {repr(exc)}"
             )
             return None
-        #return self.metrics_results

@@ -68,7 +68,7 @@ def setup_filepath():
         os.remove(test_file_path)
 
 @pytest.fixture(scope='session', autouse=True)
-def setup_output_dir(setup_logger):
+def setup_output_dir():
     """Test path configuration."""
     test_output_dir = os.path.join("tests", "test_output")
     os.makedirs(test_output_dir, exist_ok=True)
@@ -81,22 +81,8 @@ def setup_output_dir(setup_logger):
         os.rmdir(test_output_dir)
 
 
-@pytest.fixture(scope='session', autouse=True)
-def setup_logger():
-    """Setup test logger."""
-    # initialize_logger
-    LOGGER_CONFIG = {
-        'log_level': "DEBUG",
-        'log_format': "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | <level>{level: <8}</level> | <yellow>Line {line: >4} ({file}):</yellow> <b>{message}</b>"
-    }
-    log_level = LOGGER_CONFIG['log_level']
-    log_format = LOGGER_CONFIG['log_format']
-    logger.add(sys.stderr, level=log_level, format=log_format, colorize=True, backtrace=True, diagnose=True)
-    logger.add("file.log", level=log_level, format=log_format, colorize=False, backtrace=True, diagnose=True)
-  
-
 def test_save_load_dataset(
-    setup_logger,
+    # setup_logger,
     setup_data,
     setup_filepath,
     ):
@@ -120,16 +106,6 @@ def test_load_error(setup_filepath):
         )
     except Exception:
         pass
-
-
-'''def test_regrid_data(setup_logger, setup_data):
-    """Test regridding data."""
-    logger.info("Run test_regrid_data")
-    gridded_ds = DataGridder.interpolate_to_2dgrid(setup_data)
-
-    assert "temperature" in gridded_ds.variables
-    assert gridded_ds.sizes["lon"] == 360
-    assert gridded_ds.sizes["lat"] == 180'''
 
 
 '''

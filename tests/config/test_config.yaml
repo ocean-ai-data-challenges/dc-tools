@@ -2,54 +2,25 @@
 # This file lists variables used in dctools tests 
 ################################################################
 
-################################################################
-# This file lists variables used in configuring dc1 evaluation 
-################################################################
+max_samples: 1
 
-glonet_n_days_forecast: 10
+################################################################
+##  WASABI credentials
+define: &WASABI_KEY 
+define: &WASABI_SECRET_KEY 
 
-max_samples: 2
 ###########################################
-## List of start time for TC events
+## List of start times
 start_times:
    - "1900-01-01"
-   - "2021-07-01"
-## List of end time for TC events 
+## List of end times
 end_times:
    - "2026-01-01"
-   - "2021-07-02"
 
 # lead time definition (hours)
 lead_time_start: "0"
 lead_time_stop: "240"
 lead_time_frequency: "24"
-
-# variables for evaluation data targets
-target_vars:
-  - "uo"
-  - "vo"
-  - "zos"
-  - "thetao"
-  - "so"
-  
-#vents 	de surface (sortie) / observations satellitaires (SAR) du vent à haute résolution (référence)
-#variables représentatives des vagues de surface (haute résolution) : 	SSH, SST, SSS, couleur de l’océan (sortie) / observations satellite et réanalyses (modèles ERA-5 et Mercator-GLORYS)	(référence)
-#distribution de la salinité et de la température de la couche supérieure de l'océan (sortie du modèle) / profils ARGO et réanalyses (modèle Mercator-GLORYS) (référence)
-
-
-# variables for evaluation data inputs
-input_vars: "*"
-#variables (SSH, vents de surface, vagues, précipitations, température 	intérieure et de surface, couleur de l’océan) avant, pendant, 	après le passage du cyclone.
-#conditions de la haute mer avant la tempête (par exemple, SST, SSS, densité 	verticale de la haute mer, force de stratification, etc.)
-#forçages atmosphériques pendant le passage du cyclone (vent maximum, pluie accumulée et 	évaporation, indice de puissance éolienne, etc..)
-#sillages océaniques laissés après la tempête pour un ensemble de variables (SST, SSS, hauteur du niveau de la mer, paramètres de couleur de l'océan).
-#réanalyses : atmosphérique, océanique, des caractéristiques du vortex.
-
-# Target region coordinates
-min_lat: -45
-max_lat: 45
-min_lon: -90
-max_lon: 90
 
 # Path to catalog file
 catalog_path: ""
@@ -58,6 +29,28 @@ catalog_path: ""
 batch_size: 8
 
 sources:
+  - dataset: jason3
+    groups:
+      - "ku"
+      - "data_01"
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Nadir_altimetry/Jason-3"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+      - "time"
+      - "data_01__time_tai"
+      - "latitude"
+      - "longitude"
+      - "data_01__depth_or_elevation"
+      - "data_01__ku__ssha"
+    eval_variables:
+      - "data_01__ku__ssha"
+
   - dataset: glonet
     config: "s3"
     connection_type: "anonymous"
@@ -102,8 +95,8 @@ sources:
     url: "https://s3.eu-west-2.wasabisys.com"
     s3_bucket: "ppr-ocean-climat"
     s3_folder: "DC1/Glonet_forecast"
-    s3_key: "EG5GYSEYI5C20O6IHNEJ"
-    s3_secret_key: "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.zarr"
     keep_variables:
       - "so"

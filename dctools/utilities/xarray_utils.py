@@ -3,7 +3,9 @@
 
 """Misc. functions to aid in the processing xr.Datasets and DataArrays."""
 
+import ast
 from datetime import datetime
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 import cftime
@@ -15,16 +17,9 @@ import xarray as xr
 import xesmf as xe
 
 from dctools.data.coordinates import (
-    CoordinateSystem,
     GEO_STD_COORDS
 )
 
-from oceanbench.core.climate_forecast_standard_names import (
-    StandardDimension, StandardVariable
-)
-from oceanbench.core.dataset_utils import (
-    Variable, Dimension, DepthLevel
-)
 
 def create_empty_dataset(dimensions: dict) -> xr.Dataset:
     """
@@ -40,80 +35,52 @@ def create_empty_dataset(dimensions: dict) -> xr.Dataset:
     coords = {dim: range for dim, range in dimensions.items()}
     return xr.Dataset(coords=coords)
 
-'''def get_grid_coord_names(
-    data: xr.Dataset | xr.DataArray,
-) -> Dict[str, str | None]:
-    """
-    Get the names of the coordinates in `data`.
-
-    Return a dictionary with "lat", "lon", "depth" and "time" as keys
-    and the names of the corresponding coordinates (if they exist) as
-    values.
-    The names are determined by checking against the `XXX_NAMES` constants defined
-    in this file for any existing coordinates in `data`
-    """
-    coord_name_dict = {}
-    if hasattr(data, "coords")and len(data.coords) > 0:
-        # If data is a Dataset, get the coordinates
-        list_coords = list(data.coords) if hasattr(data, "coords") else list(data)
-    elif hasattr(data, "dims") and len(data.dims) > 0:
-        # If data is a DataArray, get the dimensions
-        list_coords = list(data.dims)
-    else:
-        # If data is neither a Dataset nor a DataArray, return an empty dictionary
-        list_coords = list(data)
-    # There's probably a less disgusting way of doing this...
-    lon_set = set(LONGITUDE_NAMES).intersection(list_coords)
-    coord_name_dict["lon"] = None if len(lon_set) == 0 else next(iter(lon_set))
-    lat_set = set(LATITUDE_NAMES).intersection(list_coords)
-    coord_name_dict["lat"] = None if len(lat_set) == 0 else next(iter(lat_set))
-    depth_set = set(DEPTH_NAMES).intersection(list_coords)
-    coord_name_dict["depth"] = None if len(depth_set) == 0 else next(iter(depth_set))
-    time_set = set(TIME_NAMES).intersection(list_coords)
-    coord_name_dict["time"] = None if len(time_set) == 0 else next(iter(time_set))
-
-    return coord_name_dict'''
-
-'''def create_coords_rename_dict(ds: xr.Dataset):
-    ds_coords = get_grid_coord_names(ds)
-    dict_rename = {
-        ds_coords["lon"]: STD_COORDS_NAMES["lon"],
-        ds_coords["lat"]: STD_COORDS_NAMES["lat"],
-        ds_coords["depth"]: STD_COORDS_NAMES["depth"],
-        ds_coords["time"]: STD_COORDS_NAMES["time"],
-    }
-    return dict_rename'''
 
 def rename_coordinates(ds: xr.Dataset, rename_dict: Optional[dict] = None):
     """Rename coordinates according to a given dictionary."""
-    if not rename_dict:
-        logger.debug("No rename dictionary provided, using CoordinateSystem to detect coordinates.")
-        coord_sys = CoordinateSystem.get_coordinate_system(ds)
-        rename_dict = coord_sys.coordinates
-    logger.debug(f"Renaming coordinates with dictionary: {rename_dict}")
-    # Remove None values from the dictionary
-    #rename_dict = {k: v for k, v in rename_dict.items() if v is not None}
-    # remove entries when key is same as value, and None values
-    rename_dict = {k: v for k, v in rename_dict.items() if k != v  and v is not None}
-    logger.debug(f"Filtered renaming dictionary: {rename_dict}")
-    if len (rename_dict) == 0:
-        return ds
-    ds = ds.rename_dims(rename_dict)
-    logger.debug(f"Dataset dimensions after renaming coordinates: {list(ds.dims)}")
-    return ds.rename_dims(rename_dict)
+    try:
+        if not rename_dict:
+            return ds
 
-def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict]= None):
+        if isinstance(rename_dict, str):
+            rename_dict = ast.literal_eval(rename_dict)
+
+        # Remove None values from the dictionary
+        #rename_dict = {k: v for k, v in rename_dict.items() if v is not None}
+        # keep only keys that are in the dataset dimensions
+        rename_dict = {k: v for k, v in rename_dict.items() if k in list(ds.dims)}
+        # remove entries when key is same as value, and None values
+        rename_dict = {k: v for k, v in rename_dict.items() if k != v  and v is not None}
+        if not rename_dict or len (rename_dict) == 0:
+            return ds
+        ds = ds.rename_dims(rename_dict)
+        return ds.rename_dims(rename_dict)
+    except Exception as e:
+        logger.error(f"Error renaming coordinates: {e}")
+        raise ValueError(f"Failed to rename coordinates in dataset: {e}") from e
+
+
+def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict] = None):
     """Rename variables according to a given dictionary."""
-    if not rename_dict:
-        variables = {v: list(ds[v].dims) for v in ds.data_vars}
-        rename_dict = CoordinateSystem.detect_oceanographic_variables(variables)
-    # Remove invalid values from the dictionary
-    rename_dict = {k: v for k, v in rename_dict.items() if k != v and v is not None}
-
-    if len (rename_dict) == 0:
-        return ds
-    logger.debug(f"Renaming variables with dict: {rename_dict}")
-    return ds.rename_vars(rename_dict)
+    try:
+        if not rename_dict:
+            return ds
+ 
+        if isinstance(rename_dict, str):
+            rename_dict = ast.literal_eval(rename_dict)
+        # keep only keys that are in the dataset dimensions
+        rename_dict = {k: v for k, v in rename_dict.items() if k in list(ds.data_vars)}
+        # Remove invalid values from the dictionary
+        rename_dict = {k: v for k, v in rename_dict.items() if k != v and v is not None}
+        if not rename_dict or len (rename_dict) == 0:
+            return ds
+        rename_ds = ds.rename_vars(rename_dict)
+        new_vars = list(rename_ds.data_vars)
+        logger.debug(f"Dataset variables after renaming: {new_vars}")
+        return rename_ds
+    except Exception as e:
+        logger.error(f"Error renaming variables: {e}")
+        raise ValueError(f"Failed to rename variables in dataset: {traceback.format_exc()}") from e
 
 
 def rename_coords_and_vars(
@@ -122,19 +89,64 @@ def rename_coords_and_vars(
     rename_vars_dict: Optional[dict] = None,
 ):
     """Rename variables and coordinates according to given dictionaries."""
-    logger.debug(f"Renaming coordinates in dataset with dictionary: {rename_coords_dict}")
-    rename_ds = rename_coordinates(ds, rename_coords_dict)
-    logger.debug(f"Renaming variables in dataset with dictionary: {rename_vars_dict}")
-    return rename_variables(rename_ds, rename_vars_dict)
+    #logger.debug(f"Renaming coordinates in dataset with dictionary: {rename_coords_dict}")
+    try:
+        rename_ds = rename_coordinates(ds, rename_coords_dict)
+        #logger.debug(f"Renaming variables in dataset with dictionary: {rename_vars_dict}")
+        rename_ds = rename_variables(rename_ds, rename_vars_dict)
+
+        return rename_ds
+    except Exception as e:
+        logger.error(f"Error renaming coordinates or variables: {e}")
+        raise ValueError(f"Failed to rename coordinates or variables in dataset: {e}") from e
 
 def subset_variables(ds: xr.Dataset, list_vars: List[str]):
-    """Extract a sub-dataset containing only listed variables."""
-    return ds[list_vars]
+    """Extract a sub-dataset containing only listed variables, preserving attributes."""
+
+    for variable_name in ds.variables:
+        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
+
+    # Crée un sous-dataset avec uniquement les variables listées
+    subset = xr.Dataset({var: ds[var].copy(deep=True) for var in list_vars if var in ds})
+
+    # Détecter les coordonnées présentes dans le sous-dataset
+    coords_to_set = [c for c in subset.data_vars if c in ds.coords]
+    if coords_to_set:
+        subset = subset.set_coords(coords_to_set)
+
+    # Supprime les coordonnées orphelines (non utilisées)
+    subset = subset.reset_coords(drop=True)
+
+    for variable_name in subset.variables:
+        var_std_name = subset[variable_name].attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = subset[variable_name].attrs.get("std_name", '').lower()
+
+    return subset
+
 
 def interpolate_dataset(
         ds: xr.Dataset, ranges: Dict[str, np.ndarray],
         weights_filepath: Optional[str] = None,
     ) -> xr.Dataset:
+
+    for variable_name in ds.variables:
+        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
+
+    # 1. Sauvegarder les attributs des coordonnées AVANT interpolation
+    coords_attrs = {}
+    for coord in ds.coords:
+        coords_attrs[coord] = ds.coords[coord].attrs.copy()
+
+    # (optionnel) Sauvegarder aussi les attrs des variables si besoin
+    vars_attrs = {}
+    for var in ds.data_vars:
+        vars_attrs[var] = ds[var].attrs.copy()
+
     for key in ranges.keys():
         assert(key in list(ds.dims))
 
@@ -151,7 +163,7 @@ def interpolate_dataset(
 
     if weights_filepath and Path(weights_filepath).is_file():
         # Use precomputed weights
-        logger.info(f"Using interpolation precomputed weights from {weights_filepath}")
+        logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
         regridder = xe.Regridder(
             ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
         )
@@ -164,6 +176,27 @@ def interpolate_dataset(
         regridder.to_netcdf(weights_filepath)
     # Regrid the dataset
     ds_out = regridder(ds)
+
+    # 2. Réaffecter les attributs des variables (déjà fait dans ton code)
+    for var in ds_out.data_vars:
+        if var in vars_attrs:
+            ds_out[var].attrs = vars_attrs[var].copy()
+
+    # 3. Réaffecter les attributs des coordonnées
+    for coord in ds_out.coords:
+        if coord in coords_attrs:
+            # Crée un nouveau DataArray avec les attrs sauvegardés
+            new_coord = xr.DataArray(
+                ds_out.coords[coord].values,
+                dims=ds_out.coords[coord].dims,
+                attrs=coords_attrs[coord].copy()
+            )
+            ds_out = ds_out.assign_coords({coord: new_coord})
+
+    for variable_name in ds.variables:
+        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
 
     return ds_out
 
@@ -178,27 +211,6 @@ def get_glonet_time_attrs(start_date: str):
         'units': f"days since {start_date} 00:00:00", 'calendar': "proleptic_gregorian"
     }
     return glonet_time_attrs
-
-'''def get_vars_dims(
-    ds: xr.Dataset,
-) -> Tuple[List[str]]:
-    """
-    Get the variables and their dimensions from an xarray dataset.
-    """
-    vars_2d = []
-    vars_3d = []
-    for var in ds.data_vars:
-        # dims = list(ds[var].dims)
-        coord_sys = CoordinateSystem.get_coordinate_system(ds[var])
-        dict_coords = coord_sys.coordinates
-        
-
-        if "lat" in dict_coords and "lon" in dict_coords:
-            if "depth" not in dict_coords:
-                vars_2d.append(var)
-            else:
-                vars_3d.append(var)
-    return (vars_2d, vars_3d)'''
 
 def get_time_info(ds: xr.Dataset):
     """
@@ -422,12 +434,3 @@ def reset_time_coordinates(dataset: xr.Dataset) -> xr.Dataset:
     # Remplacer les valeurs des coordonnées de temps
     dataset = dataset.assign_coords(time=new_time_values)
     return dataset
-
-def detect_coordinate_system(ds: xr.Dataset) -> CoordinateSystem:
-    if "lat" in ds.dims and "lon" in ds.dims:
-        return CoordinateSystem("geographic", ("lat", "lon"), crs="EPSG:4326")
-    elif "x" in ds.dims and "y" in ds.dims:
-        crs = ds.attrs.get("crs", "EPSG:3413")  # ex: stéréographique arctique
-        return CoordinateSystem("polar", ("x", "y"), crs=crs)
-    else:
-        raise ValueError("Unknown coordinate system in dataset.")

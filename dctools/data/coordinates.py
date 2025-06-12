@@ -26,13 +26,17 @@ COORD_ALIASES = {
 
 # Dictionnaire des variables d'intérêt : {nom générique -> standard_name(s), alias courants}
 VARIABLES_ALIASES = {
+    "sla": {
+        "standard_names": ["sea_surface_height_above_sea_level"],
+        "aliases": ["sla", "data_01__ku__ssha", "ssha"]
+    },
     "sst": {
         "standard_names": ["sea_surface_temperature"],
         "aliases": ["sst", "surface_temperature", "temperature_surface"]
     },
     "sss": {
         "standard_names": ["sea_surface_salinity"],
-        "aliases": ["sss", "surface_salinity", "salinity_surface"]
+        "aliases": ["sss", "surface_salinity", "salinity_surface", "SSS", "SST_sal"]
     },
     "ssh": {
         "standard_names": [
@@ -40,15 +44,15 @@ VARIABLES_ALIASES = {
             "sea_surface_height_above_geoid",
             "sea_surface_height_above_reference_ellipsoid"
         ],
-        "aliases": ["ssh", "sea_level", "surface_height"]
+        "aliases": ["ssh", "sea_level", "surface_height", "ssha_filtered", "zos"]
     },
     "temperature": {
-        "standard_names": ["sea_water_temperature"],
-        "aliases": ["temperature", "temp"]
+        "standard_names": ["sea_water_potential_temperature", "sea_water_temperature"],
+        "aliases": ["temperature", "temp", "thetao"]
     },
     "salinity": {
         "standard_names": ["sea_water_salinity"],
-        "aliases": ["salinity", "psu", "sal"]
+        "aliases": ["salinity", "psu", "sal", "PSAL", "S", "salt", "so"]
     },
     "u_current": {
         "standard_names": ["eastward_sea_water_velocity"],
@@ -65,6 +69,10 @@ VARIABLES_ALIASES = {
     "mld": {
         "standard_names": ["mixed_layer_depth"],
         "aliases": ["mld", "mix_layer_depth"]
+    },
+    "mdt": {
+        "standard_names": ["mean_dynamic_topography_cnes_cls", "mean_dynamic_topography"],
+        "aliases": ["mdt", "mean_dynamic_topography", "mean_dynamic_topography_cnes_cls"]
     }
 }
 
@@ -72,19 +80,19 @@ GEO_STD_COORDS = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
 
 
 EVAL_VARIABLES_GLONET = [
-    Variable.HEIGHT,
-    Variable.TEMPERATURE,
-    Variable.SALINITY,
-    Variable.NORTHWARD_VELOCITY,
-    Variable.EASTWARD_VELOCITY,
+    Variable.SEA_SURFACE_HEIGHT_ABOVE_GEOID,
+    Variable.SEA_WATER_POTENTIAL_TEMPERATURE,
+    Variable.SEA_WATER_SALINITY,
+    Variable.NORTHWARD_SEA_WATER_VELOCITY,
+    Variable.EASTWARD_SEA_WATER_VELOCITY,
 ]
 
 GLOBAL_ZONE_COORDINATES = ZoneCoordinates(
-        minimum_latitude=-90,
-        maximum_latitude=90,
-        minimum_longitude=-180,
-        maximum_longitude=180,
-    )
+    minimum_latitude=-90,
+    maximum_latitude=90,
+    minimum_longitude=-180,
+    maximum_longitude=180,
+)
 
 # Possible names of coordinates that we want to check for
 
@@ -141,7 +149,6 @@ class CoordinateSystem:
     @staticmethod
     def get_coordinate_system( ds: xr.Dataset) -> dict:
         """Detect coordinate system type and standardized spatial/temporal dimensions."""
-        logger.debug("Detecting coordinate system from dataset dimensions and coordinates.")
 
         # Inversion du dictionnaire : nom -> standard_name
         std_keys = COORD_ALIASES.keys()   # ["lat", "lon", "x", "y", "depth", "quadrant", "time"]
@@ -149,35 +156,33 @@ class CoordinateSystem:
         for std_name, aliases in COORD_ALIASES.items():
             for a in aliases:
                 alias_map[a.lower()] = std_name
-        logger.debug(f"Alias map: {alias_map}")
         coords_in_ds = list(ds.coords) + list(ds.dims)  # on considère aussi les dimensions
         coords_lower = {c.lower(): c for c in coords_in_ds}  # mapping original
-        logger.debug(f"Coordinates in dataset: {coords_lower}")
         standardized = {}
         for name_lc, original in coords_lower.items():
             std_name = alias_map.get(name_lc)
             if std_name:
                 standardized[std_name] = original
-        logger.debug(f"Standardized coordinates: {standardized}")
+
         # Détection du type de système
         #spatial_keys = {"latitude", "longitude", "x", "y"}
         has_latlon = {"lat", "lon"} <= standardized.keys()
         has_xy = {"x", "y"} <= standardized.keys()
-        logger.debug(f"Has lat/lon: {has_latlon}, Has x/y: {has_xy}")
+
         epsg = None
         if has_latlon:
             coord_type = "geographic"
-            epsg = "EPSG:4326"  # CRS standard géographique
+            # epsg = "EPSG:4326"  # CRS standard géographique
         elif has_xy:
             coord_type = "polar"
-            epsg = "EPSG:3413" # CRS arctique par défaut
+            # epsg = "EPSG:3413" # CRS arctique par défaut
         else:
             raise ValueError(
                 "Unable to detect coordinate system from dimensions and coordinates."
             )
 
-        crs = ds.attrs.get("crs", epsg)
-        logger.debug(f"Detected coordinate system: {coord_type}, CRS: {crs}")
+        crs = ds.attrs.get("crs")
+        # logger.debug(f"Detected coordinate system: {coord_type}, CRS: {crs}")
         return CoordinateSystem(
             coord_type=coord_type,
             coordinates={
@@ -192,40 +197,38 @@ class CoordinateSystem:
         Detect oceanographic variables in an xarray Dataset based on standard_name and aliases.
         Returns a dictionary mapping variable type -> actual name in the dataset.
         """
-        found = defaultdict(lambda: None)
+        try:
+            found = defaultdict(lambda: None)
 
-        for var_name in variables.keys():
-            var = variables[var_name]
-            std_name = var["std_name"].lower()
-            # long_name = var.attrs.get("long_name", "").lower()
-            name = var_name.lower()
-            name_parts = name.split("_")  # Ajout : split sur "_"
+            for var_name in variables.keys():
+                var = variables[var_name]
+                std_name = var["std_name"].lower()
 
-            for key, config in VARIABLES_ALIASES.items():
-                if found[key] is not None:
-                    continue  # déjà trouvé
+                name = var_name.lower()
 
-                # Condition 1 : standard_name exact
-                condition1 = std_name and std_name in config["standard_names"]
+                for key, config in VARIABLES_ALIASES.items():
+                    # Condition 1 : standard_name exact
+                    condition1 = std_name and std_name in config["standard_names"]
 
-                # Condition 2 : alias exact sur un mot du nom de variable
-                condition2 = any(alias.lower() in name_parts for alias in config["aliases"])
-
-                if condition1 or condition2:
-                    logger.debug(f"  Found variable: {var_name} for key: {key}")
-                    found[key] = var_name
-
-        return dict(found)
+                    # Condition 2 : alias exact sur un mot du nom de variable
+                    condition2 = any(alias.lower() == name for alias in config["aliases"])
+                    if condition1 or condition2:
+                        logger.debug(f"         Found variable: {var_name} for key: {key}\n\n\n")
+                        found[key] = var_name
+            return dict(found)
+        except Exception as exc:
+            logger.error(f"Error in variable detection: {repr(exc)}")
+            raise ValueError("Failed to detect oceanographic variables.") from exc
 
 
-def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 1000) -> Polygon:
+def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 50000) -> Polygon:
     """
     Robustly extract a geometry from a dataset, avoiding memory errors for huge point clouds.
     If the number of points is too large, subsample before computing the geometry.
     """
     # logger.debug("Extracting geometry from dataset coordinates.")
     coords = coord_sys.coordinates
-    logger.debug(f"Coordinates mapping: {coords}")
+    #logger.debug(f"Coordinates mapping: {coords}")
     if coord_sys.is_polar():
         lat = ds.coords[coords.get("y")].values
         lon = ds.coords[coords.get("x")].values
@@ -235,40 +238,48 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 1000
     else:
         raise ValueError(f"Unknown coordinate system: {coord_sys.coord_type}")
 
-    logger.debug(f"Latitude shape: {lat.shape}, Longitude shape: {lon.shape}")
 
     try:
         # Cas 1 : coordonnées 1D de même taille (points individuels, ex: Argo)
         if lat.ndim == 1 and lon.ndim == 1 and lat.shape == lon.shape:
-            logger.debug("Coordinates are 1D arrays of same length (point cloud).")
+            # logger.debug("Coordinates are 1D arrays of same length (point cloud).")
             coords_arr = np.column_stack([lon, lat])
         # Cas 2 : coordonnées 2D (grille régulière)
         elif lat.ndim == 2 and lon.ndim == 2 and lat.shape == lon.shape:
-            logger.debug("Coordinates are 2D arrays with matching shapes.")
+            # logger.debug("Coordinates are 2D arrays with matching shapes.")
             coords_arr = np.column_stack([lon.ravel(), lat.ravel()])
         # Cas 3 : coordonnées 1D indépendantes (grille, meshgrid possible)
         elif lat.ndim == 1 and lon.ndim == 1:
-            logger.debug("Coordinates are 1D arrays (meshgrid case).")
+            # logger.debug("Coordinates are 1D arrays (meshgrid case).")
             lon2d, lat2d = np.meshgrid(lon, lat)
             coords_arr = np.column_stack([lon2d.ravel(), lat2d.ravel()])
         else:
             raise ValueError("Unsupported coordinate dimensions or mismatched shapes.")
 
         n_points = coords_arr.shape[0]
-        logger.debug(f"Number of points for geometry: {n_points}")
 
         # Sous-échantillonnage si trop de points
         if n_points > max_points:
-            logger.warning(f"Too many points ({n_points}), subsampling to {max_points} for geometry computation.")
+            #logger.warning(f"Too many points ({n_points}), subsampling to {max_points} for geometry computation.")
             idx = np.random.choice(n_points, size=max_points, replace=False)
             coords_arr = coords_arr[idx]
 
+        # Nettoyage : retirer les NaN et doublons
+        coords_arr = coords_arr[~np.isnan(coords_arr).any(axis=1)]
         unique_points = np.unique(coords_arr, axis=0)
-        logger.debug(f"Unique points extracted: {unique_points.shape[0]}")
+        #logger.debug(f"Unique points extracted: {unique_points.shape[0]}")
+
+        # Vérifie que unique_points est bien de shape (N, 2) et de type float
+        if not (isinstance(unique_points, np.ndarray) and unique_points.ndim == 2 and unique_points.shape[1] == 2):
+            raise ValueError(f"unique_points mal formé: shape={unique_points.shape}, type={type(unique_points)}")
+
+        # Vérifier qu'il y a au moins 3 points pour un polygone
+        if unique_points.shape[0] < 3:
+            raise ValueError("Not enough unique points to compute a convex hull.")
 
         # Détection grille ou nuage de points
         if is_rectangular_grid(unique_points):
-            logger.debug("Detected rectangular grid shape.")
+            #logger.debug("Detected rectangular grid shape.")
             minx, miny = unique_points.min(axis=0)
             maxx, maxy = unique_points.max(axis=0)
             geometry = Polygon([
@@ -279,14 +290,24 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 1000
                 (minx, miny),
             ])
         else:
-            logger.debug("Detected complex shape, using convex hull.")
-            points = [Point(x, y) for x, y in unique_points]
+            points = []
+            for x, y in unique_points:
+                try:
+                    pt = Point(float(x), float(y))
+                    if not pt.is_empty and pt.is_valid:
+                        points.append(pt)
+
+                except Exception as exc:
+                    logger.warning(f"Invalid point ({x}, {y}): {exc}")
+
+            if len(points) < 3:
+                raise ValueError("Not enough valid points to compute a convex hull.")
+
             multipoint = MultiPoint(points)
             geometry = multipoint.convex_hull
 
         if not geometry.is_valid:
             raise ValueError("Generated geometry is invalid.")
-        logger.debug(f"Final geometry: {geometry.wkt}")
         return geometry
 
     except Exception as exc:

@@ -48,20 +48,18 @@ class RenameCoordsVarsTransform:
         self.vars_rename_dict = vars_rename_dict
 
     def __call__(self, data):
-        #if not self.rename_dict:
-        #    coord_sys = CoordinateSystem.get_coordinate_system(data)
-        #    self.rename_dict = coord_sys.coordinates
-        return rename_coords_and_vars(
+        rename_ds = rename_coords_and_vars(
             data, self.coords_rename_dict, self.vars_rename_dict
         )
+        return rename_ds
 
 class SelectVariablesTransform:
     def __init__(self, variables: List[str]):
         self.variables = variables
 
     def __call__(self, data):
-        renamed_dataset = subset_variables(data, self.variables)
-        return renamed_dataset
+        sub_dataset = subset_variables(data, self.variables)
+        return sub_dataset
 
 
 class InterpolationTransform:
@@ -149,7 +147,6 @@ class SubsetCoordTransform:
 class CustomTransforms:
     def __init__(self, transform_name: str, **kwargs):
         self.transform_name = transform_name
-        logger.debug(f"Creating transform {self.transform_name} with kwargs: {kwargs}")
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -218,16 +215,10 @@ class CustomTransforms:
                 vars_rename_dict=vars_rename_dict,
             ),
         ])
-        logger.info(
-            f"Renaming coordinates and variables with {self.coords_rename_dict} and {self.vars_rename_dict}"
-        )
-        logger.debug(
-            f"Dataset variables before renaming: {list(dataset.dims)}"
-        )
+
         transf_dataset = transform(dataset)
-        logger.debug(
-            f"Dataset variables after renaming: {list(transf_dataset.dims)}"
-        )
+        new_vars = list(transf_dataset.data_vars)
+
         return transf_dataset
 
     def transform_interpolate(
@@ -253,8 +244,8 @@ class CustomTransforms:
         list_vars = self.list_vars if hasattr(self, "list_vars") else LIST_VARS_GLONET
 
         transform=transforms.Compose([
-            RenameCoordsVarsTransform(coords_rename_dict=dict_rename),
-            SelectVariablesTransform(list_vars),
+            #RenameCoordsVarsTransform(coords_rename_dict=dict_rename),
+            #SelectVariablesTransform(list_vars),
             SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
             #AssignCoordsTransform(time_coord_name, time_coord_vals, time_coord_attrs),
             InterpolationTransform(self.interp_ranges, self.weights_path),
