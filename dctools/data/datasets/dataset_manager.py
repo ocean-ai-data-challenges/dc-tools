@@ -117,15 +117,20 @@ class MultiSourceDatasetManager:
         """
         self.datasets[alias].filter_catalog_by_variable(variables)
 
-    def filter_all_by_date(self, start: datetime, end: datetime):
+    def filter_all_by_date(
+            self,
+            start: datetime | list[datetime],
+            end: datetime | list[datetime],
+        ):
         """
         Filtre tous les datasets gérés par cette classe par plage temporelle.
 
         Args:
-            start (datetime): Date de début.
-            end (datetime): Date de fin.
+            start (datetime): Date(s) de début.
+            end (datetime): Date(s) de fin.
         """
         for alias, _ in self.datasets.items():
+            # TODO: Fix logger output when using lists as start and end
             logger.info(f"Filtrage du dataset '{alias}' par date : {start} -> {end}")
             self.filter_by_date(alias, start, end)
 
