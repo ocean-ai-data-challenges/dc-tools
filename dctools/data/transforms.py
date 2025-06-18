@@ -8,6 +8,7 @@ from loguru import logger
 import numpy as np
 from torchvision import transforms
 import xarray as xr
+from pyproj import Transformer
 
 from dctools.data.coordinates import (
     CoordinateSystem,
@@ -24,7 +25,7 @@ from dctools.utilities.xarray_utils import (
 
 
 class TransformWrapper:
-    """ Wraps a transform that operates on only the sample """
+    """Wraps a transform that operates on only the sample."""
     def __init__(self, transf):
         self.transf = transf
 
@@ -38,7 +39,7 @@ class TransformWrapper:
 
 
 class RenameCoordsVarsTransform:
-    """ a custom transform dependent on time axis """
+    """A custom transform dependent on time axis."""
     def __init__(
         self,
         coords_rename_dict: Optional[Dict] = None,
@@ -82,7 +83,7 @@ class ResetTimeCoordsTransform:
 
 
 class AssignCoordsTransform:
-    """ a custom transform dependent on time axis """
+    """A custom transform dependent on time axis."""
     def __init__(
             self, coord_name: str, coord_vals: List[Any], coord_attrs: Dict[str, str]
         ):
@@ -97,7 +98,7 @@ class AssignCoordsTransform:
         return transf_dataset
 
 class SubsetCoordTransform:
-    """ a custom transform dependent on time axis """
+    """A custom transform dependent on time axis. """
     def __init__(self, coord_name: str, coord_vals: List[Any]):
         self.coord_name = coord_name
         self.coord_vals = coord_vals
@@ -172,6 +173,10 @@ class CustomTransforms:
                 return self.transform_standardize_dataset(
                     dataset
                 )
+            case "to_epsg3413":
+                return self.transform_to_epsg3413(
+                    dataset
+                )
             case _:
                 return dataset
 
@@ -244,12 +249,8 @@ class CustomTransforms:
         list_vars = self.list_vars if hasattr(self, "list_vars") else LIST_VARS_GLONET
 
         transform=transforms.Compose([
-            #RenameCoordsVarsTransform(coords_rename_dict=dict_rename),
-            #SelectVariablesTransform(list_vars),
             SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
-            #AssignCoordsTransform(time_coord_name, time_coord_vals, time_coord_attrs),
             InterpolationTransform(self.interp_ranges, self.weights_path),
-            # ResetTimeCoordsTransform(),
         ])
         transf_dataset = transform(dataset)
         return transf_dataset
@@ -264,4 +265,39 @@ class CustomTransforms:
             SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
         ])
         transf_dataset = transform(dataset)
+        return transf_dataset
+    
+    def transform_to_epsg3413(
+      self,
+      dataset: xr.Dataset,      
+    ) -> xr.Dataset:
+        """
+        Converts a dataset with lat/lon coordinates into the EPSG 3413 CRS.
+
+        Parameters
+        ----------
+        dataset : xr.Dataset
+            The dataset to transform
+
+        Returns
+        -------
+        xr.Dataset
+            A copy of the dataset with added `x` and `y` coordinates
+        """
+
+        # NOTE: Maybe this should be put into a class like the other transforms but
+        #       I don't really get what would be the point of that
+
+        # Create transformer from WGS84 to EPSG:3413
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:3413", always_xy=True)
+
+        # Extract lon and lat arrays
+        lons = dataset['lon'].values
+        lats = dataset['lat'].values
+
+        # Transform to EPSG:3413
+        x, y = transformer.transform(lons, lats)
+
+        # Add x and y as coordinates to the dataset
+        transf_dataset = dataset.assign_coords(x=("n_points", x), y=("n_points", y))
         return transf_dataset
