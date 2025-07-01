@@ -15,7 +15,7 @@ dynamic = [
 
 requires-python = ">=3.11.0,<3.14.0"
 dependencies = [
-    # "argopy>=1.1.0",
+    "argopy>=1.1.0",
     "cartopy>=0.24.1",
     "copernicusmarine>=2.0.0",
     "dask[distributed]>=2025.01.0",
@@ -73,7 +73,7 @@ oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "mai
 # oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench", develop = true }
 xrpatcher = { git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "main" }
 xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
-argopy = { git = "git+https://github.com/euroargodev/argopy.git", branch = "master" }
+# argopy = { git = "git+https://github.com/euroargodev/argopy.git", branch = "master" }
 
 [build-system]
 build-backend = "poetry.core.masonry.api"
