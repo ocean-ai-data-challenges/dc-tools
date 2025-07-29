@@ -146,6 +146,8 @@ class S3ConnectionConfig(BaseConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        protocol: str = "s3",
+
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
         if not key or not secret_key:
@@ -155,7 +157,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
                 "s3", key=key, secret=secret_key, client_kwargs=client_kwargs
             )
         super().__init__(
-            "s3", 
+            protocol, 
             init_type=init_type,
             local_root=local_root,
             bucket=bucket,
@@ -189,7 +191,6 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
         dask_cluster: Optional[object] = None,
     ):
         super().__init__(
-            "wasabi",
             init_type=init_type,
             local_root=local_root,
             bucket=bucket,
@@ -202,6 +203,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            protocol="wasabi",
         )
 
 class GlonetConnectionConfig(BaseConnectionConfig):

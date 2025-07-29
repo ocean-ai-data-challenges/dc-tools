@@ -145,7 +145,7 @@ class DC2Evaluation:
         datasets = {}
         for source in self.args.sources:
             source_name = source['dataset']
-            if source_name != "glorys" and source_name != "glonet": #  and source_name != "argo_profiles":  
+            if source_name != "glorys" and source_name != "glonet" and source_name != "jason3":  
                 logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
             kwargs = {}

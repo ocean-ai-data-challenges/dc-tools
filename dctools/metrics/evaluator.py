@@ -289,7 +289,18 @@ class Evaluator:
             log_memory("EVALUATOR before open_pred_func")
             with open_pred_func(pred_path) as pred_data:
                 # pred_data = open_pred_func(pred_path)
-                pred_data = pred_data.sel(time=valid_time, method="nearest", drop=False)
+                #pred_data = pred_data.sel(time=valid_time, method="nearest", drop=False)
+                pred_data_selected = pred_data.sel(time=valid_time, method="nearest")
+                
+                # Si la dimension time a été supprimée (cas scalaire), la restaurer
+                if "time" not in pred_data_selected.dims:
+                    pred_data = pred_data_selected.expand_dims("time")
+                    # Assigner la valeur valid_time à la coordonnée time
+                    pred_data = pred_data.assign_coords(time=[valid_time])
+                else:
+                    # La dimension time existe déjà, mais s'assurer qu'elle a la bonne valeur
+                    pred_data = pred_data_selected.assign_coords(time=[valid_time])
+                    
                 log_memory("EVALUATOR after open_pred_func")
                 if ref_source is not None:
                     if ref_is_observation:
