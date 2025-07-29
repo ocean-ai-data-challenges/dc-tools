@@ -7,12 +7,14 @@ from typing import Optional
 import fsspec
 from loguru import logger
 
+from dctools.utilities.file_utils import FileCacheManager
 from dctools.utilities.misc_utils import get_home_path
 
 class BaseConnectionConfig(ABC):
     def __init__(self, protocol: str, **kwargs):
         self.protocol = protocol
         self.params = SimpleNamespace(**kwargs)
+        setattr(self.params, "protocol", protocol)
         assert hasattr(self.params, "local_root"), "Attribute \"local_root\" is required"
         if not os.path.exists(self.params.local_root):
             logger.error(f"Invalid path : {self.params.local_root}")
@@ -25,11 +27,15 @@ class BaseConnectionConfig(ABC):
 
 class LocalConnectionConfig(BaseConnectionConfig):
     def __init__(
-        self, local_root: str,
+        self,
+        init_type: str,
+        local_root: str,
         max_samples: Optional[int] = None,
         file_pattern: Optional[str] = "**/*.nc",
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
+        file_cache: Optional[FileCacheManager] = None,
+        dask_cluster: Optional[object] = None,
     ):
         """Init.
         Args:
@@ -37,18 +43,23 @@ class LocalConnectionConfig(BaseConnectionConfig):
         """
         fs = fsspec.filesystem("file")
         super().__init__(
-            "file", local_root=local_root,
+            "local",
+            init_type=init_type,
+            local_root=local_root,
             fs=fs,
             max_samples=max_samples,
             file_pattern=file_pattern,
             groups=groups,
             keep_variables=keep_variables,
+            file_cache=file_cache,
+            dask_cluster=dask_cluster,
         )
 
 
 class CMEMSConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        init_type: str,
         local_root: str,
         dataset_id: str,
         cmems_credentials_path: Optional[str] = None,
@@ -56,6 +67,8 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
         file_pattern: Optional[str] = "**/*.nc",
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
+        file_cache: Optional[FileCacheManager] = None,
+        dask_cluster: Optional[object] = None,
     ):
         """Init.
 
@@ -64,50 +77,63 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
         """
         fs = fsspec.filesystem("file")
         if cmems_credentials_path:
-            cmems_credentials = cmems_credentials_path
+            cmems_credentials_path = cmems_credentials_path
         else:
             home_path = get_home_path()
             '''cmems_credentials = os.path.expanduser(
                 "~/.copernicusmarine/.copernicusmarine-credentials"
             )'''
-            cmems_credentials = os.path.join(
+            cmems_credentials_path = os.path.join(
                 home_path, ".copernicusmarine", ".copernicusmarine-credentials"
             )
         super().__init__(
-            "cmems", local_root=local_root, dataset_id=dataset_id,
-            cmems_credentials=cmems_credentials, fs=fs,
+            "cmems",
+            init_type=init_type,
+            local_root=local_root, dataset_id=dataset_id,
+            cmems_credentials_path=cmems_credentials_path, fs=fs,
             max_samples=max_samples,
             file_pattern=file_pattern,
             groups=groups,
             keep_variables=keep_variables,
+            file_cache=file_cache,
+            dask_cluster=dask_cluster,
         )
 
 
 class FTPConnectionConfig(BaseConnectionConfig):
     def __init__(
-        self, local_root: str, host: str,
-        folder: str,
+        self, 
+        init_type: str,
+        local_root: str, host: str,
+        ftp_folder: str,
         user: str = None, password: str = None,
         max_samples: Optional[int] = None,
         file_pattern: Optional[str] = "**/*.nc",
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
+        file_cache: Optional[FileCacheManager] = None,
+        dask_cluster: Optional[object] = None,
     ):
         fs = fsspec.filesystem("ftp", host=host, username=user, password=password)
         super().__init__(
-            "ftp", local_root=local_root, host=host,
+            "ftp",
+            init_type=init_type,
+            local_root=local_root, host=host,
             user=user, password=password, fs=fs,
-            ftp_folder=folder,
+            ftp_folder=ftp_folder,
             max_samples=max_samples,
             file_pattern=file_pattern,
             groups=groups,
             keep_variables=keep_variables,
+            file_cache=file_cache,
+            dask_cluster=dask_cluster,
         )
 
 
 class S3ConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        init_type: str,
         local_root: str,
         bucket: str,
         bucket_folder: str,
@@ -118,6 +144,8 @@ class S3ConnectionConfig(BaseConnectionConfig):
         file_pattern: Optional[str] = "**/*.nc",
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
+        file_cache: Optional[FileCacheManager] = None,
+        dask_cluster: Optional[object] = None,
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
         if not key or not secret_key:
@@ -127,7 +155,9 @@ class S3ConnectionConfig(BaseConnectionConfig):
                 "s3", key=key, secret=secret_key, client_kwargs=client_kwargs
             )
         super().__init__(
-            "s3", local_root=local_root,
+            "s3", 
+            init_type=init_type,
+            local_root=local_root,
             bucket=bucket,
             bucket_folder=bucket_folder,
             key=key, secret_key=secret_key,
@@ -136,12 +166,15 @@ class S3ConnectionConfig(BaseConnectionConfig):
             file_pattern=file_pattern,
             groups=groups,
             keep_variables=keep_variables,
+            file_cache=file_cache,
+            dask_cluster=dask_cluster,
         )
 
 
 class WasabiS3ConnectionConfig(S3ConnectionConfig):
     def __init__(
         self,
+        init_type: str,
         local_root: str,
         bucket: str,
         bucket_folder: str,
@@ -152,8 +185,12 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
         file_pattern: Optional[str] = "**/*.nc",
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
+        file_cache: Optional[FileCacheManager] = None,
+        dask_cluster: Optional[object] = None,
     ):
         super().__init__(
+            "wasabi",
+            init_type=init_type,
             local_root=local_root,
             bucket=bucket,
             bucket_folder=bucket_folder,
@@ -163,11 +200,14 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
             file_pattern=file_pattern,
             groups=groups,
             keep_variables=keep_variables,
+            file_cache=file_cache,
+            dask_cluster=dask_cluster,
         )
 
 class GlonetConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        init_type: str,
         local_root: str,
         endpoint_url: str,
         glonet_s3_bucket: str,
@@ -176,12 +216,16 @@ class GlonetConnectionConfig(BaseConnectionConfig):
         file_pattern: Optional[str] = "**/*.nc",
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
+        file_cache: Optional[FileCacheManager] = None,
+        dask_cluster: Optional[object] = None,
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
         fs = fsspec.filesystem('s3', anon=True, client_kwargs=client_kwargs)
 
         super().__init__(
-            "s3", local_root=local_root,
+            "glonet", 
+            init_type=init_type,
+            local_root=local_root,
             fs=fs,
             endpoint_url=endpoint_url,
             glonet_s3_bucket=glonet_s3_bucket,
@@ -190,25 +234,35 @@ class GlonetConnectionConfig(BaseConnectionConfig):
             file_pattern=file_pattern,
             groups=groups,
             keep_variables=keep_variables,
+            file_cache=file_cache,
+            dask_cluster=dask_cluster,
         )
 
 
 class ARGOConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        init_type: str,
         local_root: str,
         max_samples: Optional[int] = None,
         file_pattern: Optional[str] = "**/*.nc",
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
+        file_cache: Optional[FileCacheManager] = None,
+        dask_cluster: Optional[object] = None,
     ):
         fs = fsspec.filesystem("file")
 
         super().__init__(
-            "argo", local_root=local_root,
+            "argo",
+            init_type=init_type,
+            local_root=local_root,
             fs=fs,
             max_samples=max_samples,
             file_pattern=file_pattern,
             groups=groups,
             keep_variables=keep_variables,
+            file_cache=file_cache,
+            dask_cluster=dask_cluster,
         )
+

@@ -7,9 +7,13 @@ from typing import Any, List, Optional, Union
 
 from fsspec import FSMap
 from loguru import logger
+from memory_profiler import profile
 import netCDF4
+import numpy as np
 import traceback
 import xarray as xr
+
+# from dctools.utilities.misc_utils import to_float32
 
 
 def list_all_group_paths(nc_path: str) -> List[str]:
@@ -22,7 +26,6 @@ def list_all_group_paths(nc_path: str) -> List[str]:
         return paths
     with netCDF4.Dataset(nc_path, "r") as nc:
         return walk(nc)
-
 
 def open_and_concat_groups(
     source: Union[FSMap, str],
@@ -76,9 +79,11 @@ class FileLoader:
             xr.Dataset: Opened dataset.
         """
         try:
+            # std_chunks = {"lat": 256, "lon": 256, "time": 1}
+            open_kwargs = {"chunks": 'auto'}
             if path.endswith(".zarr"):
                 #logger.info(f"Opening Zarr dataset: {path}")
-                return xr.open_zarr(manager.params.fs.get_mapper(path))
+                return xr.open_zarr(manager.params.fs.get_mapper(path), chunks="auto")
             else:
                 group_paths = list_all_group_paths(path)
                 if group_paths:
@@ -89,19 +94,22 @@ class FileLoader:
                         chunks='auto',
                         engine=engine,
                     )
+                    # ds = to_float32(ds)   # TODO : REMOVE
                     return ds
                 else:
                     # logger.info(f"Opening NetCDF dataset: {path}")
                     # logger.debug(f"Using engine: {engine}")
                     # logger.debug(f"Using fs: {manager.params.fs}")
                     # return xr.open_dataset(manager.params.fs.open(path), engine=engine)
-                    return xr.open_dataset(path, engine=engine)
+                    ds = xr.open_dataset(path, engine=engine, **open_kwargs)
+                    # ds = to_float32(ds)
+                    return ds
                 # return collect_all_groups(manager.params.fs.open(path), engine="netcdf4")
         except Exception as exc:
             logger.error(f"Failed to open dataset {path}: {traceback.format_exc()}")
             raise
 
-    @staticmethod
+    '''@staticmethod
     def load_dataset(
         file_path: str,
         adaptive_chunking: bool = False,
@@ -164,4 +172,40 @@ class FileLoader:
             logger.error(
                 f"Error when loading file {file_path}: {traceback.print_exc()}"
             )
+            return None'''
+
+
+    @staticmethod
+    def load_dataset(
+        file_path: str,
+        adaptive_chunking: bool = False,
+        groups: Optional[list[str]] = None,
+        engine: Optional[str] = "netcdf4",
+        variables: Optional[list[str]] = None,
+    ) -> xr.Dataset | None:
+        try:
+            open_kwargs = {"chunks": 'auto'} # {"lat": 256, "lon": 256, "time": 1}}
+            if variables:
+                open_kwargs["drop_variables"] = [v for v in ds.variables if v not in variables]
+            if file_path.endswith(".nc"):
+                group_paths = list_all_group_paths(file_path)
+                if group_paths:
+                    # Ouvre chaque groupe séparément, puis concatène
+                    datasets = []
+                    for group_path in group_paths:
+                        ds = xr.open_dataset(file_path, group=group_path, **open_kwargs)
+                        datasets.append(ds)
+                    ds = xr.merge(datasets, compat="no_conflicts", join="outer")
+                else:
+                    ds = xr.open_dataset(file_path, **open_kwargs)
+                # ds = to_float32(ds)
+                return ds
+            elif file_path.endswith(".zarr"):
+                ds = xr.open_zarr(file_path, chunks='auto')  #{"lat": 256, "lon": 256, "time": 1})
+                #ds = to_float32(ds)
+                return ds
+            else:
+                raise ValueError(f"Unsupported file format {file_path}.")
+        except Exception as error:
+            logger.error(f"Error when loading file {file_path}: {error}")
             return None

@@ -1,10 +1,14 @@
 
 from abc import ABC, abstractmethod
+import traceback
 from typing import (
-    Any, Dict, List, Optional, Union
+    Any, Callable, Dict, List, Optional, Union
 )
+
 from argopy import ArgoIndex, DataFetcher, IndexFetcher
+from argparse import Namespace
 import copernicusmarine
+from dask.distributed import Client
 from dataclasses import dataclass, asdict
 import datetime
 import fsspec
@@ -29,22 +33,81 @@ from dctools.data.coordinates import (
 )
 # from dctools.dcio.saver import DataSaver
 from dctools.dcio.loader import FileLoader
-from dctools.utilities.file_utils import read_file_tolist
+from dctools.utilities.file_utils import read_file_tolist, FileCacheManager
 # from dctools.processing.cmems_data import extract_dates_from_filename
 from dctools.data.coordinates import (
     VARIABLES_ALIASES,
     GLONET_DEPTH_VALS,
 )
+from dctools.utilities.init_dask import setup_dask
 
+
+
+'''def extract_metadata(
+    path: str,
+    coord_system: Dict[str, Any],
+    variables: Dict[str, Any],
+    open_func: Callable,
+) -> CatalogEntry:
+    """
+    Extract metadata for a specific file, combining global metadata with file-specific information.
+
+    Args:
+        path (str): Path to the file.
+        global_metadata (Dict[str, Any]): Global metadata to apply to all files.
+
+    Returns:
+        CatalogEntry: Metadata for the specific file as a CatalogEntry.
+    """
+    try:
+        with open_func(path, "rb") as ds:
+            date_start = pd.to_datetime(
+                ds.time.min().values
+            ) if "time" in ds.coords else None
+            date_end = pd.to_datetime(
+                ds.time.max().values
+            ) if "time" in ds.coords else None
+
+        ds_region = get_dataset_geometry(ds, coord_system)
+
+        # Créer une instance de CatalogEntry
+        #date_start="1"
+        #date_end="2"
+        return CatalogEntry(
+            path=path,
+            date_start="1",  #date_start,
+            date_end="2",   #date_end,
+            variables=variables,
+            geometry=None, #ds_region,
+        )
+    except Exception as exc:
+        logger.error(
+            f"Failed to extract metadata for file {path}: {traceback.format_exc()}"
+        )
+        raise'''
+
+'''def extract_metadata_worker(manager_class, manager_params, path):
+    # Recrée une instance du manager côté worker
+    manager = manager_class(manager_params)
+    return manager.extract_metadata(path)'''
 
 class BaseConnectionManager(ABC):
-    def __init__(self, connect_config: BaseConnectionConfig):
-        self.params = connect_config.to_dict()
-        self._list_files = self.list_files()
+    def __init__(self, connect_config: BaseConnectionConfig | Namespace):
+        if isinstance(connect_config, BaseConnectionConfig):
+            self.params = connect_config.to_dict()
+        elif isinstance(connect_config, Namespace):
+            self.params = connect_config
+        else:
+            raise TypeError("Unknown type of connection config.")
+        init_type = self.params.init_type
+        if init_type != "from_json":
+            self._list_files = self.list_files()
         if not self.params.file_pattern:
             self.params.file_pattern = "**/*.nc"
         if not self.params.groups:
             self.params.groups = None
+        self.file_cache = self.params.file_cache
+        # self.dask_cluster = self.params.dask_cluster
 
     def open(
         self, path: str,
@@ -149,6 +212,8 @@ class BaseConnectionManager(ABC):
         with self.params.fs.open(remote_path, "rb") as remote_file:
             with open(local_path, "wb") as local_file:
                 local_file.write(remote_file.read())
+                if self.file_cache is not None:
+                    self.file_cache.add(local_path)
 
     def _get_local_path(self, remote_path: str) -> str:
         """
@@ -160,6 +225,9 @@ class BaseConnectionManager(ABC):
         Returns:
             str: Local path of the file.
         """
+        # CMEMS case (date)
+        if isinstance(remote_path, datetime.datetime):
+            return None
         filename = Path(remote_path).name
         return os.path.join(self.params.local_root, filename)
 
@@ -174,6 +242,22 @@ class BaseConnectionManager(ABC):
             raise FileNotFoundError("No files found to extract global metadata.")
 
         return self._global_metadata if hasattr(self, "_global_metadata") else self.extract_global_metadata()
+
+
+    def set_global_metadata(self, global_metadata: Dict[str, Any]) -> None:
+        """
+        Définit les métadonnées globales pour le gestionnaire de connexion,
+        en ne conservant que les clés listées dans la variable de classe global_metadata.
+
+        Args:
+            global_metadata (Dict[str, Any]): Dictionnaire de métadonnées globales.
+        """
+        from dctools.data.datasets.dc_catalog import GLOBAL_METADATA
+
+        # Ne garder que les clés pertinentes
+        filtered_metadata = {k: v for k, v in global_metadata.items() if k in GLOBAL_METADATA}
+        self._global_metadata = filtered_metadata
+
 
     def extract_global_metadata(self) -> Dict[str, Any]:
         """
@@ -229,11 +313,12 @@ class BaseConnectionManager(ABC):
                 "resolution": dict_resolution,
                 "coord_system": coord_sys,
                 "keep_variables": self.params.keep_variables,
+                # "is_observation": coord_sys.is_observation_dataset(),
                 #"dimensions_rename_dict": dimensions_rename_dict,
             }
         return global_metadata
 
-    def extract_metadata(self, path: str, global_metadata: Dict[str, Any]) -> CatalogEntry:
+    def extract_metadata(self, path: str):  #, global_metadata: Dict[str, Any]) -> CatalogEntry:
         """
         Extract metadata for a specific file, combining global metadata with file-specific information.
 
@@ -253,19 +338,19 @@ class BaseConnectionManager(ABC):
                     ds.time.max().values
                 ) if "time" in ds.coords else None
 
-                ds_region = get_dataset_geometry(ds, global_metadata.get('coord_system'))
+                ds_region = get_dataset_geometry(ds, self._global_metadata.get('coord_system'))
 
                 # Créer une instance de CatalogEntry
                 return CatalogEntry(
                     path=path,
                     date_start=date_start,
                     date_end=date_end,
-                    variables=global_metadata.get("variables"),
+                    variables=self._global_metadata.get("variables"),
                     geometry=ds_region,
                 )
         except Exception as exc:
             logger.error(
-                f"Failed to extract metadata for file {path}: {repr(exc)}"
+                f"Failed to extract metadata for file {path}: {traceback.format_exc()}"
             )
             raise
 
@@ -322,7 +407,7 @@ class BaseConnectionManager(ABC):
                 res["time"] = f"{int(np.median(diffs))}s"
         return res
 
-    def list_files_with_metadata(self) -> List[CatalogEntry]:
+    '''def list_files_with_metadata(self) -> List[CatalogEntry]:
         """
         List all files with their metadata by combining global metadata and file-specific information.
 
@@ -352,7 +437,63 @@ class BaseConnectionManager(ABC):
             logger.error("No valid metadata entries were generated.")
             raise ValueError("No valid metadata entries were generated.")
 
+        return metadata_list'''
+
+
+    def list_files_with_metadata(self) -> List[CatalogEntry]:
+        """
+        List all files with their metadata by combining global metadata and file-specific information.
+
+        Returns:
+            List[CatalogEntry]: List of metadata entries for each file.
+        """
+        # Récupérer les métadonnées globales
+        global_metadata = self.extract_global_metadata()
+        self._global_metadata = global_metadata
+
+        metadata_list = []
+        limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
+        # self._list_files = [s for s in self._list_files if s.count("_2024") >= 2]    # TODO : REMOVE
+
+        file_list = self._list_files[:limit]
+
+        #manager_class = self.__class__
+        #manager_params = self.params
+
+        #must_close_dask = False
+        #if self.dask_cluster is None:
+        #    self.dask_cluster = setup_dask()
+        #    must_close_dask = True
+        coord_system = self._global_metadata.get('coord_system')
+        variables = self._global_metadata.get("variables")
+
+        '''dask_client = Client(self.dask_cluster)
+        # Utilise le client Dask courant pour la soumission des tâches en parallèle
+        futures = [
+            # dask_client.submit(extract_and_cache, path, global_metadata)  #, self.file_cache)
+            dask_client.submit(
+                extract_metadata,
+                path, coord_system, variables,
+                self.open,
+            )
+            for path in file_list
+        ]
+        results = dask_client.gather(futures)
+        metadata_list = [res for res in results if res is not None]'''
+
+        metadata_list = [self.extract_metadata(
+            path
+        ) for path in file_list]
+
+        if not metadata_list:
+            logger.error("No valid metadata entries were generated.")
+            raise ValueError("No valid metadata entries were generated.")
+
+        #if must_close_dask:
+        #    client.close()
+
         return metadata_list
+
 
     @classmethod
     @abstractmethod
@@ -381,7 +522,7 @@ class LocalConnectionManager(BaseConnectionManager):
 
     @classmethod
     def supports(cls, path: str) -> bool:
-        return path.startswith("/") or path.startswith("file://")
+        return str(path).startswith("/") or str(path).startswith("file://")
 
 
 class CMEMSManager(BaseConnectionManager):
@@ -405,7 +546,7 @@ class CMEMSManager(BaseConnectionManager):
         Return:
             (dict): CMEMS credentials
         """
-        with open(self.params.cmems_credentials, "rb") as f:
+        with open(self.params.cmems_credentials_path, "rb") as f:
             lines = f.readlines()
         credentials = {}
         for line in lines:
@@ -457,8 +598,8 @@ class CMEMSManager(BaseConnectionManager):
         """Login to Copernicus Marine."""
         logger.info("Logging to Copernicus Marine.")
         try:
-            if not (Path(self.params.cmems_credentials).is_file()):
-                logger.warning(f"Credentials file not found at {self.params.cmems_credentials}.")
+            if not (Path(self.params.cmems_credentials_path).is_file()):
+                logger.warning(f"Credentials file not found at {self.params.cmems_credentials_path}.")
                 copernicusmarine.login()
         except Exception as exc:
             logger.error(f"login to CMEMS failed: {repr(exc)}")
@@ -477,23 +618,40 @@ class CMEMSManager(BaseConnectionManager):
         logger.info("Listing files in Copernicus Marine directory.")
         tmp_filepath = os.path.join(self.params.local_root, "files.txt")
         try:
-            copernicusmarine.get(
+            '''copernicusmarine.get(
                 dataset_id=self.params.dataset_id, create_file_list=tmp_filepath
             )
-            self._files = read_file_tolist(tmp_filepath)
-            return self._files
+            self._files = read_file_tolist(tmp_filepath)'''
+
+            # list_dates = self.list_available_dates(self.params.dataset_id)
+
+            #return self._files
+
+            start_date = datetime.datetime(2024, 1, 1)
+            end_date = datetime.datetime(2025, 1, 3)
+            list_dates = self.list_all_days(
+                start_date,
+                end_date,
+            )
+            valid_dates = []
+            for date in list_dates:
+                print(date)
+                ds = self.open_remote(date, mode="rb")
+                if ds is not None:
+                    valid_dates.append(date)
+            return valid_dates
         except Exception as exc:
             logger.error(f"Failed to list files from CMEMS: {repr(exc)}")
             return []
 
-    def get_product_metadata(self) -> Dict[str, Any]:
+    '''def get_product_metadata(self) -> Dict[str, Any]:
         """
         Fetch product-level metadata from the CMEMS API.
 
         Returns:
             Dict[str, Any]: A dictionary containing metadata for the product.
         """
-        product_metadata = copernicusmarine.describe(self.params["dataset_id"])
+        product_metadata = copernicusmarine.describe(self.params.dataset_id)
 
         return {
             "variables": product_metadata.get("variables", []),
@@ -503,10 +661,15 @@ class CMEMSManager(BaseConnectionManager):
             "lon_max": product_metadata.get("geospatial_lon_max"),
             "lat_min": product_metadata.get("geospatial_lat_min"),
             "lat_max": product_metadata.get("geospatial_lat_max"),
-        }
+        }'''
 
+    '''def get_day_bounds(self, dt: datetime) -> tuple[datetime, datetime]:
+        from datetime import time
+        start_of_day = datetime.datetime.combine(dt.date(), time.min)  # 00:00:00
+        end_of_day = datetime.datetime.combine(dt.date(), time.max)    # 23:59:59.999999
+        return start_of_day, end_of_day'''
 
-    def open_remote(self, path: str, mode: str = "rb") -> Optional[xr.Dataset]:
+    def open_remote(self, dt: str, mode: str = "rb") -> Optional[xr.Dataset]:
         """
         Open a file remotely from CMEMS using S3 URLs.
 
@@ -517,9 +680,33 @@ class CMEMSManager(BaseConnectionManager):
         Returns:
             Optional[xr.Dataset]: Opened dataset, or None if remote opening fails.
         """
-        return None
+        try:
+            #start_datetime, end_datetime = self.get_day_bounds(datetime.datetime(date))
+            # print(type(dt))
+            if not isinstance(dt, datetime.datetime):
+                dt = datetime.datetime.strptime(dt, "%Y-%m-%dT%H:%M:%S")
+            from datetime import time
+            start_datetime = datetime.datetime.combine(dt.date(), time.min)  # 00:00:00
+            end_datetime = datetime.datetime.combine(dt.date(), time.max)    # 23:59:59.999999
+            ds = copernicusmarine.open_dataset(
+                dataset_id=self.params.dataset_id,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                vertical_axis='depth',
+                #minimum_longitude=-10,
+                #maximum_longitude=10,
+                #minimum_latitude=45,
+                #maximum_latitude=55,
+                # variables=["uo","vo"]  # optionnel
+            )
+            return ds
+        except Exception as e:
+            traceback.print_exc()
+            return None
 
-    def download_file(self, path: str, local_path: str):
+        # return None
+
+    '''def download_file(self, remote_path: str, local_path: str):
         """
         Download a specific file from CMEMS.
 
@@ -527,21 +714,23 @@ class CMEMSManager(BaseConnectionManager):
             path (str): Path to the file to download.
         """
         # Extraire la date à partir du nom du fichier
-        filename = Path(path).name
-        name_filter = filename
+        filename = Path(local_path).name
         try:
             # Télécharger le fichier via l'API CMEMS
             logger.info(f"Downloading file {filename} from CMEMS...")
             copernicusmarine.get(
                 dataset_id=self.params.dataset_id,
-                filter=name_filter,
+                filter=filename,
                 output_directory=self.params.local_root,
                 no_directories=True,
                 credentials_file=self.params.cmems_credentials,
             )
+            if  self.file_cache is not None:
+                self.file_cache.add(filename)
         except Exception as exc:
             logger.error(f"download from CMEMS failed: {repr(exc)}")
-        return None
+        return None'''
+
 
     '''def get_cmems_filter_from_date(self, date: str) -> str:
         """
@@ -569,8 +758,30 @@ class CMEMSManager(BaseConnectionManager):
         """
         # CMEMS ne supporte pas un protocole spécifique comme cmems://
         # On peut utiliser un identifiant spécifique pour les chemins CMEMS
-        return "cmems" in path.lower()
+        # return "cmems" in path.lower()
+        return isinstance(path, datetime.datetime) #"cmems" in path.lower()
 
+    from datetime import datetime, timedelta
+
+    def list_all_days(self, start_date: datetime, end_date: datetime) -> list[datetime]:
+        """
+        Return a list of datetime.datetime objects for each day between start_date and end_date (inclusive).
+
+        Parameters:
+            start_date (datetime): The start of the range.
+            end_date (datetime): The end of the range.
+
+        Returns:
+            List[datetime]: List of dates at 00:00:00 for each day in the range.
+        """
+        if start_date > end_date:
+            raise ValueError("start_date must be before or equal to end_date.")
+
+        start = datetime.datetime.combine(start_date.date(), datetime.datetime.min.time())
+        end = datetime.datetime.combine(end_date.date(), datetime.datetime.min.time())
+
+        n_days = (end - start).days + 1
+        return [start + datetime.timedelta(days=i) for i in range(n_days)]
 
 class FTPManager(BaseConnectionManager):
     @classmethod
@@ -686,6 +897,12 @@ class S3Manager(BaseConnectionManager):
 
 
 class S3WasabiManager(S3Manager):
+
+    @classmethod
+    def supports(cls, path: str) -> bool:
+        extension = Path(path).suffix
+        return path.startswith("s3://") and extension == ".zarr"
+
     def open_remote(
         self,
         path: str, mode: str = "rb",
@@ -788,7 +1005,6 @@ class ArgoManager(BaseConnectionManager):
 
     def spatial_filter(catalog_gdf: gpd.GeoDataFrame, region_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         return gpd.sjoin(catalog_gdf, region_gdf, how="inner", predicate="intersects")
-
 
     def group_profiles_daily(self, df: pd.DataFrame, spatial_res: float = 5.0):
         df["grid_lat"] = (df["lat"] // spatial_res) * spatial_res
@@ -916,6 +1132,7 @@ class ArgoManager(BaseConnectionManager):
                     "resolution": resolution,
                     "coord_system": coord_sys,
                     "keep_variables": self.params.keep_variables,
+                    # "is_observation": coord_sys.is_observation_dataset(),
                 }
                 self.global_metadata = global_metadata
                 first_elem = False
@@ -929,6 +1146,19 @@ class ArgoManager(BaseConnectionManager):
                 ds.time.max().values
             ) if "time" in ds.coords else None
 
+
+            def adjust_full_day_if_needed(date_start: pd.Timestamp, date_end: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
+                """
+                Si date_start == date_end et date_start est à minuit, ajuste date_end pour couvrir toute la journée.
+                """
+                if pd.isnull(date_start) or pd.isnull(date_end):
+                    return date_start, date_end
+                if date_start == date_end and date_start.hour == 0 and date_start.minute == 0 and date_start.second == 0:
+                    # Ajuste date_end à la fin de la journée
+                    date_end = date_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                return date_start, date_end
+
+            date_start, date_end = adjust_full_day_if_needed(date_start, date_end)
             entry = CatalogEntry(
                 path=None,  #f"argo://{df['file']}",
                 date_start=date_start,

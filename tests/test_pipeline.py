@@ -203,7 +203,7 @@ def test_evaluation(
         ]
         metrics_kwargs = {}
         metrics_kwargs[alias] = {"add_noise": False,
-            "eval_variables": dataloaders[alias].eval_variables,
+            "eval_variables": setup_dataset_manager.datasets[alias].eval_variables,
         }
         metrics[alias] = [
             MetricComputer(metric_name=metric, **metrics_kwargs[alias])

@@ -15,7 +15,7 @@ dynamic = [
 
 requires-python = ">=3.11.0,<3.14.0"
 dependencies = [
-    # "argopy>=1.1.0",
+    "argopy>=1.1.0",
     "cartopy>=0.24.1",
     "copernicusmarine>=2.0.0",
     "dask[distributed]>=2025.01.0",
@@ -25,11 +25,13 @@ dependencies = [
     "h5py>=3.13.0",
     "json-handler>=2.0.1",
     "loguru>=0.7.3",
+    "memory-profiler>=0.61.0",
     "netcdf4 (>=1.7.2,<2.0.0)",
     "nbformat>=5.10.4",
     "numpy (>=1.25,<2.0.0)",
     "python-json-logger>=3.3.0",
     "pyarrow",
+    "pyinterp>=2025.3.0",
     "rich>=13.9.4",
     "scipy==1.13.1",
     "s3fs>=2024.10.0",
@@ -41,6 +43,7 @@ dependencies = [
     "xarray>=2024",
     "xbatcher>=0.4.0",
     #"xesmf (>=0.8.8,<0.9.0)",
+    "xskillscore>=0.0.27",
     "zarr (>=2.14.2,<3.0.0)",
     #"zarr==2.18.5",
 ]
@@ -69,11 +72,11 @@ patool = "^3.1.3"
 optional = false
 
 [tool.poetry.group.custom.dependencies]
-oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
-# oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench", develop = true }
+# oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
+oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench", develop = true }
 xrpatcher = { git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "main" }
 xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
-argopy = { git = "git+https://github.com/euroargodev/argopy.git", branch = "master" }
+# argopy = { git = "git+https://github.com/euroargodev/argopy.git", branch = "master" }
 
 [build-system]
 build-backend = "poetry.core.masonry.api"

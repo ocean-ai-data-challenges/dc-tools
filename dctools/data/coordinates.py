@@ -8,8 +8,9 @@ from loguru import logger
 import numpy as np
 from oceanbench.core.lagrangian_trajectory import ZoneCoordinates
 from oceanbench.core.rmsd import rmsd, Variable
+import pandas as pd
 from shapely.geometry import Polygon, Point
-from shapely import box, MultiPoint
+from shapely import box, MultiPoint, simplify
 import xarray as xr
 
 
@@ -124,19 +125,40 @@ RANGES_GLONET = {
 
 class CoordinateSystem:
     def __init__(
-        self, coord_type: str,
+        self,
+        coord_type: str,      # "geographic", "polar", etc.
+        coord_level: str,     # "grid", "point", "sparse", etc.
         coordinates: Dict[str, str],
         crs: str,
+        # is_observation: bool
     ):
         self.coord_type = coord_type
+        self.coord_level = coord_level
         self.coordinates = coordinates
         self.crs = crs
+        # self.is_observation = is_observation
+
+    def to_dict(self) -> dict:
+        """
+        Convertit l'instance CoordinateSystem en dictionnaire.
+        """
+        return {
+            "coord_type": self.coord_type,
+            "coord_level": self.coord_level,
+            "coordinates": self.coordinates,
+            "crs": self.crs,
+            # "is_observation": self.is_observation,
+        }
 
     def is_polar(self) -> bool:
         return "polar" in self.coord_type
 
     def is_geographic(self) -> bool:
         return "geographic" in self.coord_type
+
+    def is_observation_dataset(self) -> bool:
+        """Check if this coordinate system is for an ungridded observation dataset."""
+        return self.coord_level != "L4"
 
     def toJSON(self):
         return json.dumps(
@@ -146,49 +168,210 @@ class CoordinateSystem:
             indent=4
         )
 
-    @staticmethod
-    def get_coordinate_system( ds: xr.Dataset) -> dict:
-        """Detect coordinate system type and standardized spatial/temporal dimensions."""
 
-        # Inversion du dictionnaire : nom -> standard_name
-        std_keys = COORD_ALIASES.keys()   # ["lat", "lon", "x", "y", "depth", "quadrant", "time"]
+    @staticmethod
+    def detect_data_level(data: object, names_dict: dict) -> str:
+        """
+        Infers the observation data level (L1, L2, L3, L4) from structure and content.
+
+        Parameters
+        ----------
+        data : object
+            Input data (DataFrame, GeoDataFrame, or xarray.Dataset)
+
+        Returns
+        -------
+        str
+            One of: "L1", "L2", "L3", "L4", or "unknown"
+        """
+        lat_name = names_dict["lat"]
+        lon_name = names_dict["lon"]
+        time_name = names_dict["time"]
+        # --- xarray.Dataset ---
+        if isinstance(data, xr.Dataset):
+            dims = set(data.dims)
+            vars_ = set(data.variables)
+            coords = set(data.coords)
+            all_names = dims | vars_ | coords
+
+            # L3/L4: Gridded data (lat/lon as dims)
+            if {lat_name, lon_name} <= dims:
+                if "time" in dims:
+                    return "L4"
+                else:
+                    return "L3"
+
+            # L2: Point observations (lat/lon/time as variables, not dims)
+            if {lat_name, lon_name, time_name} <= all_names:
+                lat = data[lat_name]
+                lon = data[lon_name]
+                time = data[time_name]
+                # 1D arrays of same length, not dims
+                if (
+                    lat.ndim == lon.ndim == time.ndim == 1
+                    and not {lat_name, lon_name, time_name} <= dims
+                    and len(lat) == len(lon) == len(time)
+                ):
+                    # Optionally check for quality_flag
+                    if "quality_flag" in all_names:
+                        return "L2"
+                    else:
+                        return "L2"
+            # L1: No clear lat/lon/time, or raw structure
+            if not ({lat_name, lon_name} & all_names):
+                return "L1"
+
+        # --- DataFrame / GeoDataFrame ---
+        if isinstance(data, (pd.DataFrame, gpd.GeoDataFrame)):
+            cols = set(data.columns)
+            # L2: lat/lon/time as columns
+            if {lat_name, lon_name, time_name} <= cols:
+                if "quality_flag" in cols:
+                    return "L2"
+                else:
+                    return "L2"
+            # L1: raw columns, no lat/lon
+            if not ({lat_name, "lon"} & cols):
+                return "L1"
+            # L3/L4: gridded DataFrame (rare, but possible)
+            if {lat_name, lon_name} <= cols and "time" not in cols:
+                return "L4"
+            if {lat_name, lon_name, time_name} <= cols:
+                return "L3"
+
+        # --- Fallback: try to detect from attributes or structure ---
+        # L1: If no spatial/temporal info at all
+        if hasattr(data, "attrs"):
+            attrs = getattr(data, "attrs", {})
+            if "level" in attrs:
+                return attrs["level"]
+
+        return "unknown"
+
+
+    @staticmethod
+    def get_coordinate_system(ds: xr.Dataset) -> "CoordinateSystem":
+        std_keys = COORD_ALIASES.keys()
         alias_map = {}
         for std_name, aliases in COORD_ALIASES.items():
             for a in aliases:
                 alias_map[a.lower()] = std_name
-        coords_in_ds = list(ds.coords) + list(ds.dims)  # on considère aussi les dimensions
-        coords_lower = {c.lower(): c for c in coords_in_ds}  # mapping original
+
+        coords_in_ds = list(ds.coords) + list(ds.dims)
+        coords_lower = {c.lower(): c for c in coords_in_ds}
         standardized = {}
         for name_lc, original in coords_lower.items():
             std_name = alias_map.get(name_lc)
             if std_name:
                 standardized[std_name] = original
 
-        # Détection du type de système
-        #spatial_keys = {"latitude", "longitude", "x", "y"}
-        has_latlon = {"lat", "lon"} <= standardized.keys()
-        has_xy = {"x", "y"} <= standardized.keys()
+        # Recherche des variables lat/lon si elles ne sont pas des dimensions/coords
+        var_names_lower = {v.lower(): v for v in ds.variables}
+        for key in ["lat", "lon", "depth", "time"]:
+            if key not in standardized:
+                for alias in COORD_ALIASES[key]:
+                    if alias.lower() in var_names_lower:
+                        standardized[key] = var_names_lower[alias.lower()]
 
-        epsg = None
-        if has_latlon:
+        dims = set(ds.dims)
+        has_lat_dim = "lat" in standardized and standardized["lat"] in dims
+        has_lon_dim = "lon" in standardized and standardized["lon"] in dims
+        has_time_dim = "time" in standardized and standardized["time"] in dims
+        has_depth_dim = "depth" in standardized and standardized["depth"] in dims
+
+        has_lat = "lat" in standardized
+        has_lon = "lon" in standardized
+        has_x = "x" in standardized
+        has_y = "y" in standardized
+
+        # Détection du type de coordonnées
+        if has_lat and has_lon:
             coord_type = "geographic"
-            # epsg = "EPSG:4326"  # CRS standard géographique
-        elif has_xy:
+        elif has_x and has_y:
             coord_type = "polar"
-            # epsg = "EPSG:3413" # CRS arctique par défaut
         else:
-            raise ValueError(
-                "Unable to detect coordinate system from dimensions and coordinates."
-            )
+            coord_type = "unknown"
 
-        crs = ds.attrs.get("crs")
-        # logger.debug(f"Detected coordinate system: {coord_type}, CRS: {crs}")
+        # Détection du niveau de structuration
+        coord_level = CoordinateSystem.detect_data_level(ds, standardized)
+        '''is_observation = False
+
+        # 1. Grille régulière (2D/3D)
+        if has_lat_dim and has_lon_dim and has_time_dim:
+            # Test de densité pour détecter "sparse"
+            main_var = list(ds.data_vars)[0] if ds.data_vars else None
+            if main_var:
+                arr = ds[main_var].values
+                total_points = arr.size
+                valid_points = np.isfinite(arr).sum()
+                density = valid_points / total_points if total_points > 0 else 0
+                # Seuil empirique : <80% de points valides = sparse
+                if density < 0.8:
+                    coord_level = "sparse"
+                else:
+                    coord_level = "grid_3d" if has_depth_dim else "grid_2d"
+            else:
+                coord_level = "grid_3d" if has_depth_dim else "grid_2d"
+            is_observation = False
+
+        # 2. Points (observations)
+        elif has_time_dim and not (has_lat_dim or has_lon_dim):
+            lat_var = standardized.get("lat")
+            lon_var = standardized.get("lon")
+            if lat_var and lon_var:
+                lat_shape = ds[lat_var].shape
+                lon_shape = ds[lon_var].shape
+                time_shape = ds[standardized["time"]].shape
+                if lat_shape == lon_shape == time_shape:
+                    if "depth" in standardized and ds[standardized["depth"]].shape == time_shape:
+                        coord_level = "point_3d"
+                    else:
+                        coord_level = "point_2d"
+                    is_observation = True
+                else:
+                    coord_level = "unknown"
+                    is_observation = False
+            else:
+                coord_level = "unknown"
+                is_observation = False
+
+        # 3. Sparse (grille irrégulière ou incomplète)
+        elif has_lat_dim and has_lon_dim and not has_time_dim:
+            # Même si pas de temps, grille spatiale creuse
+            main_var = list(ds.data_vars)[0] if ds.data_vars else None
+            if main_var:
+                arr = ds[main_var].values
+                total_points = arr.size
+                valid_points = np.isfinite(arr).sum()
+                density = valid_points / total_points if total_points > 0 else 0
+                if density < 0.8:
+                    coord_level = "sparse"
+                else:
+                    coord_level = "grid_2d"
+            else:
+                coord_level = "sparse"
+            is_observation = False
+
+        # 4. Cas inconnu
+        else:
+            coord_level = "unknown"
+            is_observation = False'''
+
+        # N'inclure depth dans coordinates que si pertinent
+        coords_out = {}
+        for key in std_keys:
+            if key in standardized:
+                if key == "depth" and not (has_depth_dim or (coord_level in ["grid_3d", "point_3d"])):
+                    continue
+                coords_out[key] = standardized[key]
+
+        crs = ds.attrs.get("crs", None)
         return CoordinateSystem(
             coord_type=coord_type,
-            coordinates={
-                key: standardized.get(key) for key in std_keys if key in standardized
-            },
+            coord_level=coord_level,
+            coordinates=coords_out,
             crs=crs,
+            # is_observation=is_observation,
         )
 
     @staticmethod
@@ -274,41 +457,32 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
             raise ValueError(f"unique_points mal formé: shape={unique_points.shape}, type={type(unique_points)}")
 
         # Vérifier qu'il y a au moins 3 points pour un polygone
-        if unique_points.shape[0] < 3:
-            raise ValueError("Not enough unique points to compute a convex hull.")
+        #if unique_points.shape[0] < 3:
+        #    raise ValueError("Not enough unique points to compute a convex hull.")
 
         # Détection grille ou nuage de points
-        if is_rectangular_grid(unique_points):
-            #logger.debug("Detected rectangular grid shape.")
-            minx, miny = unique_points.min(axis=0)
-            maxx, maxy = unique_points.max(axis=0)
-            geometry = Polygon([
-                (minx, miny),
-                (minx, maxy),
-                (maxx, maxy),
-                (maxx, miny),
-                (minx, miny),
-            ])
-        else:
-            points = []
-            for x, y in unique_points:
-                try:
-                    pt = Point(float(x), float(y))
-                    if not pt.is_empty and pt.is_valid:
-                        points.append(pt)
+        points = []
+        for x, y in unique_points:
+            try:
+                pt = Point(float(x), float(y))
+                if not pt.is_empty and pt.is_valid:
+                    points.append(pt)
 
-                except Exception as exc:
-                    logger.warning(f"Invalid point ({x}, {y}): {exc}")
+            except Exception as exc:
+                logger.warning(f"Invalid point ({x}, {y}): {exc}")
 
-            if len(points) < 3:
-                raise ValueError("Not enough valid points to compute a convex hull.")
+        #if len(points) < 3:
+        #    raise ValueError("Not enough valid points to compute a convex hull.")
 
-            multipoint = MultiPoint(points)
-            geometry = multipoint.convex_hull
-
-        if not geometry.is_valid:
-            raise ValueError("Generated geometry is invalid.")
-        return geometry
+        # multipoint = MultiPoint(points)
+        # geometry = multipoint.convex_hull
+        # geometry = [Point(xy) for xy in zip(lon, lat)]
+        # geometry = gpd.GeoSeries(points)
+        # if not geometry.is_valid:
+        #    raise ValueError("Generated geometry is invalid.")
+        boundary = MultiPoint(points).convex_hull
+        boundary = simplify(boundary, tolerance=0.1, preserve_topology=False)
+        return boundary  #MultiPoint(points)
 
     except Exception as exc:
         logger.error(f"Error in geometry extraction: {repr(exc)}")
@@ -325,3 +499,50 @@ def is_rectangular_grid(points: np.ndarray, tol: float = 1e-5) -> bool:
     corners = np.array([[minx, miny], [minx, maxy], [maxx, miny], [maxx, maxy]])
     match = sum(np.any(np.all(np.abs(points - c) < tol, axis=1)) for c in corners)
     return match == 4
+
+
+import xarray as xr
+
+def is_ungridded_observation_dataset(ds: xr.Dataset) -> bool:
+    """
+    Heuristically detect if a xarray.Dataset contains ungridded (point/profile) observations.
+
+    Criteria:
+    - Presence of 'lat' and 'lon' as 1D variables or coordinates.
+    - Absence of 2D meshgrid for lat/lon.
+    - Number of points much less than a typical grid (e.g. < 10_000).
+    - Optionally, presence of 'profile', 'station', or 'obs' dimension.
+    - Optionally, attribute 'is_observation' set to True.
+
+    Returns
+    -------
+    bool
+        True if likely ungridded observations, False otherwise.
+    """
+
+    # 2. Check for 1D lat/lon coordinates
+    lat = ds.coords.get("lat", None)
+    lon = ds.coords.get("lon", None)
+    if lat is not None and lon is not None:
+        # If both are 1D and have the same length, likely point data
+        if lat.ndim == 1 and lon.ndim == 1 and lat.shape == lon.shape:
+            # If number of points is small, likely obs
+            if lat.size < 10000:
+                return True
+
+    # 3. Check for typical obs dimensions
+    for dim in ds.dims:
+        if dim.lower() in ("profile", "station", "obs", "trajectory"):
+            return True
+
+    # 4. Check for 2D lat/lon (meshgrid) => gridded, so return False
+    if lat is not None and lon is not None:
+        if lat.ndim == 2 or lon.ndim == 2:
+            return False
+
+    # 5. Fallback: if only 1 spatial dimension, likely obs
+    spatial_dims = [d for d in ds.dims if d.lower() in ("lat", "lon", "latitude", "longitude")]
+    if len(spatial_dims) == 1:
+        return True
+
+    return False

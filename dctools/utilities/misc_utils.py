@@ -13,7 +13,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from shapely.geometry import mapping, Polygon
+from shapely.geometry import mapping, Polygon, base as shapely_base
 import xarray as xr
 
 
@@ -105,9 +105,56 @@ def make_serializable(obj):
         return obj.isoformat()
     if isinstance(obj, pd.DataFrame) or isinstance(obj, gpd.GeoDataFrame):
         return obj.to_json()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
     return obj
 
+def make_timestamps_serializable(gdf: pd.DataFrame) -> pd.DataFrame:
+    gdf = gdf.copy()
+    for col in gdf.columns:
+        if pd.api.types.is_datetime64_any_dtype(gdf[col]):
+            gdf[col] = gdf[col].apply(lambda x: x.isoformat() if pd.notnull(x) else None)
+    return gdf
 
+def make_fully_serializable(obj):
+    # Types de base
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    # Numpy types
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    # Pandas Timestamp/Timedelta
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    if isinstance(obj, pd.Timedelta):
+        return str(obj)
+    # Pandas DataFrame/Series
+    if isinstance(obj, pd.DataFrame):
+        return obj.to_dict(orient="records")
+    if isinstance(obj, pd.Series):
+        return obj.tolist()
+    # xarray Dataset/DataArray
+    if isinstance(obj, (xr.Dataset, xr.DataArray)):
+        return obj.to_dict()
+    # Shapely geometry
+    if isinstance(obj, shapely_base.BaseGeometry):
+        return mapping(obj)
+    # Dataclasses
+    if hasattr(obj, "__dataclass_fields__"):
+        return {k: make_fully_serializable(v) for k, v in obj.__dict__.items()}
+    # Classes avec __dict__
+    if hasattr(obj, "__dict__"):
+        return {k: make_fully_serializable(v) for k, v in obj.__dict__.items() if not k.startswith("_")}
+    # Mapping (dict-like)
+    if isinstance(obj, dict):
+        return {make_fully_serializable(k): make_fully_serializable(v) for k, v in obj.items()}
+    # Iterable (list, tuple, set)
+    if isinstance(obj, (list, tuple, set)):
+        return [make_fully_serializable(v) for v in obj]
+    # Fallback: string representation
+    return str(obj)
 
 def add_noise_with_snr(signal: np.ndarray, snr_db: float, seed: int = None) -> np.ndarray:
     """
@@ -162,3 +209,24 @@ catalog_entry = CatalogEntry(
 )
 
 visualize_netcdf_with_geometry(catalog_entry)'''
+
+
+def nan_to_none(obj):
+    if isinstance(obj, float) and np.isnan(obj):
+        return None
+    if isinstance(obj, pd.Interval):
+        # Convertit en string ou tuple
+        return str(obj)  # ou (obj.left, obj.right)
+    if isinstance(obj, dict):
+        return {k: nan_to_none(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [nan_to_none(v) for v in obj]
+    return obj
+
+
+def to_float32(ds: xr.Dataset) -> xr.Dataset:
+    """Convertit toutes les variables numériques en float32."""
+    for var in ds.data_vars:
+        if np.issubdtype(ds[var].dtype, np.floating):
+            ds[var] = ds[var].astype("float32")
+    return ds

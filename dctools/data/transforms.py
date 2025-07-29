@@ -1,16 +1,19 @@
 
-
+from copy import deepcopy
+import profile
+import traceback
 from typing import Any, Dict, List, Optional
 
 import ast
 # import kornia
 from loguru import logger
+from memory_profiler import profile
 import numpy as np
+import pandas as pd
 from torchvision import transforms
 import xarray as xr
 
 from dctools.data.coordinates import (
-    CoordinateSystem,
     LIST_VARS_GLONET,
 )
 from dctools.utilities.xarray_utils import (
@@ -48,10 +51,10 @@ class RenameCoordsVarsTransform:
         self.vars_rename_dict = vars_rename_dict
 
     def __call__(self, data):
-        rename_ds = rename_coords_and_vars(
+        data = rename_coords_and_vars(
             data, self.coords_rename_dict, self.vars_rename_dict
         )
-        return rename_ds
+        return data
 
 class SelectVariablesTransform:
     def __init__(self, variables: List[str]):
@@ -68,8 +71,62 @@ class InterpolationTransform:
         self.ranges = ranges
 
     def __call__(self, data):
-        interp_dataset = interpolate_dataset(data, self.ranges, self.weights_filepath)
-        return interp_dataset
+        data = interpolate_dataset(
+            data, self.ranges,
+            self.weights_filepath,
+            interpolation_lib='xesmf',
+        )
+        return data
+
+
+'''class InterpolationTransform:
+    def __init__(self, ranges: dict, weights_filepath: str = None):
+        self.weights_filepath = weights_filepath
+        self.ranges = ranges
+
+    def __call__(self, data: xr.Dataset) -> xr.Dataset:
+        import gc
+        # 1. Chunk spatial AVANT interpolation
+        chunk_dict = {dim: 256 for dim in ['lat', 'lon'] if dim in data.dims}
+        chunk_dict.update({dim: 1 for dim in ['time', 'depth'] if dim in data.dims})
+        data = data.chunk(chunk_dict)
+
+        # 2. Interpolation variable par variable, temps par temps
+        out_vars = {}
+        for var in data.data_vars:
+            if "time" in data[var].dims and data.sizes["time"] == 1:
+                interp = data[var].interp(
+                    {k: self.ranges[k] for k in self.ranges if k in data[var].dims},
+                    method="linear"
+                )
+                if "time" not in interp.dims:
+                    out_vars[var] = interp.expand_dims("time")
+                else:
+                    out_vars[var] = interp
+            else:
+                interp = data[var].interp(
+                    {k: self.ranges[k] for k in self.ranges if k in data[var].dims},
+                    method="linear"
+                )
+                out_vars[var] = interp
+                del interp
+                gc.collect()
+
+        # 3. Harmoniser les coordonnées
+        coords = {k: self.ranges[k] for k in self.ranges}
+        for var in out_vars:
+            for dim, vals in coords.items():
+                if dim in out_vars[var].dims:
+                    if out_vars[var].sizes[dim] == len(vals):
+                        out_vars[var] = out_vars[var].assign_coords({dim: vals})
+                    else:
+                        logger.warning(
+                            f"Dimension size mismatch for '{dim}' in variable '{var}': "
+                            f"{out_vars[var].sizes[dim]} (var) vs {len(vals)} (target). Skipping assign_coords."
+                        )
+
+        ds_interp = xr.Dataset(out_vars, coords=coords)
+        return ds_interp'''
 
 
 class ResetTimeCoordsTransform:
@@ -79,6 +136,57 @@ class ResetTimeCoordsTransform:
     def __call__(self, data):
         reset_dataset = reset_time_coordinates(data)
         return reset_dataset
+
+class ToTimestampTransform:
+    def __init__(self, time_names: List[str]):
+        self.time_names = time_names
+
+    def __call__(self, data):
+        """
+        Convert the time coordinate to a timestamp.
+        """
+        for time_name in self.time_names:
+            time_values = data[time_name].values
+
+            # Vérifier si les valeurs sont déjà des pandas.Timestamp
+            are_timestamps = isinstance(time_values[0], pd.Timestamp)
+
+            if not are_timestamps:
+                # Convertir toutes les valeurs en pandas.Timestamp
+                data[time_name] = pd.to_datetime(data[time_name].values)
+        return data
+
+
+class WrapLongitudeTransform:
+    """
+    Transforme les longitudes d'un dataset xarray de [0, 360] vers [-180, 180].
+    """
+    def __init__(self, lon_name: str = "lon"):
+        self.lon_name = lon_name
+
+    def __call__(self, ds):
+
+        if self.lon_name not in ds.coords and self.lon_name not in ds.dims:
+            # Rien à faire si pas de longitude
+            return ds
+
+        # Récupère la DataArray des longitudes
+        lon = ds[self.lon_name]
+        # Applique la conversion
+        lon_wrapped = ((lon + 180) % 360) - 180
+
+        # Trie les longitudes et réindexe le dataset pour garder l'ordre croissant
+        order = np.argsort(lon_wrapped)
+        lon_wrapped_sorted = lon_wrapped[order]
+
+        # Remplace la coordonnée longitude
+        ds = ds.assign_coords({self.lon_name: lon_wrapped_sorted})
+
+        # Réindexe le dataset si la longitude est une dimension
+        if self.lon_name in ds.dims:
+            ds = ds.sortby(self.lon_name)
+
+        return ds
 
 
 class AssignCoordsTransform:
@@ -172,9 +280,18 @@ class CustomTransforms:
                 return self.transform_standardize_dataset(
                     dataset
                 )
+            case "add_spatial_coords":
+                return self.transform_add_spatial_coords(
+                    dataset
+                )
+            case "to_timestamp":
+                return self.to_timestamp(
+                    dataset
+                )
             case _:
                 return dataset
 
+    #@profile
     def transform_rename_subset_vars(
         self,
         dataset: xr.Dataset,
@@ -191,6 +308,7 @@ class CustomTransforms:
         transf_dataset = transform(dataset)
         return transf_dataset
 
+    #@profile
     def transform_standardize_dataset(
         self,
         dataset: xr.Dataset,
@@ -217,25 +335,28 @@ class CustomTransforms:
         ])
 
         transf_dataset = transform(dataset)
-        new_vars = list(transf_dataset.data_vars)
+        # new_vars = list(transf_dataset.data_vars)
 
         return transf_dataset
 
+    #@profile
     def transform_interpolate(
         self, dataset: xr.Dataset,
     ) -> xr.Dataset:
         assert(hasattr(self, "interp_ranges"))
         assert(hasattr(self, "weights_path"))
 
-        transform=transforms.Compose([
-            InterpolationTransform(self.interp_ranges, self.weights_path)
-        ])
+        # transform=transforms.Compose([
+        #    InterpolationTransform(self.interp_ranges, self.weights_path)
+        # ])
+        transform = InterpolationTransform(self.interp_ranges, self.weights_path)
         interp_dataset = transform(dataset)
         return interp_dataset
 
+    #@profile
     def transform_glorys_to_glonet(
         self, dataset: xr.Dataset
-    ):
+    ) -> xr.Dataset:
         assert(hasattr(self, "depth_coord_vals"))
         assert(hasattr(self, "weights_path"))
         assert(hasattr(self, "interp_ranges"))
@@ -254,9 +375,10 @@ class CustomTransforms:
         transf_dataset = transform(dataset)
         return transf_dataset
 
+    #@profile
     def transform_subset_dataset(
         self, dataset: xr.Dataset,
-    ):
+    ) -> xr.Dataset:
         assert(hasattr(self, "list_vars") and hasattr(self, "depth_coord_vals"))
         depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
         transform=transforms.Compose([
@@ -265,3 +387,61 @@ class CustomTransforms:
         ])
         transf_dataset = transform(dataset)
         return transf_dataset
+    
+    #@profile
+    def to_timestamp(
+        self,
+        ds: xr.Dataset,
+    ) -> xr.Dataset:
+        """
+        Convert the time coordinate to a timestamp.
+        """
+        assert(hasattr(self, "time_names"))
+        # Supposons que ds est ton xr.Dataset et "time" la coordonnée temporelle
+        transform = ToTimestampTransform(self.time_names)
+        return transform(ds)
+
+    '''def transform_add_spatial_coords(self, dataset: xr.Dataset) -> xr.Dataset:
+        import ast, traceback
+        assert hasattr(self, "coords_rename_dict")
+        if isinstance(self.coords_rename_dict, str):
+            coords_rename_dict = ast.literal_eval(self.coords_rename_dict)
+        else:
+            coords_rename_dict = self.coords_rename_dict
+        lat_coord_name = coords_rename_dict['lat']
+        lon_coord_name = coords_rename_dict['lon']
+        depth_coord_name = coords_rename_dict.get('depth', None)
+        try:
+            coords_to_set = [lat_coord_name, lon_coord_name]
+            if depth_coord_name is not None:
+                coords_to_set.append(depth_coord_name)
+
+            # S'assurer que les variables sont des coordonnées
+            for coord in coords_to_set:
+                if coord not in dataset.coords and coord in dataset:
+                    dataset = dataset.set_coords(coord)
+
+            # Construire le mapping {ancienne_dim: nouvelle_coordonnée}
+            swap_dict = {}
+            dims_checked = set()
+            for coord in coords_to_set:
+                if coord not in dataset.dims and coord in dataset.coords:
+                    # Chercher une dimension de même taille à remplacer
+                    for dim in dataset.dims:
+                        if (
+                            dim not in swap_dict  # éviter de swapper deux fois la même dim
+                            and dim not in dims_checked
+                            and dataset[coord].ndim == 1
+                            and dataset[coord].size == dataset.dims[dim]
+                            and coord != dim
+                        ):
+                            swap_dict[dim] = coord
+                            dims_checked.add(dim)
+                            break
+            if swap_dict:
+                dataset = dataset.swap_dims(swap_dict)
+
+            return dataset
+        except Exception as exc:
+            logger.error(f"Erreur lors de l'ajout des coordonnées spatiales : {traceback.format_exc(exc)}")
+            raise'''
