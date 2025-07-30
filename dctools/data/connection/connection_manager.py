@@ -43,54 +43,6 @@ from dctools.utilities.init_dask import setup_dask
 
 
 
-'''def extract_metadata(
-    path: str,
-    coord_system: Dict[str, Any],
-    variables: Dict[str, Any],
-    open_func: Callable,
-) -> CatalogEntry:
-    """
-    Extract metadata for a specific file, combining global metadata with file-specific information.
-
-    Args:
-        path (str): Path to the file.
-        global_metadata (Dict[str, Any]): Global metadata to apply to all files.
-
-    Returns:
-        CatalogEntry: Metadata for the specific file as a CatalogEntry.
-    """
-    try:
-        with open_func(path, "rb") as ds:
-            date_start = pd.to_datetime(
-                ds.time.min().values
-            ) if "time" in ds.coords else None
-            date_end = pd.to_datetime(
-                ds.time.max().values
-            ) if "time" in ds.coords else None
-
-        ds_region = get_dataset_geometry(ds, coord_system)
-
-        # Créer une instance de CatalogEntry
-        #date_start="1"
-        #date_end="2"
-        return CatalogEntry(
-            path=path,
-            date_start="1",  #date_start,
-            date_end="2",   #date_end,
-            variables=variables,
-            geometry=None, #ds_region,
-        )
-    except Exception as exc:
-        logger.error(
-            f"Failed to extract metadata for file {path}: {traceback.format_exc()}"
-        )
-        raise'''
-
-'''def extract_metadata_worker(manager_class, manager_params, path):
-    # Recrée une instance du manager côté worker
-    manager = manager_class(manager_params)
-    return manager.extract_metadata(path)'''
-
 class BaseConnectionManager(ABC):
     def __init__(self, connect_config: BaseConnectionConfig | Namespace):
         if isinstance(connect_config, BaseConnectionConfig):
@@ -271,19 +223,11 @@ class BaseConnectionManager(ABC):
             raise FileNotFoundError("Empty file list! No files to extract metadata from.")
 
         first_file = files[0]
-        # logger.info(f"Extracting global metadata from {first_file}")
-
-        # Charger le fichier avec xarray
-        # logger.info(f"Opening first file: {first_file}")
 
         with self.open(first_file, "rb") as ds:
             # Extraire les métadonnées globales
 
             coord_sys = CoordinateSystem.get_coordinate_system(ds)
-            # dimensions = coord_sys.coordinates
-            # dimensions_rename_dict = {v: k for k, v in dimensions.items()}
-
-            # logger.debug(f"Dimensions: {coord_sys.coordinates}")
 
             # Inférer la résolution spatiale et temporelle
             dict_resolution = self.estimate_resolution(
@@ -302,9 +246,6 @@ class BaseConnectionManager(ABC):
 
             variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
             variables_rename_dict = {v: k for k, v in variables_dict.items() if v is not None}
-            # dimensions = dict(ds.dims)
-
-            # logger.debug(f"\nDetected oceanographic variables: {variables_rename_dict}\n")
 
             global_metadata = {
                 "variables": variables,
@@ -407,39 +348,6 @@ class BaseConnectionManager(ABC):
                 res["time"] = f"{int(np.median(diffs))}s"
         return res
 
-    '''def list_files_with_metadata(self) -> List[CatalogEntry]:
-        """
-        List all files with their metadata by combining global metadata and file-specific information.
-
-        Returns:
-            List[CatalogEntry]: List of metadata entries for each file.
-        """
-        # Récupérer les métadonnées globales
-        global_metadata = self.extract_global_metadata()
-        self._global_metadata = global_metadata
-
-        # Initialiser une liste pour stocker les métadonnées
-        metadata_list = []
-
-        limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
-        # Parcourir tous les fichiers et extraire leurs métadonnées
-        for path in self._list_files:
-            try:
-                metadata_entry = self.extract_metadata(path, global_metadata)
-                metadata_list.append(metadata_entry)
-                if len(metadata_list) >= limit:
-                    # logger.info(f"Reached the limit of {limit} metadata entries.")
-                    break
-            except Exception as exc:
-                logger.warning(f"Failed to extract metadata for file {path}: {repr(exc)}")
-
-        if not metadata_list:
-            logger.error("No valid metadata entries were generated.")
-            raise ValueError("No valid metadata entries were generated.")
-
-        return metadata_list'''
-
-
     def list_files_with_metadata(self) -> List[CatalogEntry]:
         """
         List all files with their metadata by combining global metadata and file-specific information.
@@ -457,29 +365,8 @@ class BaseConnectionManager(ABC):
 
         file_list = self._list_files[:limit]
 
-        #manager_class = self.__class__
-        #manager_params = self.params
-
-        #must_close_dask = False
-        #if self.dask_cluster is None:
-        #    self.dask_cluster = setup_dask()
-        #    must_close_dask = True
         coord_system = self._global_metadata.get('coord_system')
         variables = self._global_metadata.get("variables")
-
-        '''dask_client = Client(self.dask_cluster)
-        # Utilise le client Dask courant pour la soumission des tâches en parallèle
-        futures = [
-            # dask_client.submit(extract_and_cache, path, global_metadata)  #, self.file_cache)
-            dask_client.submit(
-                extract_metadata,
-                path, coord_system, variables,
-                self.open,
-            )
-            for path in file_list
-        ]
-        results = dask_client.gather(futures)
-        metadata_list = [res for res in results if res is not None]'''
 
         metadata_list = [self.extract_metadata(
             path
@@ -623,10 +510,6 @@ class CMEMSManager(BaseConnectionManager):
             )
             self._files = read_file_tolist(tmp_filepath)'''
 
-            # list_dates = self.list_available_dates(self.params.dataset_id)
-
-            #return self._files
-
             start_date = datetime.datetime(2024, 1, 1)
             end_date = datetime.datetime(2025, 1, 3)
             list_dates = self.list_all_days(
@@ -643,31 +526,6 @@ class CMEMSManager(BaseConnectionManager):
         except Exception as exc:
             logger.error(f"Failed to list files from CMEMS: {repr(exc)}")
             return []
-
-    '''def get_product_metadata(self) -> Dict[str, Any]:
-        """
-        Fetch product-level metadata from the CMEMS API.
-
-        Returns:
-            Dict[str, Any]: A dictionary containing metadata for the product.
-        """
-        product_metadata = copernicusmarine.describe(self.params.dataset_id)
-
-        return {
-            "variables": product_metadata.get("variables", []),
-            "date_start": product_metadata.get("temporal_coverage_start"),
-            "date_end": product_metadata.get("temporal_coverage_end"),
-            "lon_min": product_metadata.get("geospatial_lon_min"),
-            "lon_max": product_metadata.get("geospatial_lon_max"),
-            "lat_min": product_metadata.get("geospatial_lat_min"),
-            "lat_max": product_metadata.get("geospatial_lat_max"),
-        }'''
-
-    '''def get_day_bounds(self, dt: datetime) -> tuple[datetime, datetime]:
-        from datetime import time
-        start_of_day = datetime.datetime.combine(dt.date(), time.min)  # 00:00:00
-        end_of_day = datetime.datetime.combine(dt.date(), time.max)    # 23:59:59.999999
-        return start_of_day, end_of_day'''
 
     def open_remote(self, dt: str, mode: str = "rb") -> Optional[xr.Dataset]:
         """
@@ -730,20 +588,6 @@ class CMEMSManager(BaseConnectionManager):
         except Exception as exc:
             logger.error(f"download from CMEMS failed: {repr(exc)}")
         return None'''
-
-
-    '''def get_cmems_filter_from_date(self, date: str) -> str:
-        """
-        Generate a filter string to select the correct file for a given date.
-
-        Args:
-            date (str): Date in 'YYYY-MM-DD' format.
-
-        Returns:
-            str: Filter string for the CMEMS API.
-        """
-        dt = datetime.datetime.strptime(date, "%Y-%m-%d")
-        return f"*/{dt.strftime('%Y')}/{dt.strftime('%m')}/*_{dt.strftime('%Y%m%d')}_*.nc"'''
 
     @classmethod
     def supports(cls, path: str) -> bool:
@@ -1085,22 +929,9 @@ class ArgoManager(BaseConnectionManager):
 
         for n_elem, start_date in enumerate(list_dates):
             end_date = start_date + pd.Timedelta(days=1)
-            # logger.info(f"Processing element: {elem.to_markdown()}")
-            # logger.info(f"Processing date: {start_date} to {end_date}")
-            #wmo_number = elem["wmo"]
-            #cycle_number = elem["cyc"]
-            #logger.info(f"Processing WMO number: {wmo_number}")
-            #if not wmo_number:
-            #    continue
-            #argopy.set_options(ds='phy', src='erddap', mode='research'):
-            #params = 'all'  # eg: 'DOXY' or ['DOXY', 'BBP700']
-            #logger.info(f"Fetching data for WMO number: {wmo_number}")
-            # ds = DataFetcher().float(wmo_number).to_xarray()
+
             argo_loader = DataFetcher()
-            # logger.info(f"Fetching ARGO data for WMO number: {wmo_number}")
-            # ds = argo_loader.float(wmo_number).to_xarray(
-            
-            # ds = argo_loader.profile(wmo_number, cycle_number).load().data
+
             profile = argo_loader.region([
                 min(lon_range), max(lon_range),
                 min(lat_range), max(lat_range),
@@ -1110,7 +941,6 @@ class ArgoManager(BaseConnectionManager):
             ])
             logger.info(f"Fetched ARGO data : {profile}")
             ds = profile.load().data
-            # ds = ds.to_xarray() # decode_times=False)
             logger.info(f"Dataset : {ds}")
             # get coordinate system
             if first_elem:
@@ -1132,12 +962,9 @@ class ArgoManager(BaseConnectionManager):
                     "resolution": resolution,
                     "coord_system": coord_sys,
                     "keep_variables": self.params.keep_variables,
-                    # "is_observation": coord_sys.is_observation_dataset(),
                 }
                 self.global_metadata = global_metadata
                 first_elem = False
-            # dimensions_rename_dict = {v: k for k, v in dimensions.items()}
-            # geometry = gpd.GeoSeries([tile])
             geometry = get_dataset_geometry(ds, coord_sys)
             date_start = pd.to_datetime(
                 ds.time.min().values
@@ -1173,17 +1000,8 @@ class ArgoManager(BaseConnectionManager):
 
     def list_files(self) -> List[str]:
 
-        #idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="core", cache=True)
-        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="bgc-b", cache=True)
-        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="bgc-s", cache=True)
-        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="meta", cache=True)
-        # idx = ArgoIndex()
-
         # idx = ArgoIndex(host="https://data-argo.ifremer.fr")  # Default host
         idx = ArgoIndex(host="ftp://ftp.ifremer.fr/ifremer/argo", index_file="ar_index_global_prof.txt")  # Default index
-        # idx = ArgoIndex(index_file="bgc-s")  # Use keywords instead of exact file names
-        # idx = ArgoIndex(host="https://data-argo.ifremer.fr", index_file="bgc-b", cache=True)  # Use cache for performances
-        # idx = ArgoIndex(host=".", index_file="dummy_index.txt", convention="core")  # Load your own index
 
         limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
         logger.info(f"Loading ARGO index with limit: {limit}")
@@ -1194,13 +1012,12 @@ class ArgoManager(BaseConnectionManager):
         logger.info(f"\n\nsize List of files 1: {idx.uri_full_index}")
 
         # 3. Trier les données par date croissante
-        #df_sorted = df.sort_values(by='date').reset_index(drop=True)
         df["date"] = pd.to_datetime(df["date"])
 
         # Générer une série de dates journalières entre min et max
         list_dates = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')
 
-        return list_dates   # idx.uri_full_index
+        return list_dates
 
 
     def open(
@@ -1230,4 +1047,3 @@ class ArgoManager(BaseConnectionManager):
         from argopy import DataFetcher
         ds = DataFetcher().region(parts[1:]).to_xarray()
         return ds
-

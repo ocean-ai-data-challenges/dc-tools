@@ -32,7 +32,6 @@ class MultiSourceDatasetManager:
         Initialise le gestionnaire multi-sources.
         """
         self.datasets = {}
-        # self.catalog = DatasetCatalog([])  # Initialiser avec un catalogue vide
         self.forecast_indexes = {}
         self.time_tolerance = time_tolerance
         self.file_cache = FileCacheManager(max_cache_files)
@@ -221,9 +220,7 @@ class MultiSourceDatasetManager:
         """
         if alias not in self.datasets:
             raise ValueError(f"Alias '{alias}' not found in the manager.")
-        # logger.debug(f"Standardizing names for dataset '{alias}' with coords: {coords_rename_dict} and vars: {vars_rename_dict}")
         self.datasets[alias].standardize_names(coords_rename_dict, vars_rename_dict)
-        # logger.debug(f"Dataset {alias} eval_variables after standardization: {self.datasets[alias].eval_variables}")
 
     def build_forecast_index(
         self, alias: str,
@@ -300,14 +297,7 @@ class MultiSourceDatasetManager:
         if forecast_mode:
             # catalog_df = pred_catalog.get_dataframe()
             forecast_index = self.forecast_indexes[pred_alias]
-            '''forecast_index = build_forecast_index_from_catalog(
-                catalog_df,
-                forecast_time_col="date_start",
-                valid_time_col="date_end",
-                file_col="path",
-                n_days_forecast=n_days_forecast,
-                lead_time_unit=lead_time_unit,
-            )'''
+
         return EvaluationDataloader(
             pred_connection_params=pred_connection_params,
             ref_connection_params=ref_connection_params,
@@ -325,23 +315,6 @@ class MultiSourceDatasetManager:
             n_days_forecast=n_days_forecast,
             time_tolerance=self.time_tolerance,
         )
-
-
-
-    '''def _filter_catalog_by_alias(self, alias: str) -> DatasetCatalog:
-        """
-        Filtre le catalogue global par alias.
-
-        Args:
-            alias (str): Alias du dataset à filtrer.
-
-        Returns:
-            DatasetCatalog: Catalogue filtré pour l'alias spécifié.
-        """
-        alias_catalog = self.datasets["alias"].get_catalog()
-        #alias_global_metadata = alias_catalog.get_global_metadata()
-        #filtered_df = self.catalog.get_dataframe()[self.catalog.get_dataframe()["alias"] == alias]
-        return alias_catalog  # DatasetCatalog(global_metadata=global_metadata, entries=filtered_df.to_dict(orient="records"))'''
 
 
     def get_transform(

@@ -48,7 +48,7 @@ class DC2Evaluation:
             aruguments (str): Namespace with config.
         """
         self.args = arguments
-        self.dataset_references = {"glonet": ["glorys"]}
+        self.dataset_references = {"glonet": ["glorys", "jason3"]}
 
     def filter_data(
         self, manager: MultiSourceDatasetManager,
@@ -103,19 +103,6 @@ class DC2Evaluation:
                 "standardize",
                 dataset_alias="argo_profiles",
             )
-            '''glonet_transform_1 = dataset_manager.get_transform(
-                "standardize",
-                dataset_alias="glonet",
-            )
-            glonet_transform_2 = dataset_manager.get_transform(
-                "glorys_to_glonet",
-                dataset_alias="glonet",
-                regridder_weights=self.args.regridder_weights,
-            )
-            transforms_dict["glonet"] = transforms.Compose([
-                glonet_transform_1,
-                glonet_transform_2,
-            ])'''
 
         return transforms_dict
 
@@ -135,8 +122,6 @@ class DC2Evaluation:
                 assert isinstance(batch[0]["ref_data"], str)
 
     def setup_dataset_manager(self) -> None:
-
-        #dask_cluster = setup_dask()
 
         manager = MultiSourceDatasetManager(
             pd.Timedelta(hours=self.args.delta_time),
@@ -163,36 +148,16 @@ class DC2Evaluation:
             # Ajouter les datasets avec des alias
             manager.add_dataset(source_name, datasets[source_name])
 
-        '''filter_region = gpd.GeoSeries(geometry.Polygon((
-            (self.args.min_lon,self.args.min_lat),
-            (self.args.min_lon,self.args.max_lat),
-            (self.args.max_lon,self.args.min_lat),
-            (self.args.max_lon,self.args.max_lat),
-            (self.args.min_lon,self.args.min_lat),
-            )), crs="EPSG:4326")'''
-        '''filter_region = gpd.GeoSeries(
-            [geometry.box(self.args.min_lon, self.args.min_lat, self.args.max_lon, self.args.max_lat)],
-            crs="EPSG:4326"
-        )'''
-
-
-        '''filter_region = geometry.Polygon(
+        filter_region = geometry.Polygon(
             [(self.args.min_lon,self.args.min_lat),
             (self.args.min_lon,self.args.max_lat),
             (self.args.max_lon,self.args.max_lat),
             (self.args.max_lon,self.args.min_lat)] #,
             #(self.args.min_lon,self.args.min_lat)],
-        )'''
-        #filter_region = gpd.GeoDataFrame([{"geometry": poly}], crs="EPSG:4326")   
-        # Construire le catalogue
-        ####logger.debug(f"Build catalog")
-        ### manager.build_catalogs()    # done now in each dataset separately
-        # manager.all_to_json(output_dir=self.args.catalog_dir)  # done now in each dataset separately (to save memory)
+        )
 
         # Appliquer les filtres spatio-temporels
         # manager = self.filter_data(manager, filter_region) ##  TODO : check filtering validity
-
-        #dask_cluster.close()
 
         return manager
 
@@ -251,14 +216,11 @@ class DC2Evaluation:
                     interpolation_method = ref_source_dict.get(
                         "interpolation_method", "kdtree"
                     )
-                    # list_scores = source_dict.get("list_scores", ["rmsd"])
-                    # depth_bins = source_dict.get("depth_bins", None)
                     time_tolerance = ref_source_dict.get("time_tolerance", None)
                     time_tolerance = timedelta(hours=time_tolerance)
                     class4_kwargs={
                         "interpolation_method": interpolation_method,
                         "list_scores": common_metrics,
-                        # "depth_bins": depth_bins,
                         "time_tolerance": time_tolerance,
                     }
                     metrics[alias][ref_alias] = [
@@ -311,11 +273,8 @@ class DC2Evaluation:
                         continue
                         
                     # Transformer pour rendre sérialisable
-                    # serializable_result = make_fully_serializable(result)
-                    #serialized_entries.append(serializable_result)
                     transform_in_place(result, make_serializable)
                     serializable_result = nan_to_none(result)
-                    # json_result = json.dumps(nan_to_none(result))
                     serialized_entries.append(serializable_result)
 
                 serialized_results[dataset_alias] = serialized_entries
@@ -330,7 +289,6 @@ class DC2Evaluation:
                 dataset_json_path = os.path.join(self.args.catalog_dir, f"results_{dataset_alias}.json")
                 with open(dataset_json_path, 'w') as json_file:
                     # Vider le fichier s'il existe déjà
-                    # with open(json_path, 'w') as f:
                     json_file.write('')
                     logger.info(f"Cleared contents of {json_file}")
                     json.dump({

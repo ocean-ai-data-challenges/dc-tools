@@ -157,7 +157,6 @@ class Evaluator:
         self.metrics = metrics
         self.dataloader = dataloader
         self.results = []
-        #self.json_path = json_path
         self.ref_aliases = ref_aliases
 
 
@@ -212,6 +211,7 @@ class Evaluator:
                 ref_coords = entry.get("ref_coords")
                 ref_alias = entry.get("ref_alias")
                 ref_is_observation = entry.get("ref_is_observation")
+                logger.info(f"Process forecast: {forecast_reference_time}, lead time: {lead_time}")
 
                 ref_transform = None
                 if dataloader.ref_transforms and ref_alias in dataloader.ref_transforms:
@@ -257,7 +257,6 @@ class Evaluator:
         ref_source,
         pred_transform: Callable,
         ref_transform: Callable,
-        #date: str,
         ref_alias: str,
         ref_is_observation: bool,
         forecast_reference_time,
@@ -288,8 +287,6 @@ class Evaluator:
 
             log_memory("EVALUATOR before open_pred_func")
             with open_pred_func(pred_path) as pred_data:
-                # pred_data = open_pred_func(pred_path)
-                #pred_data = pred_data.sel(time=valid_time, method="nearest", drop=False)
                 pred_data_selected = pred_data.sel(time=valid_time, method="nearest")
                 
                 # Si la dimension time a été supprimée (cas scalaire), la restaurer
@@ -324,16 +321,30 @@ class Evaluator:
                 else:
                     results = {}
                     for metric in list_metrics:
-                        results[metric.get_metric_name()] = metric.compute(
+                        return_res = metric.compute(
                             pred_data, ref_data,
                             pred_coords, ref_coords,
                         )
+
+                        res_dict = {}
+                        
+                        # Convertir chaque ligne du DataFrame en dictionnaire
+                        for var_depth_label in return_res.index:
+                            # Nettoyer le nom de la variable/profondeur pour en faire une clé valide
+                            clean_key = var_depth_label.lower().replace(" ", "_")
+                            
+                            # Extraire les valeurs RMSD pour tous les lead days
+                            rmsd_values = return_res.loc[var_depth_label].to_dict()
+                            
+                            # Structure : {variable: {lead_day: rmsd_value}}
+                            res_dict[clean_key] = rmsd_values
+
+                        results[metric.get_metric_name()] = res_dict
                 log_memory("EVALUATOR after transform")
 
                 res = {
                     "model": model,
                     "ref_alias": ref_alias,
-                    #"metric": metric.get_metric_name(),
                     "result": results.compute() if hasattr(results, "compute") else results,
                 }
                 # Ajoute les champs forecast si présents
@@ -343,9 +354,6 @@ class Evaluator:
                     res["lead_time"] = lead_time
                 if valid_time is not None:
                     res["valid_time"] = valid_time
-
-            # 2. Sauvegarder uniquement les résultats nécessaires
-            #output = res.copy()  # Important : détacher de toute référence à Dask/xarray
 
             # 3. Libérer les objets volumineux
             if ref_data is not None:
@@ -360,6 +368,5 @@ class Evaluator:
             return {
                 "model": model,
                 "ref_alias": ref_alias,
-                #"metric": metric.get_metric_name(),
                 "result": None,
             }

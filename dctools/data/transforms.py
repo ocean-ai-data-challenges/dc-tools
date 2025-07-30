@@ -74,59 +74,9 @@ class InterpolationTransform:
         data = interpolate_dataset(
             data, self.ranges,
             self.weights_filepath,
-            interpolation_lib='xesmf',
+            interpolation_lib='pyinterp',
         )
         return data
-
-
-'''class InterpolationTransform:
-    def __init__(self, ranges: dict, weights_filepath: str = None):
-        self.weights_filepath = weights_filepath
-        self.ranges = ranges
-
-    def __call__(self, data: xr.Dataset) -> xr.Dataset:
-        import gc
-        # 1. Chunk spatial AVANT interpolation
-        chunk_dict = {dim: 256 for dim in ['lat', 'lon'] if dim in data.dims}
-        chunk_dict.update({dim: 1 for dim in ['time', 'depth'] if dim in data.dims})
-        data = data.chunk(chunk_dict)
-
-        # 2. Interpolation variable par variable, temps par temps
-        out_vars = {}
-        for var in data.data_vars:
-            if "time" in data[var].dims and data.sizes["time"] == 1:
-                interp = data[var].interp(
-                    {k: self.ranges[k] for k in self.ranges if k in data[var].dims},
-                    method="linear"
-                )
-                if "time" not in interp.dims:
-                    out_vars[var] = interp.expand_dims("time")
-                else:
-                    out_vars[var] = interp
-            else:
-                interp = data[var].interp(
-                    {k: self.ranges[k] for k in self.ranges if k in data[var].dims},
-                    method="linear"
-                )
-                out_vars[var] = interp
-                del interp
-                gc.collect()
-
-        # 3. Harmoniser les coordonnées
-        coords = {k: self.ranges[k] for k in self.ranges}
-        for var in out_vars:
-            for dim, vals in coords.items():
-                if dim in out_vars[var].dims:
-                    if out_vars[var].sizes[dim] == len(vals):
-                        out_vars[var] = out_vars[var].assign_coords({dim: vals})
-                    else:
-                        logger.warning(
-                            f"Dimension size mismatch for '{dim}' in variable '{var}': "
-                            f"{out_vars[var].sizes[dim]} (var) vs {len(vals)} (target). Skipping assign_coords."
-                        )
-
-        ds_interp = xr.Dataset(out_vars, coords=coords)
-        return ds_interp'''
 
 
 class ResetTimeCoordsTransform:
@@ -346,9 +296,6 @@ class CustomTransforms:
         assert(hasattr(self, "interp_ranges"))
         assert(hasattr(self, "weights_path"))
 
-        # transform=transforms.Compose([
-        #    InterpolationTransform(self.interp_ranges, self.weights_path)
-        # ])
         transform = InterpolationTransform(self.interp_ranges, self.weights_path)
         interp_dataset = transform(dataset)
         return interp_dataset

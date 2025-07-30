@@ -294,68 +294,6 @@ class CoordinateSystem:
 
         # Détection du niveau de structuration
         coord_level = CoordinateSystem.detect_data_level(ds, standardized)
-        '''is_observation = False
-
-        # 1. Grille régulière (2D/3D)
-        if has_lat_dim and has_lon_dim and has_time_dim:
-            # Test de densité pour détecter "sparse"
-            main_var = list(ds.data_vars)[0] if ds.data_vars else None
-            if main_var:
-                arr = ds[main_var].values
-                total_points = arr.size
-                valid_points = np.isfinite(arr).sum()
-                density = valid_points / total_points if total_points > 0 else 0
-                # Seuil empirique : <80% de points valides = sparse
-                if density < 0.8:
-                    coord_level = "sparse"
-                else:
-                    coord_level = "grid_3d" if has_depth_dim else "grid_2d"
-            else:
-                coord_level = "grid_3d" if has_depth_dim else "grid_2d"
-            is_observation = False
-
-        # 2. Points (observations)
-        elif has_time_dim and not (has_lat_dim or has_lon_dim):
-            lat_var = standardized.get("lat")
-            lon_var = standardized.get("lon")
-            if lat_var and lon_var:
-                lat_shape = ds[lat_var].shape
-                lon_shape = ds[lon_var].shape
-                time_shape = ds[standardized["time"]].shape
-                if lat_shape == lon_shape == time_shape:
-                    if "depth" in standardized and ds[standardized["depth"]].shape == time_shape:
-                        coord_level = "point_3d"
-                    else:
-                        coord_level = "point_2d"
-                    is_observation = True
-                else:
-                    coord_level = "unknown"
-                    is_observation = False
-            else:
-                coord_level = "unknown"
-                is_observation = False
-
-        # 3. Sparse (grille irrégulière ou incomplète)
-        elif has_lat_dim and has_lon_dim and not has_time_dim:
-            # Même si pas de temps, grille spatiale creuse
-            main_var = list(ds.data_vars)[0] if ds.data_vars else None
-            if main_var:
-                arr = ds[main_var].values
-                total_points = arr.size
-                valid_points = np.isfinite(arr).sum()
-                density = valid_points / total_points if total_points > 0 else 0
-                if density < 0.8:
-                    coord_level = "sparse"
-                else:
-                    coord_level = "grid_2d"
-            else:
-                coord_level = "sparse"
-            is_observation = False
-
-        # 4. Cas inconnu
-        else:
-            coord_level = "unknown"
-            is_observation = False'''
 
         # N'inclure depth dans coordinates que si pertinent
         coords_out = {}
@@ -425,15 +363,11 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
     try:
         # Cas 1 : coordonnées 1D de même taille (points individuels, ex: Argo)
         if lat.ndim == 1 and lon.ndim == 1 and lat.shape == lon.shape:
-            # logger.debug("Coordinates are 1D arrays of same length (point cloud).")
             coords_arr = np.column_stack([lon, lat])
         # Cas 2 : coordonnées 2D (grille régulière)
         elif lat.ndim == 2 and lon.ndim == 2 and lat.shape == lon.shape:
-            # logger.debug("Coordinates are 2D arrays with matching shapes.")
             coords_arr = np.column_stack([lon.ravel(), lat.ravel()])
-        # Cas 3 : coordonnées 1D indépendantes (grille, meshgrid possible)
         elif lat.ndim == 1 and lon.ndim == 1:
-            # logger.debug("Coordinates are 1D arrays (meshgrid case).")
             lon2d, lat2d = np.meshgrid(lon, lat)
             coords_arr = np.column_stack([lon2d.ravel(), lat2d.ravel()])
         else:
@@ -450,15 +384,10 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
         # Nettoyage : retirer les NaN et doublons
         coords_arr = coords_arr[~np.isnan(coords_arr).any(axis=1)]
         unique_points = np.unique(coords_arr, axis=0)
-        #logger.debug(f"Unique points extracted: {unique_points.shape[0]}")
 
         # Vérifie que unique_points est bien de shape (N, 2) et de type float
         if not (isinstance(unique_points, np.ndarray) and unique_points.ndim == 2 and unique_points.shape[1] == 2):
             raise ValueError(f"unique_points mal formé: shape={unique_points.shape}, type={type(unique_points)}")
-
-        # Vérifier qu'il y a au moins 3 points pour un polygone
-        #if unique_points.shape[0] < 3:
-        #    raise ValueError("Not enough unique points to compute a convex hull.")
 
         # Détection grille ou nuage de points
         points = []
@@ -471,15 +400,6 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
             except Exception as exc:
                 logger.warning(f"Invalid point ({x}, {y}): {exc}")
 
-        #if len(points) < 3:
-        #    raise ValueError("Not enough valid points to compute a convex hull.")
-
-        # multipoint = MultiPoint(points)
-        # geometry = multipoint.convex_hull
-        # geometry = [Point(xy) for xy in zip(lon, lat)]
-        # geometry = gpd.GeoSeries(points)
-        # if not geometry.is_valid:
-        #    raise ValueError("Generated geometry is invalid.")
         boundary = MultiPoint(points).convex_hull
         boundary = simplify(boundary, tolerance=0.1, preserve_topology=False)
         return boundary  #MultiPoint(points)

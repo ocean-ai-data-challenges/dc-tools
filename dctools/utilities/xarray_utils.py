@@ -6,18 +6,20 @@
 import ast
 from datetime import datetime
 import gc
+from loguru import logger
+import os
 import traceback
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cftime
 import geopandas as gpd
 from loguru import logger
-from matplotlib.pyplot import grid
-from memory_profiler import profile
 import numpy as np
 import pandas as pd
 from pathlib import Path
 import psutil
+import pyinterp
+import pyinterp.backends.xarray
 import xarray as xr
 import xesmf as xe
 
@@ -106,7 +108,7 @@ def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict] = None):
 
         ds = ds.rename_vars(rename_dict)
 
-        # Supprimer les anciennes variables si elles existent encore (rare mais possible)
+        # Supprimer les anciennes variables si elles existent encore
         for old, new in rename_dict.items():
             if old in ds.variables and new in ds.variables and old != new:
                 ds = ds.drop_vars(old)
@@ -125,9 +127,7 @@ def rename_coords_and_vars(
     """Rename variables and coordinates according to given dictionaries."""
     try:
         log_memory("START rename_coords_and_vars")
-        #logger.debug(f"Renaming variables in dataset with dictionary: {rename_vars_dict}")
         ds = rename_variables(ds, rename_vars_dict)
-        #logger.debug(f"Renaming coordinates in dataset with dictionary: {rename_coords_dict}")
         ds = rename_coordinates(ds, rename_coords_dict)
 
         log_memory("END rename_coords_and_vars")
@@ -145,12 +145,7 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
             var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
 
     # Crée un sous-dataset avec uniquement les variables listées
-    # subset = xr.Dataset({var: ds[var].copy(deep=True) for var in list_vars if var in ds})
-    '''subset = xr.Dataset(
-        {var: ds[var].copy(deep=True) for var in list_vars if var in ds},
-        coords={k: v for k, v in ds.coords.items() if k in ds.dims}
-    )'''
-    subset = ds[list_vars]   #.(deep=True)
+    subset = ds[list_vars]
 
     # Détecter les coordonnées présentes dans le sous-dataset
     coords_to_set = [c for c in subset.data_vars if c in ds.coords]
@@ -164,331 +159,8 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
         var_std_name = subset[variable_name].attrs.get("standard_name",'').lower()
         if not var_std_name:
             var_std_name = subset[variable_name].attrs.get("std_name", '').lower()
-    '''if hasattr(ds, "close"):
-        ds.close()
-    del ds
-    gc.collect()'''
+
     return subset
-
-
-
-import xarray as xr
-import numpy as np
-from typing import Literal, Optional
-import pyinterp
-import shutil
-import tempfile
-import xesmf as xe
-
-'''
-def make_pyinterp_compatible(ds: xr.Dataset) -> xr.Dataset:
-    """
-    Adds required 'standard_name' attributes to coordinates for pyinterp compatibility.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Input dataset with lat/lon/(depth) coordinates.
-
-    Returns
-    -------
-    xr.Dataset
-        Dataset with updated coordinate attributes.
-    """
-    ds = ds.copy()
-    coord_map = {
-        "lon": "longitude",
-        "longitude": "longitude", 
-        "x": "longitude",
-        "lat": "latitude",
-        "latitude": "latitude",
-        "y": "latitude",
-        "depth": "depth",
-        "z": "depth"
-    }
-    for name, std in coord_map.items():
-        if name in ds.coords:
-            ds[name].attrs.setdefault("standard_name", std)
-    rename_dims = {}
-    if "lat" in ds.dims:
-        rename_dims["lat"] = "latitude"
-    if "lon" in ds.dims:
-        rename_dims["lon"] = "longitude"
-    ds = ds.rename(rename_dims)
-    return ds'''
-
-
-def ensure_cf_attrs(da):
-    if "lon" in da.coords:
-        da.coords["lon"].attrs.setdefault("standard_name", "longitude")
-        da.coords["lon"].attrs.setdefault("units", "degrees_east")
-        da.coords["lon"].attrs.setdefault("axis", "X")
-    if "lat" in da.coords:
-        da.coords["lat"].attrs.setdefault("standard_name", "latitude")
-        da.coords["lat"].attrs.setdefault("units", "degrees_north")
-        da.coords["lat"].attrs.setdefault("axis", "Y")
-    return da
-
-
-import xarray as xr
-import numpy as np
-import tempfile, shutil, os
-import pyinterp.backends.xarray
-from pyinterp.backends.xarray import Grid2D
-
-
-'''def interpolate_pyinterp(ds: xr.Dataset, target_grid: dict, method: str="bilinear") -> xr.Dataset:
-    # 1. Renommage dims pour pyinterp
-    # ds = ds.copy(deep=True)
-
-    log_memory("START interpolate_pyinterp")
-    ren = {d: d.replace("lat", "latitude").replace("lon", "longitude") for d in ds.dims}
-    ds = ds.rename(ren)
-
-    lat_t = target_grid["lat"]
-    lon_t = target_grid["lon"]
-
-    has_time = "time" in ds.dims
-    has_depth = "depth" in ds.dims and "depth" in target_grid.keys()
-    time_vals = ds.time.values if has_time else [None]
-    depth_vals = ds.depth.values if has_depth else [None]
-
-    # Zarr temp store
-    tmp = tempfile.mkdtemp(prefix="interp_zarr_")
-    zpath = os.path.join(tmp, "out.zarr")
-    first = True
-
-    # Itérations time / depth
-    try:
-        for t in time_vals:
-            for d in depth_vals:
-                sel = {}
-                if t is not None: sel["time"] = t
-                if d is not None and "depth" in ds.dims: sel["depth"] = d
-                ds_slice = ds.sel(sel, method="nearest").squeeze(drop=True)
-
-                var_out = {}
-                for vn, da in ds_slice.data_vars.items():
-                    if not {"latitude", "longitude"}.issubset(da.dims): continue
-                    da2 = da.squeeze()
-                    if set(da2.dims) != {"latitude", "longitude"}: continue
-
-                    grid = Grid2D(da2)
-                    arr1d = grid.interp(lon_t.ravel(), lat_t.ravel(), bounds_error=False)
-                    arr2 = arr1d.reshape(len(lat_t), len(lon_t))
-                    da_interp = xr.DataArray(arr2, dims=("latitude","longitude"),
-                                            coords={"latitude": lat_t, "longitude": lon_t},
-                                            attrs=da.attrs)
-                    # reinject time/depth
-                    if t is not None: da_interp = da_interp.expand_dims(time=[t])
-                    if d is not None: da_interp = da_interp.expand_dims(depth=[d])
-                    var_out[vn] = da_interp
-
-                if not var_out: continue
-                ds_out = xr.Dataset(var_out)
-                if first:
-                    ds_out.attrs.update(ds.attrs)
-                    ds_out.to_zarr(zpath, mode="w")
-                    first = False
-                else:
-                    dim_app = "time" if has_time else "depth"
-                    ds_out.to_zarr(zpath, append_dim=dim_app)
-                del ds_out
-                gc.collect()
-    except Exception as axc:
-        traceback.print_exc()
-
-    # lecture finale
-    out = xr.open_zarr(zpath, chunks={})
-    shutil.rmtree(tmp)
-    log_memory("END rename_dimensions")
-    return out'''
-
-
-#@profile
-'''def interpolate_xesmf(
-    ds: xr.Dataset,
-    target_grid: xr.Dataset,
-    reuse_weights: bool,
-    weights_file: Optional[str],
-    method: str = "bilinear",
-) -> xr.Dataset:
-    """
-    Interpolate a gridded oceanographic dataset to a target grid using xESMF,
-    by looping over time, depth, and variables to reduce memory usage.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        The source dataset to interpolate.
-    target_grid : xr.Dataset
-        The target grid as an xarray Dataset (must include lat/lon).
-    reuse_weights : bool
-        Whether to reuse weights (if weights_file is provided).
-    weights_file : Optional[str]
-        Path to a weights file to reuse or store. Required if reuse_weights is True.
-    method : str
-        Interpolation method, e.g., 'bilinear', 'nearest_s2d', etc.
-
-    Returns
-    -------
-    xr.Dataset
-        The interpolated dataset on the target grid.
-    """
-    # ds = ds.copy(deep=True)
-    log_memory("START interpolate_xesmf")
-    regridder = xe.Regridder(
-        ds,
-        target_grid,
-        method=method,
-        reuse_weights=reuse_weights,
-        filename=weights_file if reuse_weights else None
-    )
-
-    interpolated_vars = []
-
-    time_coords = ds.time.values if "time" in ds.dims else [None]
-    depth_coords = ds.depth.values if "depth" in ds.dims else [None]
-
-    # Create temporary Zarr store
-    temp_dir = tempfile.mkdtemp(prefix="interpol_zarr_")
-    zarr_path = Path(temp_dir) / "interpolated.zarr"
-
-    for var_name in ds.data_vars:
-        var = ds[var_name]
-        dims = var.dims
-
-        interpolated_slices = []
-
-        for t in time_coords:
-            for z in depth_coords:
-                # Subset
-                subset = var
-                if t is not None:
-                    subset = subset.sel(time=t)
-                if z is not None:
-                    subset = subset.sel(depth=z)
-
-                # Ensure 2D input for xesmf
-                subset_2d = subset if {'lat', 'lon'} <= set(subset.dims) else subset.squeeze()
-                # del subset
-                # Interpolation
-                try:
-                    interp_result = regridder(subset_2d)
-                    # del subset_2d
-                except Exception as e:
-                    print(f"Failed interpolation for var={var_name}, time={t}, depth={z}: {e}")
-                    continue
-
-                # Expand dims back
-                if z is not None:
-                    interp_result = interp_result.expand_dims("depth")
-                    interp_result["depth"] = [z]
-                if t is not None:
-                    interp_result = interp_result.expand_dims("time")
-                    interp_result["time"] = [np.datetime64(t)]
-
-                interp_result.name = var_name
-                interpolated_slices.append(interp_result)
-                # del interp_result
-
-        # Concatenate all slices
-        if interpolated_slices:
-            interpolated_var = xr.concat(interpolated_slices, dim=[dim for dim in ['time', 'depth'] if dim in interpolated_slices[0].dims])
-            interpolated_vars.append(interpolated_var)
-            # del interpolated_slices
-
-    # Combine into one dataset
-    interpolated_ds = xr.merge(interpolated_vars)
-    #del interpolated_vars
-
-    # Save to Zarr (lazy, no .load())
-    #interpolated_ds.to_zarr(str(zarr_path), mode="w", compute=True)
-
-    # Close the in-memory dataset to free memory
-    # del interpolated_ds
-
-    # Open the Zarr file in lazy mode and return
-    # lazy_ds = xr.open_zarr(str(zarr_path), chunks="auto")
-    log_memory("END interpolate_xesmf")
-    return interpolated_ds'''
-
-
-'''
-import dask
-def interpolate_xesmf_lazy(
-    ds: xr.Dataset,
-    #variable_names: List[str],
-    target_grid: xr.Dataset,
-    reuse_weights: bool = True,
-    weights_file: str = None,
-    method: str = "bilinear",
-) :
-    """
-    Lazily interpolate multiple variables in a Dataset using xESMF, with automatic regridder creation or loading.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Input dataset containing the variables to interpolate.
-    variable_names : list of str
-        List of variable names to interpolate.
-    target_grid : xr.Dataset
-        Grid onto which to regrid the variables. Must contain 'lat' and 'lon'.
-    weights_dir : str
-        Directory where to save/load regridder weights (as .nc files).
-    method : str, optional
-        Regridding method to use (e.g., 'bilinear', 'nearest_s2d'), by default "bilinear".
-    reuse_weights : bool, optional
-        Whether to reuse weights from files in `weights_dir` if they exist, by default True.
-
-    Returns
-    -------
-    dask.delayed.Delayed
-        Delayed computation returning the interpolated Dataset when computed.
-    """
-    #os.makedirs(weights_dir, exist_ok=True)
-
-    log_memory("START interpolate_xesmf")
-    delayed_datasets = []
-
-    variable_names = ds.data_vars
-    for var_name in variable_names:
-        if var_name not in ds:
-            raise ValueError(f"Variable '{var_name}' not found in the input dataset.")
-
-        # Extraire uniquement la variable
-        var_ds = ds[[var_name]]
-
-        # Chemin du fichier de poids pour cette variable
-        # weights_file = os.path.join(weights_dir, f"weights_{var_name}_{method}.nc")
-
-        # Création ou chargement du regridder
-        regridder = xe.Regridder(
-            var_ds,
-            target_grid,
-            method=method,
-            filename=weights_file,
-            reuse_weights=reuse_weights
-        )
-
-        # Lazy interpolation via dask.delayed
-        @dask.delayed
-        def interpolate_variable(ds_block, regridder, var_name):
-            interpolated = regridder(ds_block[var_name])
-            return interpolated.to_dataset(name=var_name)
-
-        delayed_result = interpolate_variable(var_ds, regridder, var_name)
-        delayed_datasets.append(delayed_result)
-
-    # Merge lazy datasets
-    combined_delayed = xr.merge(delayed_datasets)
-
-    log_memory("END interpolate_xesmf")
-    return combined_delayed
-
-'''
-
 
 
 def interpolate_xarray_dataset(ds: xr.Dataset, 
@@ -561,21 +233,21 @@ def interpolate_xarray_dataset(ds: xr.Dataset,
     try:
         if has_time and not has_depth:
             # 3D interpolation (longitude, latitude, time)
-            print("Performing 3D interpolation (lon, lat, time)")
+            logger.info("Performing 3D interpolation (lon, lat, time)")
             grid = pyinterp.backends.xarray.Grid3D(data_array)
             interp_coords['time'] = coordinates['time']
             result = grid.trivariate(interp_coords, interpolator=interpolator, **kwargs)
             
         elif has_depth and not has_time:
             # 3D interpolation (longitude, latitude, depth)
-            print("Performing 3D interpolation (lon, lat, depth)")
+            logger.info("Performing 3D interpolation (lon, lat, depth)")
             grid = pyinterp.backends.xarray.Grid3D(data_array)
             interp_coords['depth'] = coordinates['depth']
             result = grid.trivariate(interp_coords, interpolator=interpolator, **kwargs)
             
         elif has_depth and has_time:
             # Process time step by time step for 4D data
-            print("Performing 4D interpolation (lon, lat, time, depth) - processing by time steps")
+            logger.info("Performing 4D interpolation (lon, lat, time, depth) - processing by time steps")
             time_coords = coordinates['time']
             n_points = len(coordinates['longitude'])
             n_times = len(time_coords)
@@ -602,24 +274,24 @@ def interpolate_xarray_dataset(ds: xr.Dataset,
                     result[t_idx, :] = time_result
                     
                 except Exception as e:
-                    print(f"Warning: Failed to interpolate time step {t_idx}: {e}")
+                    logger.info(f"Warning: Failed to interpolate time step {t_idx}: {e}")
                     continue
             
             result = result.flatten() if n_times == 1 else result
             
         else:
             # 2D interpolation (longitude, latitude)
-            print("Performing 2D interpolation (lon, lat)")
+            logger.info("Performing 2D interpolation (lon, lat)")
             grid = pyinterp.backends.xarray.Grid2D(data_array)
             result = grid.bivariate(interp_coords, interpolator=interpolator, **kwargs)
         
         return result
         
     except Exception as e:
-        print(f"Error during interpolation: {e}")
-        print(f"Data array dimensions: {dims}")
-        print(f"Data array shape: {data_array.shape}")
-        print(f"Available coordinates: {list(coordinates.keys())}")
+        logger.info(f"Error during interpolation: {e}")
+        logger.info(f"Data array dimensions: {dims}")
+        logger.info(f"Data array shape: {data_array.shape}")
+        logger.info(f"Available coordinates: {list(coordinates.keys())}")
         raise
 
 
@@ -641,12 +313,82 @@ def apply_standard_dimension_order(da: xr.DataArray) -> xr.DataArray:
     
     return da.transpose(*final_order)
 
+def interpolate_xesmf(
+        ds: xr.Dataset, ranges: Dict[str, np.ndarray],
+        weights_filepath: Optional[str] = None,
+    ) -> xr.Dataset:
 
-def interpolate_xesmf(ds: xr.Dataset,
+    for variable_name in ds.variables:
+        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
+
+    # 1. Sauvegarder les attributs des coordonnées AVANT interpolation
+    coords_attrs = {}
+    for coord in ds.coords:
+        coords_attrs[coord] = ds.coords[coord].attrs.copy()
+
+    # (optionnel) Sauvegarder aussi les attrs des variables si besoin
+    vars_attrs = {}
+    for var in ds.data_vars:
+        vars_attrs[var] = ds[var].attrs.copy()
+
+    for key in ranges.keys():
+        assert(key in list(ds.dims))
+
+    out_dict = {}
+    for key in ranges.keys():
+        out_dict[key] = ranges[key]
+    for dim in GEO_STD_COORDS.keys():
+        if dim not in out_dict.keys():
+            out_dict[dim] = ds.coords[dim].values
+    ds_out = create_empty_dataset(out_dict)
+
+    # TODO : adapt chunking depending on the dataset type
+    ds_out = ds_out.chunk(chunks={"lat": -1, "lon": -1, "time": 1})
+
+    if weights_filepath and Path(weights_filepath).is_file():
+        # Use precomputed weights
+        logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
+        regridder = xe.Regridder(
+            ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
+        )
+    else:
+        # Compute weights
+        regridder = xe.Regridder(
+            ds, ds_out, "bilinear"
+        )
+        # Save the weights to a file
+        regridder.to_netcdf(weights_filepath)
+    # Regrid the dataset
+    ds_out = regridder(ds)
+
+    # 2. Réaffecter les attributs des variables (déjà fait dans ton code)
+    for var in ds_out.data_vars:
+        if var in vars_attrs:
+            ds_out[var].attrs = vars_attrs[var].copy()
+
+    # 3. Réaffecter les attributs des coordonnées
+    for coord in ds_out.coords:
+        if coord in coords_attrs:
+            # Crée un nouveau DataArray avec les attrs sauvegardés
+            new_coord = xr.DataArray(
+                ds_out.coords[coord].values,
+                dims=ds_out.coords[coord].dims,
+                attrs=coords_attrs[coord].copy()
+            )
+            ds_out = ds_out.assign_coords({coord: new_coord})
+
+    for variable_name in ds.variables:
+        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
+
+    return ds_out
+
+def interpolate_pyinterp(ds: xr.Dataset,
                                  # varnames: list,
                                  target_grid: Dict[str, np.ndarray],
-                                 reuse_weights: bool = False,
-                                 weights_file: Optional[str] = None,
                                  interpolator: str = "bilinear",
                                  **kwargs) -> xr.Dataset:
     """
@@ -685,7 +427,7 @@ def interpolate_xesmf(ds: xr.Dataset,
     
     if rename_dict:
         ds_work = ds_work.rename(rename_dict)
-        print(f"Renamed coordinates: {rename_dict}")
+        logger.info(f"Renamed coordinates: {rename_dict}")
     
     # Extract coordinate arrays
     lon_interp = np.asarray(target_grid['lon'])
@@ -717,11 +459,10 @@ def interpolate_xesmf(ds: xr.Dataset,
     # Interpolate each requested variable
     for varname in varnames:
         if varname not in ds_work.data_vars:
-            print(f"Warning: Variable '{varname}' not found in dataset, skipping...")
+            logger.warning(f"Variable '{varname}' not found in dataset, skipping...")
             continue
-            
         try:
-            print(f"Interpolating variable: {varname}")
+            # logger.info(f"Interpolating variable: {varname}")
             
             # Get original variable
             original_var = ds_work[varname]
@@ -733,7 +474,7 @@ def interpolate_xesmf(ds: xr.Dataset,
             
             # Case 1: 2D variables (lon, lat only)
             if not has_time and not has_depth:
-                print(f"  -> 2D interpolation for {varname}")
+                # logger.info(f"    2D interpolation for {varname}")
                 grid_2d = pyinterp.backends.xarray.Grid2D(original_var)
                 
                 # Create meshgrid for interpolation points
@@ -753,7 +494,7 @@ def interpolate_xesmf(ds: xr.Dataset,
                 
             # Case 2: 3D variables with depth but no time (lon, lat, depth)
             elif has_depth and not has_time:
-                print(f"  -> 3D interpolation (lon, lat, depth) for {varname}")
+                # logger.info(f"   3D interpolation (lon, lat, depth) for {varname}")
                 grid_3d = pyinterp.backends.xarray.Grid3D(original_var)
                 
                 # Create meshgrid for interpolation points
@@ -776,7 +517,7 @@ def interpolate_xesmf(ds: xr.Dataset,
                 
             # Case 3: 3D variables with time but no depth (time, lon, lat)
             elif has_time and not has_depth:
-                print(f"  -> 3D interpolation (time, lon, lat) for {varname}")
+                # logger.info(f"  -> 3D interpolation (time, lon, lat) for {varname}")
                 n_times = len(time_interp) if time_interp is not None else len(ds_work.time)
                 n_lon = len(lon_interp)
                 n_lat = len(lat_interp)
@@ -788,88 +529,88 @@ def interpolate_xesmf(ds: xr.Dataset,
                 lon_mesh, lat_mesh = np.meshgrid(lon_interp, lat_interp, indexing='ij')
                 flat_lon = lon_mesh.ravel()
                 flat_lat = lat_mesh.ravel()
-                
+
                 # Process each time step
                 times_to_process = time_interp if time_interp is not None else ds_work.time.values
-                
+
                 for t_idx, time_val in enumerate(times_to_process):
                     try:
                         # Select data for this time step
                         data_at_time = original_var.sel(time=time_val, method='nearest')
-                        
+
                         # Create 2D grid for this time step
                         grid_2d = pyinterp.backends.xarray.Grid2D(data_at_time)
-                        
+
                         # Interpolate for this time step
                         time_result = grid_2d.bivariate({
                             'longitude': flat_lon,
                             'latitude': flat_lat
                         }, interpolator=interpolator)  #, **kwargs)
-                        
+
                         # Reshape and store
                         interpolated_values[t_idx, :, :] = time_result.reshape(n_lon, n_lat)
-                        
+
                     except Exception as e:
-                        print(f"    Warning: Failed to interpolate {varname} at time step {t_idx}: {e}")
+                        logger.warning(f"    Failed to interpolate {varname} at time step {t_idx}: {e}")
                         continue
-                
+
                 new_dims = ['time', lon_coord_orig, lat_coord_orig]
-                
+
             # Case 4: 4D variables with time and depth (time, lon, lat, depth)
             elif has_time and has_depth:
-                print(f"  -> 4D interpolation (time, lon, lat, depth) for {varname}")
+                # logger.info(f"   4D interpolation (time, lon, lat, depth) for {varname}")
                 n_times = len(time_interp) if time_interp is not None else len(ds_work.time)
                 n_lon = len(lon_interp)
                 n_lat = len(lat_interp)
                 n_depth = len(depth_interp) if depth_interp is not None else len(ds_work.depth)
-                
+
                 # Initialize result array
                 interpolated_values = np.full((n_times, n_lon, n_lat, n_depth), np.nan)
-                
+
                 # Create meshgrid for spatial coordinates
                 lon_mesh, lat_mesh, depth_mesh = np.meshgrid(
                     lon_interp, lat_interp, depth_interp, indexing='ij')
                 flat_lon = lon_mesh.ravel()
                 flat_lat = lat_mesh.ravel()
                 flat_depth = depth_mesh.ravel()
-                
+
                 # Process each time step
                 times_to_process = time_interp if time_interp is not None else ds_work.time.values
-                
+
                 for t_idx, time_val in enumerate(times_to_process):
                     try:
                         # Select data for this time step
                         data_at_time = original_var.sel(time=time_val, method='nearest')
-                        
+
                         # Create 3D grid for this time step
                         grid_3d = pyinterp.backends.xarray.Grid3D(data_at_time)
-                        
+
                         # Interpolate for this time step
                         time_result = grid_3d.trivariate({
                             'longitude': flat_lon,
                             'latitude': flat_lat,
                             'depth': flat_depth
                         }, interpolator=interpolator) #, **kwargs)
-                        
+
                         # Reshape and store
                         interpolated_values[t_idx, :, :, :] = time_result.reshape(n_lon, n_lat, n_depth)
-                        
+
                     except Exception as e:
-                        print(f"    Warning: Failed to interpolate {varname} at time step {t_idx}: {e}")
+                        logger.warning(f"    Failed to interpolate {varname} at time step {t_idx}: {e}")
                         continue
-                
+
                 # Determine depth coordinate name
                 depth_coord_name = next((k for k in ['depth', 'z', 'level'] if k in original_dims), 'depth')
                 new_dims = ['time', lon_coord_orig, lat_coord_orig, depth_coord_name]
-            
+
             # Create new variable with interpolated values using original coordinate names
             data_vars[varname] = (new_dims, interpolated_values, original_var.attrs)
-            print(f"  -> Successfully interpolated variable: {varname}")
-            
+            # logger.info(f"  -> Successfully interpolated variable: {varname}")
+
         except Exception as e:
-            print(f"Error interpolating variable {varname}: {e}")
+            logger.error(f"Error interpolating variable {varname}: {e}")
             continue
-    
+
 
     # Create result dataset with original coordinate names
     ds_result = xr.Dataset(
@@ -933,197 +674,6 @@ def create_interpolation_coordinates(lon_points: np.ndarray,
     
     return coords
 
-
-
-
-
-'''
- 
-import xarray as xr
-import dask
-import pyinterp
-import numpy as np
-
-def interpolate_xesmf(
-    ds: xr.Dataset,
-    target_grid: dict,
-    reuse_weights: bool = True,
-    weights_file: Optional[str] = None,
-    time_dim: str = "time",
-    vertical_dim: str = "depth",
-    lon_dim: str = "lon",
-    lat_dim: str = "lat",
-    method: str = "linear",
-    drop_missing: bool = True,
-) -> xr.Dataset:
-    """
-    Interpolate a gridded dataset onto a target grid using pyinterp, in a lazy (Dask) fashion.
-    """
-    log_memory("START interpolate_pyinterp")
-    out_vars = []
-
-    # Ensure Dask chunking for lazy evaluation
-    if not ds.chunks:
-        chunk_dims = {d: 1 for d in ds.dims if d in [time_dim, vertical_dim]}
-        chunk_dims.update({lat_dim: 128, lon_dim: 128})
-        ds = ds.chunk(chunk_dims)
-
-    lat_t = target_grid[lat_dim]
-    lon_t = target_grid[lon_dim]
-
-    time_vals = ds[time_dim].values if time_dim in ds.dims else [None]
-    depth_vals = ds[vertical_dim].values if vertical_dim in ds.dims else [None]
-
-    for var_name, da in ds.data_vars.items():
-        dims = set(da.dims)
-        if not {lat_dim, lon_dim}.issubset(dims):
-            if drop_missing:
-                continue
-            else:
-                out_vars.append(da)
-                continue
-
-        slices = []
-        for t in time_vals:
-            for z in depth_vals:
-                # Sélectionne la tranche à interpoler
-                da_sel = da
-                if t is not None and time_dim in da.dims:
-                    da_sel = da_sel.sel({time_dim: t})
-                if z is not None and vertical_dim in da.dims:
-                    da_sel = da_sel.sel({vertical_dim: z})
-
-                # Interpolation 2D avec pyinterp
-                lon = da_sel[lon_dim].values
-                lat = da_sel[lat_dim].values
-                data = da_sel.values
-
-
-                # Vérifier que la variable est bien 2D (lat, lon)
-                if set(da_sel.dims) != {lat_dim, lon_dim}:
-                    continue
-
-                # Interpolation 2D avec pyinterp
-                grid = pyinterp.backends.xarray.Grid2D(da_sel)
-                if method == "bilinear":
-                    lon_grid, lat_grid = np.meshgrid(lon_t, lat_t)
-                    interp = grid.bivariate(
-                        {lon_dim: lon_t, lat_dim: lat_t},
-                        bounds_error=False
-                    )
-                elif method == "nearest":
-                    interp = grid.bivariate(
-                        {lon_dim: lon_t, lat_dim: lat_t},
-                        method="nearest",
-                        bounds_error=False
-                    )
-                elif method == "bicubic":
-                    interp = grid.bicubic(
-                        {lon_dim: lon_t, lat_dim: lat_t},
-                        bounds_error=False
-                    )
-                else:
-                    raise ValueError(f"Unknown interpolation method: {method}")
-                interp_da = xr.DataArray(
-                    interp,
-                    dims=(lat_dim, lon_dim),
-                    coords={lat_dim: lat_t, lon_dim: lon_t},
-                    name=var_name,
-                )
-                if z is not None and vertical_dim in da.dims:
-                    interp_da = interp_da.expand_dims({vertical_dim: [z]})
-                if t is not None and time_dim in da.dims:
-                    interp_da = interp_da.expand_dims({time_dim: [t]})
-                slices.append(interp_da)
-
-        # Concatène sur les axes appropriés
-        if slices:
-            concat_dims = [dim for dim in [time_dim, vertical_dim] if dim in da.dims]
-            interp_var = xr.concat(slices, dim=concat_dims)
-            out_vars.append(interp_var)
-
-    interpolated_ds = xr.merge(out_vars)
-    log_memory("END interpolate_pyinterp")
-    return interpolated_ds
-'''
-
-
-
-'''
-def interpolate_xesmf(
-    ds: xr.Dataset,
-    target_grid: dict,
-    reuse_weights: bool = True,
-    weights_file: Optional[str] = None,
-    time_dim: str = "time",
-    vertical_dim: str = "depth",
-    lon_dim: str = "lon",
-    lat_dim: str = "lat",
-    method: str = "linear",
-    drop_missing: bool = True,
-) -> xr.Dataset:
-    """
-    Interpolate a gridded dataset onto a target grid using pyinterp, variable by variable, time/depth slice by slice.
-    Returns a Dask-backed Dataset if input is chunked.
-    """
-    log_memory("START interpolate_pyinterp")
-    out_vars = []
-
-    # Prépare les valeurs cibles
-    lat_t = target_grid[lat_dim]
-    lon_t = target_grid[lon_dim]
-    has_time = time_dim in ds.dims
-    has_depth = vertical_dim in ds.dims and vertical_dim in target_grid
-    time_vals = ds[time_dim].values if has_time else [None]
-    depth_vals = ds[vertical_dim].values if has_depth else [None]
-
-    for var_name, da in ds.data_vars.items():
-        dims = set(da.dims)
-        if not {lat_dim, lon_dim}.issubset(dims):
-            if drop_missing:
-                continue
-            else:
-                out_vars.append(da)
-                continue
-
-        slices = []
-        for t in time_vals:
-            for z in depth_vals:
-                # Sélectionne la tranche à interpoler
-                da_sel = da
-                if t is not None and time_dim in da.dims:
-                    da_sel = da_sel.sel({time_dim: t})
-                if z is not None and vertical_dim in da.dims:
-                    da_sel = da_sel.sel({vertical_dim: z})
-
-                # Interpolation 2D avec pyinterp
-                lon = da_sel[lon_dim].values
-                lat = da_sel[lat_dim].values
-                data = da_sel.values
-                grid = pyinterp.backends.xarray.Grid2D(lon, lat, data)
-                interp = grid.interp(lon_t, lat_t, method=method, bounds_error=False)
-                interp_da = xr.DataArray(
-                    interp,
-                    dims=(lat_dim, lon_dim),
-                    coords={lat_dim: lat_t, lon_dim: lon_t},
-                    name=var_name,
-                )
-                if z is not None and vertical_dim in da.dims:
-                    interp_da = interp_da.expand_dims({vertical_dim: [z]})
-                if t is not None and time_dim in da.dims:
-                    interp_da = interp_da.expand_dims({time_dim: [t]})
-                slices.append(interp_da)
-
-        # Concatène sur les axes appropriés
-        if slices:
-            concat_dims = [dim for dim in [time_dim, vertical_dim] if dim in da.dims]
-            interp_var = xr.concat(slices, dim=concat_dims)
-            out_vars.append(interp_var)
-
-    interpolated_ds = xr.merge(out_vars)
-    log_memory("END interpolate_pyinterp")
-    return interpolated_ds
-'''
 
 #@profile
 def interpolate_dataset(
@@ -1194,16 +744,8 @@ def interpolate_dataset(
         raise("Unknown interpolation lib")
 
     # Compute weights
-    '''regridder = xe.Regridder(
-        ds, ds_out, "bilinear",
-    )
-    # Save the weights to a file
-    regridder.to_netcdf(weights_filepath)'''
     # Regrid the dataset
-
     # ds_out = regridder(ds)
-
-
 
     # 2. Réaffecter les attributs des variable
     for var in ds.data_vars:

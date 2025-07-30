@@ -71,8 +71,6 @@ def visualize_netcdf_with_geometry(
     # Tracer la géométrie
     gdf.plot(ax=ax, edgecolor='red', facecolor='none', linewidth=2, transform=ccrs.PlateCarree())
 
-    # Ajouter des caractéristiques naturelles (par exemple, côtes)
-    #ax.add_feature(NaturalEarthFeature('physical', 'coastline', '10m', edgecolor='black'))
 
     # Afficher la carte
     plt.show()
@@ -184,31 +182,6 @@ def add_noise_with_snr(signal: np.ndarray, snr_db: float, seed: int = None) -> n
     noise = np.random.normal(loc=0.0, scale=np.sqrt(noise_power), size=signal.shape)
     noisy_signal = signal + noise
     return noisy_signal
-
-'''import folium
-import geopandas as gpd
-
-m = folium.Map(zoom_start=2)
-for _, row in catalog.iterrows():
-    geojson = gpd.GeoSeries([row.geometry]).to_json()
-    folium.GeoJson(geojson, tooltip=row.path).add_to(m)
-'''
-
-
-'''
-# Exemple d'instance CatalogEntry
-catalog_entry = CatalogEntry(
-    path="path/to/netcdf_file.nc",
-    date_start="2023-01-01",
-    date_end="2023-01-31",
-    variables={"temperature": ["time", "lat", "lon"]},
-    dimensions={"lat": "latitude", "lon": "longitude"},
-    coord_type="geographic",
-    crs="EPSG:4326",
-    geometry=Polygon([(-10, 40), (-10, 50), (0, 50), (0, 40), (-10, 40)])
-)
-
-visualize_netcdf_with_geometry(catalog_entry)'''
 
 
 def nan_to_none(obj):

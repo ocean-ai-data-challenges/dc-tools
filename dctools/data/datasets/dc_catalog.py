@@ -98,17 +98,12 @@ class DatasetCatalog:
             for entry in entries:
                 if isinstance(entry, CatalogEntry):
                     self.entries.append(entry)
-                    # logger.debug(f"Adding entry: {entry}")
                 elif isinstance(entry, dict):
                     self.entries.append(CatalogEntry(**entry))
-                    # logger.debug(f"Adding entry: {entry}")
                 else:
                     logger.warning(f"Ignoring invalid entry: {entry}")
 
             # Convertir les entrées en GeoDataFrame
-            #self.gdf = gpd.GeoDataFrame(
-            #    [asdict(entry) for entry in self.entries]
-            #)
             self.gdf = gpd.GeoDataFrame(
                 [asdict(entry) for entry in self.entries],
                 geometry="geometry",
@@ -120,25 +115,6 @@ class DatasetCatalog:
         if not self.gdf.empty:
             self.gdf = self._clean_dataframe(self.gdf)
 
-
-    '''def to_json(self, path: Optional[str] = None) -> str:
-        """
-        Exporte l'intégralité du contenu de DatasetCatalog au format JSON.
-
-        Args:
-            path (Optional[str]): Chemin pour sauvegarder le fichier JSON.
-
-        Returns:
-            str: Représentation JSON complète de l'instance.
-        """
-        try:
-            " self._global_metadata 
-            self.gdf.to_file(path, driver="GeoJSON", mode='a')
-
-            #return json_str
-        except Exception as exc:
-            logger.error(f"Erreur lors de l'exportation en JSON : {repr(exc)}")
-            raise'''
 
     def to_json(self, path: Optional[str] = None) -> str:
         """
@@ -428,7 +404,6 @@ class DatasetCatalog:
         Args:
             region (gpd.GeoSeries): Un polygone ou une collection de polygones.
         """
-        return
         self.gdf.set_crs("EPSG:4326", inplace=True)   # TODO : SET AT INIT
         self.check_geometries_compatibility(self.gdf, region)
         '''if not isinstance(region, shapely.MultiPoint):

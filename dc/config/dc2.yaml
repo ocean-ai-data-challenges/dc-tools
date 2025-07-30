@@ -1,15 +1,15 @@
 # This file lists variables used in configuring dc2 evaluation 
 ################################################################
 ##  WASABI credentials
-define: &WASABI_KEY "EG5GYSEYI5C20O6IHNEJ"
-define: &WASABI_SECRET_KEY "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
+define: &WASABI_KEY 
+define: &WASABI_SECRET_KEY 
 
 ################################################################
 
 n_days_forecast: 10
 n_days_interval: 7
 
-delta_time: 12
+delta_time: 12   # 
 max_samples: 
 max_cache_files: 1000
 ###########################################
@@ -17,7 +17,7 @@ max_cache_files: 1000
 ## start time
 start_time: "2024-01-03"
 ## end time
-end_time: "2024-01-20"
+end_time: "2024-01-11"
 
 
 # Target region coordinates
@@ -44,18 +44,21 @@ sources:
     keep_variables:
       - "so"
       - "thetao"
-      - "uo"
-      - "vo"
-      - "zos"
+#      - "uo"
+#      - "vo"
+#      - "zos"
     eval_variables:
       - "so"
       - "thetao"
-      - "uo"
-      - "vo"
-      - "zos"
+#      - "uo"
+#      - "vo"
+#      - "zos"
 
   - dataset: swot
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
@@ -77,6 +80,9 @@ sources:
 
   - dataset: argo_velocities
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
@@ -99,6 +105,9 @@ sources:
   
   - dataset: argo_profiles
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "argopy"
     connection_type: 
     url: 
@@ -118,6 +127,8 @@ sources:
 
   - dataset: jason3
     observation_dataset: true
+    metrics:
+      - "rmsd"
     interpolation_method: "pyinterp"
     time_tolerance: 12   # time tolerance for matching with observations (hours)
     metrics: 
@@ -145,6 +156,8 @@ sources:
 
   - dataset: saral
     observation_dataset: true
+    metrics:
+      - "rmsd"
     time_tolerance: 12   # time tolerance for matching with observations (hours)
     config: "s3"
     connection_type: "wasabi"
@@ -167,6 +180,9 @@ sources:
 
   - dataset: SST_fields
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "cmems"
     connection_type:
     cmems_product_name: "cmems_obs-sst_glo_phy_l3s_pir_P1D-m"
@@ -184,6 +200,9 @@ sources:
 
   - dataset: jason1
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
@@ -207,6 +226,9 @@ sources:
 
   - dataset: jason2
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
@@ -233,6 +255,9 @@ sources:
 
   - dataset: SSS_fields
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     groups:
       - "ku"
       - "data_01"
@@ -261,9 +286,8 @@ sources:
 
   - dataset: glonet
     observation_dataset: false
-    metrics: 
+    metrics:
       - "rmsd"
-    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
     connection_type: "anonymous"
     url: "https://minio.dive.edito.eu"
@@ -286,6 +310,8 @@ sources:
 
   - dataset: glonet_wasabi
     observation_dataset: false
+    metrics:
+      - "rmsd"
     config: "s3"
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
@@ -310,6 +336,9 @@ sources:
 
   - dataset: amsr2
     observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"

@@ -138,7 +138,6 @@ class OceanbenchMetrics(DCMetric):
             # --- Ajout pour les métriques classe 4 ---
             "class4": None
         }
-        logger.debug(f"self.metrics_set: {self.metrics_set}")
 
     #@profile
     def compute_metric(
@@ -165,18 +164,6 @@ class OceanbenchMetrics(DCMetric):
 
         if self.is_class4:
             try:
-                # Préparer les arguments pour compute_class4_metrics
-                # Fusionner class4_kwargs, extra_kwargs, et les arguments explicites
-                #import pandas as pd
-                # Définir la date de début souhaitée
-                # start_date = pd.Timestamp("2016-02-12")  # TODO: Remove this
-
-                # Générer la nouvelle série temporelle avec un pas d’un jour
-                #new_time = pd.date_range(start=start_date, periods=eval_dataset.sizes["time"], freq="h")
-
-                # emplacer la coordonnée "time"
-                #eval_dataset = eval_dataset.assign_coords(time=new_time)
-
                 eval_variables = [var for var in eval_variables if var in ref_dataset.data_vars]
                 oceanbench_eval_variables =[
                     self.get_variable_alias(var) for var in eval_variables
@@ -186,10 +173,8 @@ class OceanbenchMetrics(DCMetric):
                 res = self.class4_evaluator.run(
                     model_ds=eval_dataset,
                     obs_ds=ref_dataset,
-                    # pred_coords=pred_coords,
                     variables=eval_variables,
                     ref_coords=ref_coords,
-                    # variables=oceanbench_eval_variables,
                 )
                 return res
 
@@ -245,7 +230,8 @@ class OceanbenchMetrics(DCMetric):
                         kwargs["zone"] = zone
 
                     kwargs.update(add_kwargs)
-                return metric_func(**kwargs)
+                result = metric_func(**kwargs)
+                return result
             except Exception as exc:
                 logger.error(f"Failed to compute metric {self.metric_name}: {traceback.format_exc()}")
                 raise
