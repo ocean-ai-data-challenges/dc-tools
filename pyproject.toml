@@ -33,7 +33,6 @@ dependencies = [
     "pyarrow",
     "pyinterp>=2025.3.0",
     "rich>=13.9.4",
-    "scipy==1.13.1",
     "s3fs>=2024.10.0",
     "shapely>=1.8.4",
     "tabulate",
@@ -46,6 +45,7 @@ dependencies = [
     "xskillscore>=0.0.27",
     "zarr (>=2.14.2,<3.0.0)",
     #"zarr==2.18.5",
+    "scipy (>=1.13.1,<2.0.0)"
 ]
 
 [project.urls]

@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from torchvision import transforms
 import xarray as xr
+from pyproj import Transformer
 
 from dctools.data.coordinates import (
     LIST_VARS_GLONET,
@@ -27,7 +28,7 @@ from dctools.utilities.xarray_utils import (
 
 
 class TransformWrapper:
-    """ Wraps a transform that operates on only the sample """
+    """Wraps a transform that operates on only the sample."""
     def __init__(self, transf):
         self.transf = transf
 
@@ -41,7 +42,7 @@ class TransformWrapper:
 
 
 class RenameCoordsVarsTransform:
-    """ a custom transform dependent on time axis """
+    """A custom transform dependent on time axis."""
     def __init__(
         self,
         coords_rename_dict: Optional[Dict] = None,
@@ -140,7 +141,7 @@ class WrapLongitudeTransform:
 
 
 class AssignCoordsTransform:
-    """ a custom transform dependent on time axis """
+    """A custom transform dependent on time axis."""
     def __init__(
             self, coord_name: str, coord_vals: List[Any], coord_attrs: Dict[str, str]
         ):
@@ -155,7 +156,7 @@ class AssignCoordsTransform:
         return transf_dataset
 
 class SubsetCoordTransform:
-    """ a custom transform dependent on time axis """
+    """A custom transform dependent on time axis. """
     def __init__(self, coord_name: str, coord_vals: List[Any]):
         self.coord_name = coord_name
         self.coord_vals = coord_vals
@@ -238,6 +239,10 @@ class CustomTransforms:
                 return self.to_timestamp(
                     dataset
                 )
+            case "to_epsg3413":
+                return self.transform_to_epsg3413(
+                    dataset
+                )
             case _:
                 return dataset
 
@@ -312,12 +317,8 @@ class CustomTransforms:
         list_vars = self.list_vars if hasattr(self, "list_vars") else LIST_VARS_GLONET
 
         transform=transforms.Compose([
-            #RenameCoordsVarsTransform(coords_rename_dict=dict_rename),
-            #SelectVariablesTransform(list_vars),
             SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
-            #AssignCoordsTransform(time_coord_name, time_coord_vals, time_coord_attrs),
             InterpolationTransform(self.interp_ranges, self.weights_path),
-            # ResetTimeCoordsTransform(),
         ])
         transf_dataset = transform(dataset)
         return transf_dataset
@@ -348,47 +349,37 @@ class CustomTransforms:
         transform = ToTimestampTransform(self.time_names)
         return transform(ds)
 
-    '''def transform_add_spatial_coords(self, dataset: xr.Dataset) -> xr.Dataset:
-        import ast, traceback
-        assert hasattr(self, "coords_rename_dict")
-        if isinstance(self.coords_rename_dict, str):
-            coords_rename_dict = ast.literal_eval(self.coords_rename_dict)
-        else:
-            coords_rename_dict = self.coords_rename_dict
-        lat_coord_name = coords_rename_dict['lat']
-        lon_coord_name = coords_rename_dict['lon']
-        depth_coord_name = coords_rename_dict.get('depth', None)
-        try:
-            coords_to_set = [lat_coord_name, lon_coord_name]
-            if depth_coord_name is not None:
-                coords_to_set.append(depth_coord_name)
+    def transform_to_epsg3413(
+      self,
+      dataset: xr.Dataset,      
+    ) -> xr.Dataset:
+        """
+        Converts a dataset with lat/lon coordinates into the EPSG 3413 CRS.
 
-            # S'assurer que les variables sont des coordonnées
-            for coord in coords_to_set:
-                if coord not in dataset.coords and coord in dataset:
-                    dataset = dataset.set_coords(coord)
+        Parameters
+        ----------
+        dataset : xr.Dataset
+            The dataset to transform
 
-            # Construire le mapping {ancienne_dim: nouvelle_coordonnée}
-            swap_dict = {}
-            dims_checked = set()
-            for coord in coords_to_set:
-                if coord not in dataset.dims and coord in dataset.coords:
-                    # Chercher une dimension de même taille à remplacer
-                    for dim in dataset.dims:
-                        if (
-                            dim not in swap_dict  # éviter de swapper deux fois la même dim
-                            and dim not in dims_checked
-                            and dataset[coord].ndim == 1
-                            and dataset[coord].size == dataset.dims[dim]
-                            and coord != dim
-                        ):
-                            swap_dict[dim] = coord
-                            dims_checked.add(dim)
-                            break
-            if swap_dict:
-                dataset = dataset.swap_dims(swap_dict)
+        Returns
+        -------
+        xr.Dataset
+            A copy of the dataset with added `x` and `y` coordinates
+        """
 
-            return dataset
-        except Exception as exc:
-            logger.error(f"Erreur lors de l'ajout des coordonnées spatiales : {traceback.format_exc(exc)}")
-            raise'''
+        # NOTE: Maybe this should be put into a class like the other transforms but
+        #       I don't really get what would be the point of that
+
+        # Create transformer from WGS84 to EPSG:3413
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:3413", always_xy=True)
+
+        # Extract lon and lat arrays
+        lons = dataset['lon'].values
+        lats = dataset['lat'].values
+
+        # Transform to EPSG:3413
+        x, y = transformer.transform(lons, lats)
+
+        # Add x and y as coordinates to the dataset
+        transf_dataset = dataset.assign_coords(x=("n_points", x), y=("n_points", y))
+        return transf_dataset

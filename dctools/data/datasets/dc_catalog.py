@@ -329,25 +329,45 @@ class DatasetCatalog:
 
 
 
-    def filter_by_date(self, start: datetime, end: datetime) -> None:
+    def filter_by_date(
+        self,
+        start: datetime | list[datetime],
+        end: datetime | list[datetime],
+    ) -> None:
         """
         Filtre les entrées par plage temporelle.
 
         Args:
-            start (datetime): Date de début.
-            end (datetime): Date de fin.
+            start (datetime): Date(s) de début.
+            end (datetime): Date(s) de fin.
 
         Returns:
             gpd.GeoDataFrame: GeoDataFrame filtré.
         """
-        if not isinstance(start, datetime) or not isinstance(end, datetime):
-            logger.warning("Start and end dates must be datetime objects.")
+        
+        if isinstance(start, datetime) and isinstance(end, datetime):
+            mask = (self.gdf["date_end"] >= start) & (self.gdf["date_start"] < end)
+        elif isinstance(start, list) and isinstance(end, list) \
+            and bool(start) and all(isinstance(elem, datetime) for elem in start) \
+            and bool(end) and all(isinstance(elem, datetime) for elem in end):
+            if len(start) != len(end):
+                logger.warning("start and end must have the same number of elements.")
+                return
+            mask = (self.gdf["date_end"] >= start[0]) # Initialize mask 
+            for start_el, end_el in zip(start, end):
+                in_period = (
+                    (self.gdf["date_end"] >= start_el) & 
+                    (self.gdf["date_start"] < end_el)
+                    )
+                mask = mask | in_period
+            
+        else:
+            logger.warning(
+                "Start and end dates must be datetime objects or lists of datetimes."
+            )
             return
-
-        self.gdf = self.gdf.loc[
-            (self.gdf["date_end"] >= start) & (self.gdf["date_start"] < end)
-        ]
-
+        
+        self.gdf = self.gdf.loc[mask]
 
     def check_geometries_compatibility(self, gdf: gpd.GeoDataFrame, region: geometry.Polygon):
         # 1. Vérifier le CRS

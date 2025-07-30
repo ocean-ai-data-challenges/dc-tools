@@ -9,7 +9,7 @@ from typing import (
 )
 
 import ast
-import datetime
+from datetime import datetime
 import geopandas as gpd
 
 from loguru import logger
@@ -278,7 +278,11 @@ class BaseDataset(ABC):
         self.catalog.filter_attrs(filters)'''
 
 
-    def filter_catalog_by_date(self, start: datetime, end: datetime):
+    def filter_catalog_by_date(
+            self,
+            start: datetime | list[datetime], 
+            end: datetime | list[datetime],
+            ):
         """
         Filtre le catalogue par plage temporelle.
 
