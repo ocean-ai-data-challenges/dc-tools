@@ -57,10 +57,10 @@ CONNECTION_CONFIG_REGISTRY = {
     "wasabi": WasabiS3ConnectionConfig,
 }
 
-def log_memory(stage):
+'''def log_memory(stage):
     process = psutil.Process(os.getpid())
     mem_mb = process.memory_info().rss / 1e6
-    print(f"[{stage}] Memory usage: {mem_mb:.2f} MB")
+    print(f"[{stage}] Memory usage: {mem_mb:.2f} MB")'''
 
 
 def make_fully_serializable(obj):
@@ -103,10 +103,7 @@ def make_fully_serializable(obj):
     # Fallback: string
 
 
-import psutil, os, objgraph
-import gc
-
-def log_memory_and_objects(tag=""):
+"""def log_memory_and_objects(tag=""):
     process = psutil.Process(os.getpid())
     mem = process.memory_info().rss / 1024**2  # en MiB
     print(f"[{tag}] Mémoire utilisée : {mem:.2f} MiB")
@@ -115,10 +112,10 @@ def log_memory_and_objects(tag=""):
     gc.collect()
     print("Top objets vivants :")
     for obj_type, count in objgraph.most_common_types(limit=10):
-        print(f"  {obj_type}: {count}")
+        print(f"  {obj_type}: {count}")"""
 
 
-def debug_worker_memory():
+"""def debug_worker_memory():
     import objgraph
     from pympler import muppy, summary
     print("==== OBJECT TYPES ====")
@@ -134,8 +131,7 @@ def debug_worker_memory():
         filename='/tmp/debug_backref.png'
     )
 
-    import gc
-    gc.collect()
+    gc.collect()"""
 
 class Evaluator:
     def __init__(
@@ -268,7 +264,6 @@ class Evaluator:
         try:
             # worker = get_worker()
             # print(f"Running on worker: {worker.address}")
-            log_memory("START EVALUATOR compute_metric")
 
             # Recrée l’objet de lecture dans le worker
             pred_config_cls = CONNECTION_CONFIG_REGISTRY[pred_source_config.protocol]
@@ -285,7 +280,6 @@ class Evaluator:
             ref_connection_manager = ref_connection_cls(ref_config)
             open_ref_func = ref_connection_manager.open
 
-            log_memory("EVALUATOR before open_pred_func")
             with open_pred_func(pred_path) as pred_data:
                 pred_data_selected = pred_data.sel(time=valid_time, method="nearest")
                 
@@ -297,8 +291,7 @@ class Evaluator:
                 else:
                     # La dimension time existe déjà, mais s'assurer qu'elle a la bonne valeur
                     pred_data = pred_data_selected.assign_coords(time=[valid_time])
-                    
-                log_memory("EVALUATOR after open_pred_func")
+
                 if ref_source is not None:
                     if ref_is_observation:
                         ref_data = ref_source
@@ -306,7 +299,6 @@ class Evaluator:
                         ref_data = open_ref_func(ref_source, ref_alias)
                 else:
                     ref_data = None
-                log_memory("EVALUATOR after open_ref_func")
 
                 if pred_transform:
                     pred_data = pred_transform(pred_data)
@@ -340,7 +332,6 @@ class Evaluator:
                             res_dict[clean_key] = rmsd_values
 
                         results[metric.get_metric_name()] = res_dict
-                log_memory("EVALUATOR after transform")
 
                 res = {
                     "model": model,
@@ -361,7 +352,6 @@ class Evaluator:
                 del ref_data
 
             gc.collect()
-            log_memory("END EVALUATOR compute_metric")
             return res
         except Exception as exc:
             logger.error(f"Error computing metrics for date {forecast_reference_time}: {repr(exc)}")
