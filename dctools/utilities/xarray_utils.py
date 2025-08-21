@@ -21,7 +21,7 @@ import psutil
 import pyinterp
 import pyinterp.backends.xarray
 import xarray as xr
-import xesmf as xe
+#import xesmf as xe
 
 from dctools.data.coordinates import (
     GEO_STD_COORDS
@@ -313,7 +313,7 @@ def apply_standard_dimension_order(da: xr.DataArray) -> xr.DataArray:
     
     return da.transpose(*final_order)
 
-def interpolate_xesmf(
+'''def interpolate_xesmf(
         ds: xr.Dataset, ranges: Dict[str, np.ndarray],
         weights_filepath: Optional[str] = None,
     ) -> xr.Dataset:
@@ -384,7 +384,7 @@ def interpolate_xesmf(
         if not var_std_name:
             var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
 
-    return ds_out
+    return ds_out'''
 
 def interpolate_pyinterp(ds: xr.Dataset,
                                  # varnames: list,
@@ -718,28 +718,28 @@ def interpolate_dataset(
             ds,
             target_grid=out_dict,
         )
-    elif interpolation_lib == "xesmf":
-        if weights_filepath and Path(weights_filepath).is_file():
-            # Use precomputed weights
-            logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
-            '''regridder = xe.Regridder(
-                ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
-            )'''
-            ds = interpolate_xesmf(
-                ds,
-                target_grid=out_dict,
-                reuse_weights=True,
-                weights_file=weights_filepath,
-                method="bilinear",
-            )
-        else:
-            ds = interpolate_xesmf(
-                ds,
-                target_grid=out_dict,
-                reuse_weights=False,
-                weights_file=weights_filepath,
-                method="bilinear",
-            )
+    #elif interpolation_lib == "xesmf":
+    #    if weights_filepath and Path(weights_filepath).is_file():
+    #        # Use precomputed weights
+    #        logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
+    #        '''regridder = xe.Regridder(
+    #            ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
+    #        )'''
+    #        ds = interpolate_xesmf(
+    #            ds,
+    #            target_grid=out_dict,
+    #            reuse_weights=True,
+    #            weights_file=weights_filepath,
+    #            method="bilinear",
+    #        )
+    #    else:
+    #        ds = interpolate_xesmf(
+    #            ds,
+    #            target_grid=out_dict,
+    #            reuse_weights=False,
+    #            weights_file=weights_filepath,
+    #            method="bilinear",
+    #        )
     else:
         raise("Unknown interpolation lib")
 
