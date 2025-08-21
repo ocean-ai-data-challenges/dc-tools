@@ -51,6 +51,10 @@ class BaseConnectionManager(ABC):
             self.params = connect_config
         else:
             raise TypeError("Unknown type of connection config.")
+        
+        self.start_time = self.params.time_interval[0]
+        self.end_time = self.params.time_interval[1]
+
         init_type = self.params.init_type
         if init_type != "from_json":
             self._list_files = self.list_files()
@@ -190,7 +194,7 @@ class BaseConnectionManager(ABC):
         Returns:
             Dict[str, Any]: Global metadata including spatial bounds and variable names.
         """
-        if not self._list_files:
+        if self._list_files is None:
             raise FileNotFoundError("No files found to extract global metadata.")
 
         return self._global_metadata if hasattr(self, "_global_metadata") else self.extract_global_metadata()
@@ -219,10 +223,27 @@ class BaseConnectionManager(ABC):
             Dict[str, Any]: Global metadata including spatial bounds and variable names.
         """
         files = self._list_files
-        if not files:
+        if files is None:
             raise FileNotFoundError("Empty file list! No files to extract metadata from.")
 
-        first_file = files[0]
+        # Boucler sur les fichiers jusqu'à trouver un fichier valide (non vide, non None)
+        first_file = None
+        for file_path in files:
+            # Vérifier que le fichier n'est pas None, vide ou invalide
+            if file_path and file_path != "" and file_path is not None:
+                try:
+                    # Tester si le fichier peut être ouvert
+                    test_ds = self.open(file_path, "rb")
+                    if test_ds is not None:
+                        first_file = file_path
+                        break
+                except Exception as exc:
+                    logger.warning(f"Could not open file {file_path}, trying next: {exc}")
+                    continue
+        
+        if first_file is None:
+            raise FileNotFoundError("No valid files found in the list to extract metadata from.")
+
 
         with self.open(first_file, "rb") as ds:
             # Extraire les métadonnées globales
@@ -509,16 +530,27 @@ class CMEMSManager(BaseConnectionManager):
                 dataset_id=self.params.dataset_id, create_file_list=tmp_filepath
             )
             self._files = read_file_tolist(tmp_filepath)'''
+            start_dt = pd.to_datetime(self.start_time)
+            start_year = start_dt.year
+            start_month = start_dt.month
+            start_day = start_dt.day
+            end_dt = pd.to_datetime(self.end_time)
+            end_year = end_dt.year
+            end_month = end_dt.month
+            end_day = end_dt.day
 
-            start_date = datetime.datetime(2024, 1, 1)
-            end_date = datetime.datetime(2025, 1, 3)
+            # start_date = datetime.datetime(2024, 1, 1)
+            # end_date = datetime.datetime(2025, 1, 3)
+            start_date = datetime.datetime(start_year, start_month, start_day)
+            end_date = datetime.datetime(end_year, end_month, end_day)
             list_dates = self.list_all_days(
                 start_date,
                 end_date,
             )
+            list_dates = list_dates [:self.params.max_samples]
             valid_dates = []
             for date in list_dates:
-                print(date)
+                # print(date)
                 ds = self.open_remote(date, mode="rb")
                 if ds is not None:
                     valid_dates.append(date)
@@ -840,6 +872,53 @@ class GlonetManager(BaseConnectionManager):
 
 class ArgoManager(BaseConnectionManager):
 
+    def __init__(self, connect_config: BaseConnectionConfig | Namespace,
+        lon_range: Optional[tuple[float, float]] = (-180, 180),
+        lat_range: Optional[tuple[float, float]] = (-90, 90),
+        lon_step: Optional[float] = 1.0,
+        lat_step: Optional[float] = 1.0,
+        depth_values: Optional[List[float]] = GLONET_DEPTH_VALS,
+        time_step_days: Optional[int] = 1,
+    ):
+        self.argo_loader = DataFetcher()
+        self.lon_range = lon_range
+        self.lat_range = lat_range
+        self.lon_step = lon_step
+        self.lat_step = lat_step
+        self.depth_values = depth_values
+        self.time_step_days = time_step_days
+
+        # Charger l'index
+        self.argo_index = None
+        self._load_index_once()
+        super().__init__(connect_config)
+
+    '''def _load_index_once(self):
+        """Charge l'index ARGO une seule fois."""
+        try:
+            idx = ArgoIndex()
+            idx = idx.load()  # Charger TOUT l'index
+            self.argo_index = idx.to_dataframe()
+            logger.info(f"Loaded ARGO index with {len(self.argo_index)} profiles")
+        except Exception as e:
+            logger.error(f"Failed to load ARGO index: {e}")
+            self.argo_index = pd.DataFrame()'''
+
+    def _load_index_once(self):
+        """Load ARGO index once."""
+        try:
+            idx = ArgoIndex()
+            idx = idx.load()
+            self.argo_index = idx.to_dataframe()
+
+            # Normalize all timestamps to the minute
+            self.argo_index['date'] = self.argo_index['date'].dt.floor('min')
+            
+            logger.info(f"Loaded ARGO index with {len(self.argo_index)} profiles")
+        except Exception as e:
+            logger.error(f"Failed to load ARGO index: {e}")
+            self.argo_index = pd.DataFrame()
+
     @classmethod
     def supports(cls, path: str) -> bool:
         return True
@@ -849,6 +928,21 @@ class ArgoManager(BaseConnectionManager):
 
     def spatial_filter(catalog_gdf: gpd.GeoDataFrame, region_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         return gpd.sjoin(catalog_gdf, region_gdf, how="inner", predicate="intersects")
+
+
+    def adjust_full_day_if_needed(
+        self,
+        date_start: pd.Timestamp, date_end: pd.Timestamp
+    ) -> tuple[pd.Timestamp, pd.Timestamp]:
+        """
+        Si date_start == date_end et date_start est à minuit, ajuste date_end pour couvrir toute la journée.
+        """
+        if pd.isnull(date_start) or pd.isnull(date_end):
+            return date_start, date_end
+        if date_start == date_end and date_start.hour == 0 and date_start.minute == 0 and date_start.second == 0:
+            # Ajuste date_end à la fin de la journée
+            date_end = date_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        return date_start, date_end
 
     def group_profiles_daily(self, df: pd.DataFrame, spatial_res: float = 5.0):
         df["grid_lat"] = (df["lat"] // spatial_res) * spatial_res
@@ -904,13 +998,7 @@ class ArgoManager(BaseConnectionManager):
         return ds
 
     def list_files_with_metadata(
-            self,
-            lon_range: Optional[tuple[float, float]] = (-180, 180),
-            lat_range: Optional[tuple[float, float]] = (-90, 90),
-            lon_step: Optional[float]=1.0,
-            lat_step: Optional[float]=1.0,
-            depth_values: Optional[List[float]] = GLONET_DEPTH_VALS,
-            time_step_days: Optional[int]=1,
+            self
     ) -> List[CatalogEntry]:
         """
         List all files with their metadata by combining global metadata and file-specific information.
@@ -923,104 +1011,172 @@ class ArgoManager(BaseConnectionManager):
         """
         list_dates = self._list_files
 
+
         metadata_list: List[CatalogEntry] = []
 
         first_elem = True
 
         for n_elem, start_date in enumerate(list_dates):
-            end_date = start_date + pd.Timedelta(days=1)
+            ds = self.open(start_date)
+            if ds is None:
+                continue
 
-            argo_loader = DataFetcher()
-
-            profile = argo_loader.region([
-                min(lon_range), max(lon_range),
-                min(lat_range), max(lat_range),
-                min(depth_values),
-                max(depth_values),
-                start_date, end_date
-            ])
-            logger.info(f"Fetched ARGO data : {profile}")
-            ds = profile.load().data
-            logger.info(f"Dataset : {ds}")
             # get coordinate system
             if first_elem:
                 coord_sys = CoordinateSystem.get_coordinate_system(ds)
 
-                variables = {v: list(ds[v].dims) for v in ds.data_vars if v in self.params.keep_variables}
+                # Inférer la résolution spatiale et temporelle
+                #dict_resolution = self.estimate_resolution(
+                #    ds, coord_sys
+                #)
+                dict_resolution  = {}
+                dict_resolution["time"] = "60s"
+                dict_resolution["latitude"] = None
+                dict_resolution["longitude"] = None
+
+                # Associer les variables à leurs dimensions
+                variables = {}
+                for var_name, var in ds.variables.items():
+
+                    if var_name in self.params.keep_variables:
+                        variables[var_name] = {
+                            "dims": list(var.dims),
+                            "std_name": var.attrs.get("standard_name", ""),
+                        }
+
+                # variables = {v: list(ds[v].dims) for v in ds.data_vars if v in self.params.keep_variables}
                 variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
                 variables_rename_dict = {v: k for k, v in variables_dict.items()}
                 # dimensions = dict(ds.dims)
 
-                coord_sys = CoordinateSystem.get_coordinate_system(ds)
+                # coord_sys = CoordinateSystem.get_coordinate_system(ds)
                 # dimensions = coord_sys.coordinates
-                resolution={"lon": lon_step, "lat": lat_step, "time": time_step_days}
+                #resolution={"lon": self.lon_step, "lat": self.lat_step, "time": self.time_step_days}
 
                 global_metadata = {
                     "variables": variables,
                     "variables_dict": variables_dict,
                     "variables_rename_dict": variables_rename_dict,
-                    "resolution": resolution,
+                    "resolution": dict_resolution,
                     "coord_system": coord_sys,
                     "keep_variables": self.params.keep_variables,
                 }
                 self.global_metadata = global_metadata
                 first_elem = False
             geometry = get_dataset_geometry(ds, coord_sys)
-            date_start = pd.to_datetime(
+            '''date_start = pd.to_datetime(
                 ds.time.min().values
             ) if "time" in ds.coords else None
             date_end = pd.to_datetime(
                 ds.time.max().values
-            ) if "time" in ds.coords else None
+            ) if "time" in ds.coords else None'''
 
-
-            def adjust_full_day_if_needed(date_start: pd.Timestamp, date_end: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
-                """
-                Si date_start == date_end et date_start est à minuit, ajuste date_end pour couvrir toute la journée.
-                """
-                if pd.isnull(date_start) or pd.isnull(date_end):
-                    return date_start, date_end
-                if date_start == date_end and date_start.hour == 0 and date_start.minute == 0 and date_start.second == 0:
-                    # Ajuste date_end à la fin de la journée
-                    date_end = date_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-                return date_start, date_end
-
-            date_start, date_end = adjust_full_day_if_needed(date_start, date_end)
+            # date_start, date_end = self.adjust_full_day_if_needed(date_start, date_end)
             entry = CatalogEntry(
-                path=None,  #f"argo://{df['file']}",
-                date_start=date_start,
-                date_end=date_end,
+                path=start_date,  #f"argo://{df['file']}",
+                date_start=start_date,
+                date_end= start_date + pd.Timedelta(minutes=1),
                 variables=variables,
                 geometry=geometry,
             )
             metadata_list.append(entry)
 
         return metadata_list
- 
 
     def list_files(self) -> List[str]:
+        """Liste les dates où il y a effectivement des données ARGO avec découpage temporel fin."""
+        if self.argo_index.empty:
+            return []
+
+        start_dt = pd.to_datetime(self.start_time)
+        end_dt = pd.to_datetime(self.end_time)
+        
+        # SOLUTION : Découper en chunks de 6-12 heures pour ARGO
+        chunk_size_hours = 6  # Très fin pour éviter les surcharges
+        all_dates = []
+        
+        current_start = start_dt
+        while current_start < end_dt:
+            current_end = min(current_start + pd.Timedelta(hours=chunk_size_hours), end_dt)
+            
+            logger.info(f"Processing ARGO temporal chunk: {current_start} to {current_end}")
+            
+            # Filtrer pour ce chunk temporel de quelques heures
+            chunk_filtered = self.argo_index[
+                (self.argo_index['date'] >= current_start) &
+                (self.argo_index['date'] <= current_end) &
+                (self.argo_index['latitude'] >= self.lat_range[0]) &
+                (self.argo_index['latitude'] <= self.lat_range[1]) &
+                (self.argo_index['longitude'] >= self.lon_range[0]) &
+                (self.argo_index['longitude'] <= self.lon_range[1])
+            ]
+
+            if not chunk_filtered.empty:
+                # Grouper par jour mais garder les heures pour un accès fin
+                chunk_dates = chunk_filtered['date'].dt.floor('min').unique()  # minute par minute
+                all_dates.extend([pd.Timestamp(date) for date in chunk_dates])
+                logger.info(f"Found {len(chunk_dates)} minute slots with ARGO data in chunk")
+
+            current_start = current_end
+        
+        # Supprimer les doublons et trier
+        unique_dates = sorted(list(set(all_dates)))
+        logger.info(f"Total unique minute timestamps with ARGO data: {len(unique_dates)}")
+
+        return unique_dates
+
+
+    '''def list_files(self) -> List[str]:
 
         # idx = ArgoIndex(host="https://data-argo.ifremer.fr")  # Default host
         idx = ArgoIndex(host="ftp://ftp.ifremer.fr/ifremer/argo", index_file="ar_index_global_prof.txt")  # Default index
 
-        limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
-        logger.info(f"Loading ARGO index with limit: {limit}")
+        # limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
+        # limit = len(self._list_files)
+        #logger.info(f"Loading ARGO index with limit: {limit}")
 
-        idx = idx.load(nrows=limit)
-        logger.info(f"\n\nARGO Index: {idx}")
+        idx = idx.load()  #nrows=limit)
+        # logger.info(f"\n\nARGO Index: {idx}")
         df = idx.to_dataframe(index=True)
-        logger.info(f"\n\nsize List of files 1: {idx.uri_full_index}")
+        # logger.info(f"\n\nsize List of files 1: {idx.uri_full_index}")
 
         # 3. Trier les données par date croissante
         df["date"] = pd.to_datetime(df["date"])
 
         # Générer une série de dates journalières entre min et max
-        list_dates = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')
+        date_range = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')
 
-        return list_dates
+        return date_range.tolist()'''
 
 
-    def open(
+    '''def list_files(self) -> List[str]:
+        """Liste les dates où il y a effectivement des données ARGO."""
+        if self.argo_index.empty:
+            return []
+        
+        # Filtrer l'index par région ET par dates
+        start_dt = pd.to_datetime(self.start_time)
+        end_dt = pd.to_datetime(self.end_time)
+        
+        filtered_index = self.argo_index[
+            (self.argo_index['date'] >= start_dt) &
+            (self.argo_index['date'] <= end_dt) &
+            (self.argo_index['latitude'] >= self.lat_range[0]) &
+            (self.argo_index['latitude'] <= self.lat_range[1]) &
+            (self.argo_index['longitude'] >= self.lon_range[0]) &
+            (self.argo_index['longitude'] <= self.lon_range[1])
+        ]
+        
+        if filtered_index.empty:
+            logger.warning("No ARGO data in specified region/time")
+            return []
+        
+        # Retourner seulement les dates où il y a des données
+        unique_dates = filtered_index['date'].dt.date.unique()
+        return [pd.Timestamp(date) for date in sorted(unique_dates)]'''
+
+
+    '''def open(
         self, path: str,
         mode: str = "rb",
     ) -> xr.Dataset:
@@ -1046,4 +1202,218 @@ class ArgoManager(BaseConnectionManager):
         # Charger le dataset avec argopy
         from argopy import DataFetcher
         ds = DataFetcher().region(parts[1:]).to_xarray()
-        return ds
+        return ds'''
+
+    '''def open(
+        self, start_date: pd.Timestamp,
+        mode: str = "rb",
+    ) -> xr.Dataset:
+        """
+        Open an Argo dataset from a given path.
+
+        Args:
+
+        Returns:
+            xr.Dataset: Opened Argo dataset.
+        """
+        print(f"argo process: {start_date}")
+
+        ref_start_date = pd.to_datetime(self.start_time)
+        ref_end_date = pd.to_datetime(self.end_time)
+
+        end_date = start_date + pd.Timedelta(days=1)
+
+        if end_date < ref_start_date or start_date > ref_end_date:
+            return None
+        
+        start_date, end_date = self.adjust_full_day_if_needed(start_date, end_date)
+
+        profile = self.argo_loader.region([
+            min(self.lon_range), max(self.lon_range),
+            min(self.lat_range), max(self.lat_range),
+            min(self.depth_values),
+            max(self.depth_values),
+            start_date, end_date
+        ])
+        # logger.info(f"Fetched ARGO data : {profile}")
+
+        # check if data is available before calling load()
+        try:
+            # Tenter d'obtenir l'index pour vérifier la présence de données
+            if hasattr(profile, '_index') and profile._index is not None:
+                index_df = profile.to_index()
+                if index_df.empty:
+                    #logger.warning(f"No ARGO data found for period {start_date} to {end_date}")
+                    return None
+            else:
+                # Fallback : essayer de charger un échantillon minimal
+                test_load = profile.load()
+                if test_load.data is None or len(test_load.data.dims) == 0:
+                    #logger.warning(f"No ARGO data found for period {start_date} to {end_date}")
+                    return None
+                # ds = test_load.data
+            
+            ds = profile.load().data
+            logger.info(f"Dataset : {ds}")
+            return ds
+        except Exception as fetch_error:
+            #logger.warning(f"No ARGO data available for {start_date} to {end_date}: {fetch_error}")
+            return None'''
+
+    '''def open(self, start_date: pd.Timestamp, mode: str = "rb") -> Optional[xr.Dataset]:
+        """Version optimisée qui évite les requêtes répétées."""
+        # Vérifier d'abord dans l'index local
+        start_date_only = start_date.date()
+        available_profiles = self.argo_index[
+            (self.argo_index['date'].dt.date == start_date_only) &
+            (self.argo_index['latitude'] >= self.lat_range[0]) &
+            (self.argo_index['latitude'] <= self.lat_range[1]) &
+            (self.argo_index['longitude'] >= self.lon_range[0]) &
+            (self.argo_index['longitude'] <= self.lon_range[1])
+        ]
+
+        if available_profiles.empty:
+            logger.debug(f"No ARGO profiles found for {start_date}")
+            return None
+
+        logger.info(f"Found {len(available_profiles)} ARGO profiles for {start_date}")
+
+        # Maintenant faire une requête ciblée
+        try:
+            end_date = start_date + pd.Timedelta(days=1)
+            
+            profile = self.argo_loader.region([
+                self.lon_range[0], self.lon_range[1],
+                self.lat_range[0], self.lat_range[1],
+                min(self.depth_values), max(self.depth_values),
+                start_date, end_date
+            ])
+            
+            # Pas besoin de vérifier l'index - on sait qu'il y a des données
+            ds = profile.load().data
+            return ds
+            
+        except Exception as e:
+            logger.error(f"Failed to load ARGO data for {start_date}: {e}")
+            return None'''
+
+
+    def open(self, start_date: pd.Timestamp, mode: str = "rb") -> Optional[xr.Dataset]:
+        """Version optimisée qui utilise les profils individuels identifiés."""
+        
+        # Vérifier dans l'index local les profils disponibles
+        start_date_only = start_date.date()
+        available_profiles = self.argo_index[
+            (self.argo_index['date'].dt.date == start_date_only) &
+            (self.argo_index['latitude'] >= self.lat_range[0]) &
+            (self.argo_index['latitude'] <= self.lat_range[1]) &
+            (self.argo_index['longitude'] >= self.lon_range[0]) &
+            (self.argo_index['longitude'] <= self.lon_range[1])
+        ]
+        
+        if available_profiles.empty:
+            logger.debug(f"No ARGO profiles found for {start_date}")
+            return None
+        
+        logger.info(f"Found {len(available_profiles)} ARGO profiles for {start_date}")
+        
+        # Charger les profils individuellement plutôt qu'avec une requête régionale
+        try:
+            datasets = []
+            max_profiles = 20  # Limite pour éviter la surcharge
+            
+            # Filtrer par correspondance exacte temporelle
+            selected_profiles = available_profiles[
+                available_profiles['date'] == start_date
+            ]
+            
+            if selected_profiles.empty:
+                '''# Si aucune correspondance exacte, prendre les profils dans une fenêtre de ±30 minutes
+                time_tolerance = pd.Timedelta(minutes=30)
+                time_window_profiles = available_profiles[
+                    (available_profiles['date'] >= start_date - time_tolerance) &
+                    (available_profiles['date'] <= start_date + time_tolerance)
+                ]
+                
+                if time_window_profiles.empty:
+                    logger.debug(f"No ARGO profiles found within 30 minutes of {start_date}")
+                    return None
+                
+                # Trier par proximité temporelle et prendre les plus proches
+                time_window_profiles['time_diff'] = abs(time_window_profiles['date'] - start_date)
+                selected_profiles = time_window_profiles.nsmallest(max_profiles, 'time_diff')
+                logger.info(f"Using {len(selected_profiles)} profiles within ±30min of {start_date}")'''
+                return None
+            #else:
+            #    # Utiliser les profils avec correspondance exacte
+            #    selected_profiles = exact_time_profiles.head(max_profiles)
+            #    logger.info(f"Using {len(selected_profiles)} profiles at exact time {start_date}")
+            
+            for _, profile_info in selected_profiles.iterrows():
+                try:
+                    # Charger chaque profil individuellement par WMO et cycle
+                    wmo = int(profile_info['wmo'])
+                    cycle = int(profile_info['cyc'])
+                    
+                    # Utiliser le DataFetcher avec des coordonnées spécifiques du profil
+                    profile_ds = self.argo_loader.profile(wmo, cycle).load().data
+                    
+                    if profile_ds is not None and len(profile_ds.N_POINTS) > 0:
+                        datasets.append(profile_ds)
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to load profile WMO={wmo}, cycle={cycle}: {e}")
+                    continue
+            
+            if datasets:
+                # Concaténer tous les profils chargés
+                combined_ds = xr.concat(datasets, dim='N_POINTS')
+                logger.info(f"Successfully loaded {len(combined_ds.N_POINTS)} ARGO profiles for {start_date}")
+
+
+                # Ajouter la profondeur comme dimension
+                combined_ds = self._add_depth_dimension(combined_ds)
+                return combined_ds
+            else:
+                logger.warning(f"No ARGO profiles could be loaded for {start_date}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to load ARGO data for {start_date}: {e}")
+            return None
+
+    def _add_depth_dimension(self, ds: xr.Dataset) -> xr.Dataset:
+        """
+        Ajoute la profondeur comme dimension au dataset ARGO.
+        
+        Args:
+            ds: Dataset ARGO avec dimension N_POINTS
+            
+        Returns:
+            Dataset avec dimension 'depth' ajoutée basée sur PRES ou PRES_ADJUSTED
+        """
+        # Utiliser PRES_ADJUSTED comme profondeur (1 décibar ≈ 1 mètre)
+        if 'PRES_ADJUSTED' in ds.data_vars:
+            depth_values = ds['PRES_ADJUSTED'].values
+        elif 'PRES' in ds.data_vars:
+            depth_values = ds['PRES'].values
+        else:
+            logger.warning("No pressure variable found in ARGO data")
+            return ds
+        
+        # Créer une nouvelle dimension 'depth' basée sur les valeurs de pression
+        ds_copy = ds.copy()
+        
+        # Ajouter 'depth' comme coordonnée
+        ds_copy = ds_copy.assign_coords(depth=('N_POINTS', depth_values))
+        
+        # ajouter des attributs pour la dimension depth
+        ds_copy['depth'].attrs = {
+            'standard_name': 'depth',
+            'long_name': 'Depth',
+            'units': 'meters',
+            'positive': 'down',
+            'comment': 'Approximated from pressure (1 dbar ≈ 1 meter)'
+        }
+        
+        return ds_copy

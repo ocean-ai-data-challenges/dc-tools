@@ -397,6 +397,7 @@ def get_dataset_from_config(
     use_catalog: bool = True,
     file_cache: FileCacheManager=None,
     dask_cluster: Optional[Any] = None,
+    time_interval: Optional[Tuple[str, str]] = None,
 ) -> RemoteDataset:
     """Get dataset from config."""
     # Load config
@@ -438,6 +439,7 @@ def get_dataset_from_config(
                 keep_variables=keep_variables,
                 file_cache=file_cache,
                 dask_cluster=dask_cluster,
+                time_interval=time_interval,
             )
             # Load dataset metadata from catalog
             cmems_config = DatasetConfig(
@@ -461,6 +463,7 @@ def get_dataset_from_config(
                 keep_variables=keep_variables,
                 file_cache=file_cache,
                 dask_cluster=dask_cluster,
+                time_interval=time_interval,
             )
             argo_config = DatasetConfig(
                 alias=dataset_name,
@@ -490,6 +493,7 @@ def get_dataset_from_config(
                     keep_variables=keep_variables,
                     file_cache=file_cache,
                     dask_cluster=dask_cluster,
+                    time_interval=time_interval,
                 )
             elif dataset_name == "glonet":
                 s3_connection_config = GlonetConnectionConfig(
@@ -503,6 +507,7 @@ def get_dataset_from_config(
                     keep_variables=keep_variables,
                     file_cache=file_cache,
                     dask_cluster=dask_cluster,
+                    time_interval=time_interval,
                 )
             s3_config = DatasetConfig(
                 alias=dataset_name,

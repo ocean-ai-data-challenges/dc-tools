@@ -146,62 +146,63 @@ class EvaluationDataloader:
                 forecast_end_time = forecast_reference_time + pd.Timedelta(days=max_lead_time)
             
             # Vérifier que le forecast complet est dans la plage de données disponibles
-            ref_alias = self.ref_aliases[0] if self.ref_aliases else None
-            if ref_alias:
-                ref_catalog = self.ref_catalogs[ref_alias]
-                ref_df = ref_catalog.get_dataframe()
-                
-                # Trouver la date de fin maximale disponible dans les données de référence
-                max_available_date = ref_df["date_end"].max()
-                
-                # Si la fin du forecast dépasse les données disponibles, ignorer cette entrée
-                if forecast_end_time > max_available_date:
-                    logger.debug(f"Skipping forecast starting at {forecast_reference_time}: "
-                            f"forecast ends at {forecast_end_time} but data only available until {max_available_date}")
-                    continue
-            
-            entry = {
-                "forecast_reference_time": forecast_reference_time,
-                "lead_time": lead_time,
-                "valid_time": valid_time,
-                "pred_data": row["file"],
-                "ref_data": None,
-                "ref_alias": ref_alias,
-                "pred_coords": self.pred_coords,
-                "ref_coords": self.ref_coords[ref_alias] if ref_alias else None,
-            }
-            
-            if ref_alias:
-                ref_catalog = self.ref_catalogs[ref_alias]
-                coord_system = ref_catalog.get_global_metadata().get("coord_system")
-                is_observation = coord_system.is_observation_dataset() if coord_system else False
-                
-                if is_observation:
-                    # Logique observation : filtrer le catalogue d'observation sur l'intervalle temporel du forecast_index
-                    ref_entries = UnifiedObservationView(
-                        ref_catalog.get_dataframe(), self.open_ref, ref_alias, self.time_tolerance
-                    )
-                    obs_time_interval = (valid_time, valid_time)
-                    filtered_obs = ref_entries.open_concat_in_time(obs_time_interval)
-                    if filtered_obs is None:
+            for ref_alias in self.ref_aliases:
+                # ref_alias = self.ref_aliases[0] if self.ref_aliases else None
+                if ref_alias:
+                    ref_catalog = self.ref_catalogs[ref_alias]
+                    ref_df = ref_catalog.get_dataframe()
+                    
+                    # Trouver la date de fin maximale disponible dans les données de référence
+                    max_available_date = ref_df["date_end"].max()
+                    
+                    # Si la fin du forecast dépasse les données disponibles, ignorer cette entrée
+                    if forecast_end_time > max_available_date:
+                        logger.debug(f"Skipping forecast starting at {forecast_reference_time}: "
+                                f"forecast ends at {forecast_end_time} but data only available until {max_available_date}")
                         continue
-                    entry["ref_data"] = filtered_obs
-                    entry["ref_is_observation"] = True
-                else:
-                    # Logique gridded : associer le fichier de référence couvrant valid_time
-                    ref_path = self._find_matching_ref(valid_time, ref_alias)
-                    if ref_path is None:
-                        logger.debug(f"No reference data found for valid_time {valid_time}")
-                        continue
-                    entry["ref_data"] = ref_path
-                    entry["ref_is_observation"] = False
-            
-            batch.append(entry)
-            if len(batch) >= self.batch_size:
+                
+                entry = {
+                    "forecast_reference_time": forecast_reference_time,
+                    "lead_time": lead_time,
+                    "valid_time": valid_time,
+                    "pred_data": row["file"],
+                    "ref_data": None,
+                    "ref_alias": ref_alias,
+                    "pred_coords": self.pred_coords,
+                    "ref_coords": self.ref_coords[ref_alias] if ref_alias else None,
+                }
+                
+                if ref_alias:
+                    ref_catalog = self.ref_catalogs[ref_alias]
+                    coord_system = ref_catalog.get_global_metadata().get("coord_system")
+                    is_observation = coord_system.is_observation_dataset() if coord_system else False
+                    
+                    if is_observation:
+                        # Logique observation : filtrer le catalogue d'observation sur l'intervalle temporel du forecast_index
+                        ref_entries = UnifiedObservationView(
+                            ref_catalog.get_dataframe(), self.open_ref, ref_alias, self.time_tolerance
+                        )
+                        obs_time_interval = (valid_time, valid_time)
+                        filtered_obs = ref_entries.open_concat_in_time(obs_time_interval)
+                        if filtered_obs is None:
+                            continue
+                        entry["ref_data"] = filtered_obs
+                        entry["ref_is_observation"] = True
+                    else:
+                        # Logique gridded : associer le fichier de référence couvrant valid_time
+                        ref_path = self._find_matching_ref(valid_time, ref_alias)
+                        if ref_path is None:
+                            logger.debug(f"No reference data found for valid_time {valid_time}")
+                            continue
+                        entry["ref_data"] = ref_path
+                        entry["ref_is_observation"] = False
+                
+                batch.append(entry)
+                if len(batch) >= self.batch_size:
+                    yield batch
+                    batch = []
+            if batch:
                 yield batch
-                batch = []
-        if batch:
-            yield batch
 
 
 

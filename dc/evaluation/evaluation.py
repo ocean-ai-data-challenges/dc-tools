@@ -130,15 +130,21 @@ class DC2Evaluation:
         datasets = {}
         for source in self.args.sources:
             source_name = source['dataset']
-            if source_name != "glorys" and source_name != "glonet" and source_name != "jason3":  
-                logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
-                continue
+            #if source_name != "SST_fields" and source_name != "glonet" and source_name != "jason3" and source_name != "glorys":
+            #    logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
+            #    continue
+            #if source_name != "glonet" and source_name != "jason3" and source_name != "glorys" and source_name != "argo_profiles" and source_name != "argo_velocities" and source_name != "SSS_fields":
+            #    logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
+            #    continue
+            #if source_name == "argo_profiles" or source_name == "argo_velocities":
+            #    continue
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory
             kwargs["root_catalog_folder"] = self.args.catalog_dir
             kwargs["max_samples"] = self.args.max_samples
             kwargs["file_cache"] = manager.file_cache
+            kwargs["time_interval"] = (self.args.start_time, self.args.end_time)
             #kwargs["dask_cluster"] = dask_cluster
 
             logger.debug(f"\n\nSetup dataset {source_name}\n\n")

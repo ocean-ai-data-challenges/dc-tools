@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 import os
 from types import SimpleNamespace
-from typing import Optional
+from typing import Optional, Tuple
 
 import fsspec
 from loguru import logger
@@ -36,6 +36,7 @@ class LocalConnectionConfig(BaseConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        time_interval: Optional[Tuple[str, str]] = None,
     ):
         """Init.
         Args:
@@ -53,6 +54,7 @@ class LocalConnectionConfig(BaseConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            time_interval=time_interval,
         )
 
 
@@ -69,6 +71,7 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        time_interval: Optional[Tuple[str, str]] = None,
     ):
         """Init.
 
@@ -97,6 +100,7 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            time_interval=time_interval,
         )
 
 
@@ -113,6 +117,7 @@ class FTPConnectionConfig(BaseConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        time_interval: Optional[Tuple[str, str]] = None,
     ):
         fs = fsspec.filesystem("ftp", host=host, username=user, password=password)
         super().__init__(
@@ -127,6 +132,7 @@ class FTPConnectionConfig(BaseConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            time_interval=time_interval,
         )
 
 
@@ -146,6 +152,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        time_interval: Optional[Tuple[str, str]] = None,
         protocol: str = "s3",
 
     ):
@@ -170,6 +177,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            time_interval=time_interval,
         )
 
 
@@ -189,6 +197,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        time_interval: Optional[Tuple[str, str]] = None,
     ):
         super().__init__(
             init_type=init_type,
@@ -203,6 +212,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            time_interval=time_interval,
             protocol="wasabi",
         )
 
@@ -220,6 +230,7 @@ class GlonetConnectionConfig(BaseConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        time_interval: Optional[Tuple[str, str]] = None,
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
         fs = fsspec.filesystem('s3', anon=True, client_kwargs=client_kwargs)
@@ -238,6 +249,7 @@ class GlonetConnectionConfig(BaseConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            time_interval=time_interval,
         )
 
 
@@ -252,6 +264,7 @@ class ARGOConnectionConfig(BaseConnectionConfig):
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
+        time_interval: Optional[Tuple[str, str]] = None,
     ):
         fs = fsspec.filesystem("file")
 
@@ -266,5 +279,6 @@ class ARGOConnectionConfig(BaseConnectionConfig):
             keep_variables=keep_variables,
             file_cache=file_cache,
             dask_cluster=dask_cluster,
+            time_interval=time_interval,
         )
 

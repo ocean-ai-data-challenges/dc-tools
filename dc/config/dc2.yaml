@@ -1,8 +1,8 @@
 # This file lists variables used in configuring dc2 evaluation 
 ################################################################
 ##  WASABI credentials
-define: &WASABI_KEY 
-define: &WASABI_SECRET_KEY 
+define: &WASABI_KEY "EG5GYSEYI5C20O6IHNEJ"
+define: &WASABI_SECRET_KEY "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
 
 ################################################################
 
@@ -10,14 +10,15 @@ n_days_forecast: 10
 n_days_interval: 7
 
 delta_time: 12   # 
-max_samples: 
+max_samples:
 max_cache_files: 1000
 ###########################################
 
 ## start time
 start_time: "2024-01-03"
 ## end time
-end_time: "2024-01-11"
+#end_time: "2024-01-11"
+end_time: "2024-06-04"
 
 
 # Target region coordinates
@@ -44,15 +45,15 @@ sources:
     keep_variables:
       - "so"
       - "thetao"
-#      - "uo"
-#      - "vo"
-#      - "zos"
+      - "uo"
+      - "vo"
+      - "zos"
     eval_variables:
       - "so"
       - "thetao"
-#      - "uo"
-#      - "vo"
-#      - "zos"
+      - "uo"
+      - "vo"
+      - "zos"
 
   - dataset: swot
     observation_dataset: true
@@ -71,10 +72,11 @@ sources:
       - "time"
       - "latitude"
       - "longitude"
+      - "mdt"
       - "ssha_filtered"
-      - "ssha_unfiltered"
-      - "i_num_line"
-      - "i_num_pixel"
+      #- "ssha_unfiltered"
+      #- "i_num_line"
+      #- "i_num_pixel"
     eval_variables:
       - "ssha_filtered"
 
@@ -113,17 +115,26 @@ sources:
     url: 
     file_pattern: "**/*.nc"
     keep_variables:
-      - "latitude"
-      - "longitude"
-      - "depth"
-      - "n_points"
-      - "ID"
-      - "profile_date"
-      - "temperature"
-      - "salinity"
+      - "PSAL"
+      - "PSAL_QC"
+      - "PRES"
+      - "PRES"
+      - "PRES_QC"
+      - "TEMP"
+      - "TEMP_QC"
+      - "TIME_QC"
+    #  - "latitude"
+    #  - "longitude"
+    #  - "depth"
+    #  - "n_points"
+    #  - "ID"
+    #  - "profile_date"
+    #  - "temperature"
+    #  - "salinity"
+    
     eval_variables:
-      - "temperature"
-      - "salinity"
+      - "PSAL"  # Utiliser les variables ajustées
+      - "TEMP"
 
   - dataset: jason3
     observation_dataset: true
@@ -146,11 +157,12 @@ sources:
     file_pattern: "**/*.nc"
     keep_variables:
       - "time"
-      - "data_01__time_tai"
+      #- "data_01__time_tai"
       - "latitude"
       - "longitude"
-      - "data_01__depth_or_elevation"
+      #- "data_01__depth_or_elevation"
       - "data_01__ku__ssha"
+      - "data_01__mean_dynamic_topography"
     eval_variables:
       - "data_01__ku__ssha"
 
@@ -171,10 +183,11 @@ sources:
     - "time"
     - "lat"
     - "lon"
-    - "alt"
-    - "wind_speed_alt"
+    #- "alt"
+    - "mean_topography"
+    #- "wind_speed_alt"
     - "ssha"
-    - "bathymetry"
+    #- "bathymetry"
     eval_variables:
     - "ssha"
 
@@ -188,15 +201,15 @@ sources:
     cmems_product_name: "cmems_obs-sst_glo_phy_l3s_pir_P1D-m"
     file_pattern: "**/*.nc"
     keep_variables:
-    - "crs"
+    #- "crs"
     - "sea_surface_temperature"
-    - "or_number_of_pixels"
-    - "sea_surface_temperature_stddev"
+    #- "or_number_of_pixels"
+    #- "sea_surface_temperature_stddev"
     - "quality_level"
-    - "adjusted_sea_surface_temperature"
+    #- "adjusted_sea_surface_temperature"
     eval_variables:
     - "sea_surface_temperature"
-    - "adjusted_sea_surface_temperature"
+    #- "adjusted_sea_surface_temperature"
 
   - dataset: jason1
     observation_dataset: true
@@ -215,11 +228,11 @@ sources:
     - "time"
     - "lat"
     - "lon" 
-    - "alt"
+    #- "alt"
     - "mean_sea_surface"
     - "mean_topography"
-    - "bathymetry"
-    - "wind_speed_alt"
+    #- "bathymetry"
+    #- "wind_speed_alt"
     - "ssha"
     eval_variables:
     - "ssha"
@@ -241,15 +254,13 @@ sources:
     - "time"
     - "lat"
     - "lon" 
-    - "surface_type"
-    - "alt"
+    #- "surface_type"
+    #- "alt"
     - "mean_sea_surface"
     - "mean_topography"
-    - "bathymetry"
-    - "wind_speed_alt"
-    - "wind_speed_alt_mle3"
+    #- "bathymetry"
+    #- "wind_speed_alt"
     - "ssha"
-    - "ssha_mle3"
     eval_variables:
     - "ssha"
 
@@ -265,24 +276,23 @@ sources:
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
     s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC2/Nadir_altimetry/Jason-3"
+    s3_folder: "DC2/SSS_fields"
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.nc"
     keep_variables:
-    'time':
     - "time"
-    - "data_01__time_tai"
-    - "latitude"
-    - "longitude"
-    - "data_01__altitude"
-    - "data_01__mean_sea_surface_cnescls"
-    - "data_01__wind_speed_alt"
-    - "data_01__wind_speed_alt_mle3"
-    - "data_01__ku__ssha"
-    - "data_01__ku__ssha_mle3"
+    #- "data_01__time_tai"
+    - "lat"
+    - "lon"
+    #- "data_01__altitude"
+    #- "data_01__mean_sea_surface_cnescls"
+    #- "data_01__wind_speed_alt"
+    #- "data_01__ku__ssha"
+    - Sea_Surface_Salinity_Rain_Corrected
     eval_variables:
-    - "data_01__ku__ssha"
+    #- "data_01__ku__ssha"
+    - Sea_Surface_Salinity_Rain_Corrected
 
   - dataset: glonet
     observation_dataset: false
@@ -308,49 +318,49 @@ sources:
       - "zos"
 
 
-  - dataset: glonet_wasabi
-    observation_dataset: false
-    metrics:
-      - "rmsd"
-    config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC1/Glonet_forecast"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
-    file_pattern: "**/*.zarr"
-    keep_variables:
-      - "so"
-      - "thetao"
-      - "uo"
-      - "vo"
-      - "zos"
-    eval_variables:
-      - "so"
-      - "thetao"
-      - "uo"
-      - "vo"
-      - "zos"
+  #- dataset: glonet_wasabi
+    #observation_dataset: false
+    #metrics:
+    #  - "rmsd"
+    #config: "s3"
+    #connection_type: "wasabi"
+    #url: "https://s3.eu-west-2.wasabisys.com"
+    #s3_bucket: "ppr-ocean-climat"
+    #s3_folder: "DC1/Glonet_forecast"
+    #s3_key: *WASABI_KEY
+    #s3_secret_key: *WASABI_SECRET_KEY
+    #file_pattern: "**/*.zarr"
+    #keep_variables:
+    # - "so"
+    # - "thetao"
+    # - "uo"
+    # - "vo"
+    # - "zos"
+    #eval_variables:
+    #  - "so"
+    #  - "thetao"
+    #  - "uo"
+    #  - "vo"
+    #  - "zos"
 
 
-  - dataset: amsr2
-    observation_dataset: true
-    metrics:
-      - "rmsd"
-    time_tolerance: 12   # tolerance for matching the observations (hours)
-    config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC3/AMSR2"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
-    file_pattern: "**/*.zarr"
-    keep_variables:
-    - "time"
-    - "latitude" 
-    - "longitude"
-    - "data_01__ku__ssha"
-    eval_variables:
-    - "data_01__ku__ssha"
+  #- dataset: amsr2
+    #observation_dataset: true
+    #metrics:
+    #  - "rmsd"
+    #time_tolerance: 12   # tolerance for matching the observations (hours)
+    #config: "s3"
+    #connection_type: "wasabi"
+    #url: "https://s3.eu-west-2.wasabisys.com"
+    #s3_bucket: "ppr-ocean-climat"
+    #s3_folder: "DC3/AMSR2"
+    #s3_key: *WASABI_KEY
+    #s3_secret_key: *WASABI_SECRET_KEY
+    #file_pattern: "**/*.zarr"
+    #keep_variables:
+    #- "time"
+    #- "latitude" 
+    #- "longitude"
+    #- "data_01__ku__ssha"
+    #eval_variables:
+    #- "data_01__ku__ssha"

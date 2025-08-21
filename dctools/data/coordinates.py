@@ -20,7 +20,11 @@ COORD_ALIASES = {
     "lon": {"lon", "longitude", "nav_lon"},
     "x": {"x", "xc", "x_center", "easting", "projection_x_coordinate", "grid_xt", "i"},
     "y": {"y", "yc", "y_center", "northing", "projection_y_coordinate", "grid_yt", "j"},
-    "depth": {"depth", "z", "lev", "level", "bottom", "deptht", "isodepth"},
+    "depth": {
+        "depth", "z", "lev", "level", "bottom",
+        "deptht", "isodepth",
+        # "pres", "pres_adjusted",   # for argo data (pressure = depth)
+    },
     "quadrant": {"quadrant", "sector"},
     "time": {"time", "date", "datetime", "valid_time", "forecast_time", "time_counter"},
 }
@@ -31,13 +35,33 @@ VARIABLES_ALIASES = {
         "standard_names": ["sea_surface_height_above_sea_level"],
         "aliases": ["sla", "data_01__ku__ssha", "ssha"]
     },
+    #"sst": {
+    #    "standard_names": ["sea_surface_temperature"],
+    #    "aliases": ["sst", "surface_temperature", "temperature_surface"]
+    #},
+    #"sst_foundation": {
+    #    "standard_names": ["sea_surface_foundation_temperature"],
+    #    "aliases": [
+    #        "sst_foundation", "sst_fnd",
+    #        "sstfoundation", "sstfnd", "sst_ref",
+    #        "foundation_temperature", "t_surf_foundation",
+    #    ]
+    #},  TODO : check about mixing sst and sst_fnd
     "sst": {
-        "standard_names": ["sea_surface_temperature"],
-        "aliases": ["sst", "surface_temperature", "temperature_surface"]
+        "standard_names": ["sea_surface_temperature", "sea_surface_foundation_temperature"],
+        "aliases": [
+            "sst", "surface_temperature", "temperature_surface",
+            "sst_foundation", "sst_fnd",
+            "sstfoundation", "sstfnd", "sst_ref",
+            "foundation_temperature", "t_surf_foundation",
+        ]
     },
     "sss": {
         "standard_names": ["sea_surface_salinity"],
-        "aliases": ["sss", "surface_salinity", "salinity_surface", "SSS", "SST_sal"]
+        "aliases": [
+            "sss", "surface_salinity", "salinity_surface", "SSS", "SST_sal",
+            "Sea_Surface_Salinity_Rain_Corrected",  # TODO : check mixing validity
+        ]
     },
     "ssh": {
         "standard_names": [
@@ -49,11 +73,11 @@ VARIABLES_ALIASES = {
     },
     "temperature": {
         "standard_names": ["sea_water_potential_temperature", "sea_water_temperature"],
-        "aliases": ["temperature", "temp", "thetao"]
+        "aliases": ["temperature", "temp", "thetao", "temp_adjusted"]
     },
     "salinity": {
         "standard_names": ["sea_water_salinity"],
-        "aliases": ["salinity", "psu", "sal", "PSAL", "S", "salt", "so"]
+        "aliases": ["salinity", "psu", "sal", "psal", "s", "salt", "so", "psal_adjusted"]
     },
     "u_current": {
         "standard_names": ["eastward_sea_water_velocity"],
@@ -73,7 +97,44 @@ VARIABLES_ALIASES = {
     },
     "mdt": {
         "standard_names": ["mean_dynamic_topography_cnes_cls", "mean_dynamic_topography"],
-        "aliases": ["mdt", "mean_dynamic_topography", "mean_dynamic_topography_cnes_cls"]
+        "aliases": [
+            "mdt", "mean_topography", "mean_dynamic_topography", "mean_dynamic_topography_cnes_cls",
+            "data_01__mean_dynamic_topography",
+        ]   # TODO : check "mean_topography"
+    },
+    "mean_sea_surface": {
+        "standard_names": ["mean_sea_surface_height"],
+        "aliases": ["mean_sea_surface", "mss", "mean_sea_surface_height", "mss_cnes_clsXX", "data_01__mean_sea_surface_cnescls"]
+    },
+    "mean_sea_surface": {
+        "standard_names": ["mean_sea_surface_height"],
+        "aliases": ["mean_sea_surface", "mss", "mean_sea_surface_height", "mss_cnes_clsXX", "data_01__mean_sea_surface_cnescls"]
+    },
+    "quality_level": {
+        "standard_names": ["quality_level"],
+        "aliases": ["quality_level"]
+    },
+    # Pression spécifique ARGO
+    "pressure": {
+        "standard_names": ["sea_water_pressure"],  
+        "aliases": ["pres", "pres_adjusted", "pressure"]
+    },
+    # les dimensions/coordonnées sont des variables dans certains jeux de données
+    "time": {
+        "standard_names": ["time"],
+        "aliases": ["time", "date", "datetime", "valid_time", "forecast_time", "time_counter", "data_01__time_tai", "profile_date"]
+    },
+    "lat": {
+        "standard_names": ["latitude"],
+        "aliases": ["lat", "latitude", "nav_lat"]
+    },
+    "lon": {
+        "standard_names": ["longitude"],
+        "aliases": ["lon", "longitude", "nav_lon"]
+    },
+    "depth": {
+        "standard_names": ["depth"],
+        "aliases": ["depth", "z", "lev", "level", "bottom", "deptht", "isodepth", "data_01__depth_or_elevation", "data_01__altitude"]
     }
 }
 
@@ -184,9 +245,9 @@ class CoordinateSystem:
         str
             One of: "L1", "L2", "L3", "L4", or "unknown"
         """
-        lat_name = names_dict["lat"]
-        lon_name = names_dict["lon"]
-        time_name = names_dict["time"]
+        lat_name = names_dict.get("lat", None)
+        lon_name = names_dict.get("lon", None)
+        time_name = names_dict.get("time", None)
         # --- xarray.Dataset ---
         if isinstance(data, xr.Dataset):
             dims = set(data.dims)
@@ -203,9 +264,9 @@ class CoordinateSystem:
 
             # L2: Point observations (lat/lon/time as variables, not dims)
             if {lat_name, lon_name, time_name} <= all_names:
-                lat = data[lat_name]
-                lon = data[lon_name]
-                time = data[time_name]
+                lat = data[lat_name] if lat_name else None
+                lon = data[lon_name] if lon_name else None
+                time = data[time_name] if time_name else None
                 # 1D arrays of same length, not dims
                 if (
                     lat.ndim == lon.ndim == time.ndim == 1
@@ -304,6 +365,8 @@ class CoordinateSystem:
                 coords_out[key] = standardized[key]
 
         crs = ds.attrs.get("crs", None)
+        if crs is None:
+            crs = ds.attrs.get("srid", None)
         return CoordinateSystem(
             coord_type=coord_type,
             coord_level=coord_level,
@@ -318,24 +381,28 @@ class CoordinateSystem:
         Detect oceanographic variables in an xarray Dataset based on standard_name and aliases.
         Returns a dictionary mapping variable type -> actual name in the dataset.
         """
+        found = defaultdict(lambda: None)
         try:
-            found = defaultdict(lambda: None)
-
             for var_name in variables.keys():
                 var = variables[var_name]
                 std_name = var["std_name"].lower()
 
                 name = var_name.lower()
+                found_var = False
 
                 for key, config in VARIABLES_ALIASES.items():
                     # Condition 1 : standard_name exact
                     condition1 = std_name and std_name in config["standard_names"]
+                    #condition1 = std_name and std_name in [s.lower() for s in config["standard_names"]]
 
                     # Condition 2 : alias exact sur un mot du nom de variable
                     condition2 = any(alias.lower() == name for alias in config["aliases"])
                     if condition1 or condition2:
-                        logger.debug(f"         Found variable: {var_name} for key: {key}\n\n\n")
                         found[key] = var_name
+                        found_var = True
+                        break  # next var_name
+                if not found_var:
+                    logger.warning(f"Unknown variable alias. Ignoring variable: {var_name}.")
             return dict(found)
         except Exception as exc:
             logger.error(f"Error in variable detection: {repr(exc)}")
@@ -358,8 +425,6 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
         lon = ds.coords[coords.get("lon")].values
     else:
         raise ValueError(f"Unknown coordinate system: {coord_sys.coord_type}")
-
-
     try:
         # Cas 1 : coordonnées 1D de même taille (points individuels, ex: Argo)
         if lat.ndim == 1 and lon.ndim == 1 and lat.shape == lon.shape:
