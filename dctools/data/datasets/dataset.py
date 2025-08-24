@@ -165,7 +165,6 @@ class BaseDataset(ABC):
     def get_connection_config(self):
         return self.connection_manager.params
 
-
     def standardize_names(
         self,
         coord_rename_dict: Dict[str, str],
@@ -178,7 +177,6 @@ class BaseDataset(ABC):
             variable_rename_dict = ast.literal_eval(variable_rename_dict)
         self.eval_variables = [variable_rename_dict.get(x, x) for x in self.eval_variables]
         self.keep_variables = [variable_rename_dict.get(x, x) for x in self.keep_variables]
-
 
     def get_connection_manager(self) -> BaseConnectionManager:
         """
@@ -257,7 +255,6 @@ class BaseDataset(ABC):
         for idx in range(len(self._paths)):
             yield self.load_data(idx)
 
-
     def build_catalog(self) -> None:
         """
         Construit un catalogue pour ce dataset.
@@ -271,12 +268,10 @@ class BaseDataset(ABC):
             self.alias, global_metadata=self._global_metadata, entries=self._metadata
         )
 
-
     '''def filter_attrs(
         self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
     ) -> None:
         self.catalog.filter_attrs(filters)'''
-
 
     def filter_catalog_by_date(
             self,

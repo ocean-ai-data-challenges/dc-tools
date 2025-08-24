@@ -9,8 +9,8 @@ define: &WASABI_SECRET_KEY "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
 n_days_forecast: 10
 n_days_interval: 7
 
-delta_time: 12   # 
-max_samples:
+delta_time: 12   #
+max_samples: 20
 max_cache_files: 1000
 ###########################################
 
@@ -18,7 +18,7 @@ max_cache_files: 1000
 start_time: "2024-01-03"
 ## end time
 #end_time: "2024-01-11"
-end_time: "2024-06-04"
+end_time: "2024-01-04"
 
 
 # Target region coordinates

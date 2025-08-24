@@ -408,7 +408,6 @@ class CoordinateSystem:
             logger.error(f"Error in variable detection: {repr(exc)}")
             raise ValueError("Failed to detect oceanographic variables.") from exc
 
-
 def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 50000) -> Polygon:
     """
     Robustly extract a geometry from a dataset, avoiding memory errors for huge point clouds.
@@ -472,6 +471,33 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
     except Exception as exc:
         logger.error(f"Error in geometry extraction: {repr(exc)}")
         raise
+
+
+def get_dataset_geometry_light(ds: xr.Dataset, coord_sys: dict) -> gpd.GeoSeries:
+    """Version simplifiée pour éviter les problèmes de mémoire."""
+    try:
+        coords = coord_sys.coordinates
+        lat_name = coords.get("lat", "y")
+        lon_name = coords.get("lon", "x")
+        
+        if lat_name in ds.coords and lon_name in ds.coords:
+            # Prendre SEULEMENT les extrêmes (pas tous les points)
+            lat_min = float(ds[lat_name].min().values)
+            lat_max = float(ds[lat_name].max().values)
+            lon_min = float(ds[lon_name].min().values)
+            lon_max = float(ds[lon_name].max().values)
+            
+            # Créer un rectangle simple (bbox)
+            bbox = box(lon_min, lat_min, lon_max, lat_max)
+            return bbox #gpd.GeoSeries([bbox])
+
+        return None
+        
+    except Exception as exc:
+        logger.error(f"Safe geometry extraction failed: {exc}")
+        from shapely.geometry import Point
+        return gpd.GeoSeries([Point(0, 0)])
+
 
 def is_rectangular_grid(points: np.ndarray, tol: float = 1e-5) -> bool:
     """
