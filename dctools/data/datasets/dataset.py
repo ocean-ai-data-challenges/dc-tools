@@ -402,6 +402,7 @@ def get_dataset_from_config(
     eval_variables = source.get('eval_variables', None)
     file_pattern = source.get('file_pattern', None)
     observation_dataset = source.get('observation_dataset', None)
+    full_day_data = source.get('full_day_data', False)
     # connection_type = source['connection_type']
 
     data_root = os.path.join(
@@ -435,6 +436,7 @@ def get_dataset_from_config(
                 file_cache=file_cache,
                 dask_cluster=dask_cluster,
                 time_interval=time_interval,
+                full_day_data=full_day_data,
             )
             # Load dataset metadata from catalog
             cmems_config = DatasetConfig(
@@ -459,6 +461,7 @@ def get_dataset_from_config(
                 file_cache=file_cache,
                 dask_cluster=dask_cluster,
                 time_interval=time_interval,
+                full_day_data=full_day_data,
             )
             argo_config = DatasetConfig(
                 alias=dataset_name,
@@ -489,6 +492,7 @@ def get_dataset_from_config(
                     file_cache=file_cache,
                     dask_cluster=dask_cluster,
                     time_interval=time_interval,
+                    full_day_data=full_day_data,
                 )
             elif dataset_name == "glonet":
                 s3_connection_config = GlonetConnectionConfig(
@@ -503,6 +507,7 @@ def get_dataset_from_config(
                     file_cache=file_cache,
                     dask_cluster=dask_cluster,
                     time_interval=time_interval,
+                    full_day_data=full_day_data,
                 )
             s3_config = DatasetConfig(
                 alias=dataset_name,

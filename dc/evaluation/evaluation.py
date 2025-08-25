@@ -140,6 +140,8 @@ class DC2Evaluation:
             #    continue
             #if source_name == "swot" or source_name == "glorys" or source_name == "argo_profiles":
             #    continue
+            if source_name != "glonet" and source_name != "argo_velocities" and source_name != "jason3" and source_name != "glorys" and source_name != "saral":
+                continue
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory

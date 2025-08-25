@@ -1,5 +1,6 @@
 
 from abc import ABC, abstractmethod
+import tempfile
 import traceback
 from typing import (
     Any, Callable, Dict, List, Optional, Type, Union
@@ -56,22 +57,18 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
             min_val = pd.to_datetime(time_vals.values.min())
             max_val = pd.to_datetime(time_vals.values.max())
             return (min_val, max_val)
-        
         elif np.issubdtype(time_vals.dtype, np.floating) or np.issubdtype(time_vals.dtype, np.integer):
             # Pour les données numériques
             min_val = float(time_vals.min().values)
             max_val = float(time_vals.max().values)
-            
+
             # Vérifier que les valeurs sont valides
             if np.isnan(min_val) or np.isnan(max_val):
                 return (None, None)
-                
             return (min_val, max_val)
-        
         else:
             logger.warning(f"Unsupported data type: {time_vals.dtype}")
             return (None, None)
-            
     except Exception as exc:
         logger.warning(f"Failed to get bounds: {exc}")
         return (None, None)
@@ -95,8 +92,8 @@ class BaseConnectionManager(ABC):
         self.start_time = self.params.time_interval[0]
         self.end_time = self.params.time_interval[1]
 
-        init_type = self.params.init_type
-        if init_type != "from_json" and call_list_files:
+        self.init_type = self.params.init_type
+        if self.init_type != "from_json" and call_list_files:
             self._list_files = self.list_files()
         if not self.params.file_pattern:
             self.params.file_pattern = "**/*.nc"
@@ -107,8 +104,6 @@ class BaseConnectionManager(ABC):
 
     def setup_dask(self):
         """Configuration Dask robuste pour éviter les données perdues."""
-
-        import tempfile
         
         num_workers = 1  # max(1, psutil.cpu_count() // 3)
         # Mémoire
@@ -126,31 +121,48 @@ class BaseConnectionManager(ABC):
         dask.config.set({
             # Scheduler conservateur
             'scheduler': 'threads',
-            'temporary-directory': temp_dir,
+                        'temporary-directory': temp_dir,
             
             # PARAMÈTRES CRITIQUES pour éviter les données perdues
-            'distributed.scheduler.keep-small-data': True,           # ← CRITIQUE
-            'distributed.scheduler.bandwidth': '10e6',            # ← LIMITE
-            'distributed.scheduler.work-stealing': False,           # ← DÉSACTIVE
+            'distributed.scheduler.keep-small-data': True,
+            'distributed.scheduler.bandwidth': '1e6',
+            'distributed.scheduler.work-stealing': False,
             
             # Gestion mémoire TRÈS conservatrice
-            'distributed.worker.memory.target': 0.4,                # ← Plus bas
-            'distributed.worker.memory.pause': 0.5,                 # ← Plus bas
-            'distributed.worker.memory.spill': 0.6,                 # ← Plus bas
-            'distributed.worker.memory.terminate': 0.7,             # ← Plus bas
+            'distributed.worker.memory.target': 0.6,
+            'distributed.worker.memory.pause': 0.7,
+            'distributed.worker.memory.spill': 0.8,
+            'distributed.worker.memory.terminate': 0.95,
             
             # Timeouts TRÈS longs
-            'distributed.comm.timeouts.tcp': '600s',                # ← 10 minutes
-            'distributed.comm.timeouts.connect': '300s',            # ← 5 minutes
-            'distributed.comm.retry.count': 10,                     # ← Plus de retries
+            'distributed.comm.timeouts.tcp': '600s',
+            'distributed.comm.timeouts.connect': '300s',
+            'distributed.comm.retry.count': 10,
             
             # Désactiver les optimisations problématiques
+            #'distributed.scheduler.active-memory-manager.start': False,
+            #'distributed.worker.daemon': False,
+            #'distributed.worker.profile.enabled': False,
+
+            # CONNEXIONS TRÈS LIMITÉES
+            'distributed.worker.connections.outgoing': 1,     # 1 connexion sortante
+            'distributed.worker.connections.incoming': 1,     # 1 connexion entrante
+            'distributed.comm.retry.count': 3,                # Moins de retries
+            'distributed.comm.retry.delay': '5s',             # Délai entre retries
+            
+            # Chunking pour réduire le nombre de requêtes
+            'array.chunk-size': '256MB',                # Chunks plus gros
+            'array.slicing.split_large_chunks': False,  # Pas de division
+        
+            # DÉSACTIVER L'OPTIMISATION AGRESSIVE
             'distributed.scheduler.active-memory-manager.start': False,
             'distributed.worker.daemon': False,
             'distributed.worker.profile.enabled': False,
-            
-            # Chunking plus conservateur
-            'array.chunk-size': '32MB',                             # ← Plus petit
+
+            # PARAMÈTRES SPÉCIFIQUES AUX SERVICES EXTERNES
+            'distributed.worker.multiprocessing.method': 'spawn',    # Plus stable
+            'distributed.worker.multiprocessing.nthreads': 1,        # Un seul thread
+
         })
         
         cluster = LocalCluster(
@@ -406,6 +418,9 @@ class BaseConnectionManager(ABC):
                     ds.time.max().values
                 ) if "time" in ds.coords else None
 
+                if self.params.full_day_data:
+                    date_start, date_end = self.adjust_full_day(date_start, date_end)
+
                 ds_region = get_dataset_geometry(ds, self._global_metadata.get('coord_system'))
 
                 # Créer une instance de CatalogEntry
@@ -588,7 +603,7 @@ class BaseConnectionManager(ABC):
         self._global_metadata = global_metadata
 
         limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
-        file_list = self._list_files[:limit]
+        file_list = self._list_files[-limit:]
 
         logger.info(f"Processing {len(file_list)} files with integrated Dask client")
 
@@ -721,11 +736,11 @@ class CMEMSManager(BaseConnectionManager):
         """
         super().__init__(connect_config, call_list_files=False)  # Appeler l'initialisation de la classe parente
 
-        self.batch_size = 3
+        self.batch_size = 1
         logger.debug(f"CMEMS file : {self.params.cmems_credentials_path}")
         self.cmems_login()
 
-        if call_list_files:
+        if self.init_type != "from_json" and call_list_files:
             self._list_files = self.list_files()
 
 
@@ -917,7 +932,19 @@ class CMEMSManager(BaseConnectionManager):
                 #maximum_latitude=55,
                 # variables=["uo","vo"]
                 credentials_file=self.params.cmems_credentials_path,
-            )
+            )  # TODO : get back the remote opening after solving the 429 error "too many requests"
+            '''date_string = start_datetime.strftime("%Y-%m-%d %H:%M:%S")
+            # Remplacer les caractères problématiques
+            date_string = date_string.replace(" ", "_").replace(":", "-")
+    
+            filename = f"{date_string}.nc"
+            local_path = Path(os.path.join(self.params.local_root, filename))
+            # Sauvegarder en local en Zarr
+            # ds.to_zarr(local_path, mode="w", consolidated=True)
+            ds.to_netcdf(local_path)
+            ds.close()
+            ds_local = xr.open_dataset(local_path, chunks="auto")
+            return ds_local'''
             return ds
         except Exception as e:
             traceback.print_exc()
@@ -1139,6 +1166,7 @@ class S3WasabiManager(S3Manager):
 class GlonetManager(BaseConnectionManager):
     @classmethod
     def supports(cls, path: str) -> bool:
+        #return False  # do not open : download (otherwise : often get the "too many requests" error)
         return path.startswith("https://")
 
     def list_files(self) -> List[str]:
@@ -1372,8 +1400,7 @@ class ArgoManager(BaseConnectionManager):
     def spatial_filter(catalog_gdf: gpd.GeoDataFrame, region_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         return gpd.sjoin(catalog_gdf, region_gdf, how="inner", predicate="intersects")
 
-
-    def adjust_full_day_if_needed(
+    def adjust_full_day(
         self,
         date_start: pd.Timestamp, date_end: pd.Timestamp
     ) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -1400,7 +1427,7 @@ class ArgoManager(BaseConnectionManager):
         max_date = index['date'].max()
         return pd.to_datetime(min_date), pd.to_datetime(max_date)
 
-    def load_argo_profile_from_url(wmo: int, cycle: int) -> xr.Dataset:
+    '''def load_argo_profile_from_url(wmo: int, cycle: int) -> xr.Dataset:
         """
         Télécharge et charge un profil Argo à partir de son WMO et numéro de cycle.
 
@@ -1438,7 +1465,7 @@ class ArgoManager(BaseConnectionManager):
             ds["time"] = ref_time + pd.to_timedelta(ds["JULD"].values, unit="D")
             ds = ds.assign_coords(time=ds["time"])
 
-        return ds
+        return ds'''
 
     '''def list_files_with_metadata(
             self
@@ -1508,7 +1535,7 @@ class ArgoManager(BaseConnectionManager):
                 first_elem = False
             geometry = get_dataset_geometry(ds, coord_sys)
 
-            # date_start, date_end = self.adjust_full_day_if_needed(date_start, date_end)
+            # date_start, date_end = self.adjust_full_day(date_start, date_end)
             entry = CatalogEntry(
                 path=start_date,  #f"argo://{df['file']}",
                 date_start=start_date,
@@ -1531,14 +1558,6 @@ class ArgoManager(BaseConnectionManager):
     ) -> Optional[CatalogEntry]:
         """Version statique pour worker Dask - ARGO."""
         try:
-            # Imports locaux dans le worker
-            #from dctools.data.connection.config import ARGOConnectionConfig
-            #from dctools.data.connection.connection_manager import ArgoManager
-            #import pandas as pd
-            #import geopandas as gpd
-            #from shapely.geometry import Point
-            #from dctools.data.datasets.dc_catalog import CatalogEntry
-            
             # Nettoyage des paramètres - ne garder que ce qui est nécessaire
             '''clean_params = {
                 key: value for key, value in connection_params.items()
@@ -1620,15 +1639,6 @@ class ArgoManager(BaseConnectionManager):
             for i in range(0, len(list_dates), self.batch_size):
                 batch_dates = list_dates[i:i + self.batch_size]
                 logger.info(f"Processing ARGO batch {i//self.batch_size + 1}/{(len(list_dates)-1)//self.batch_size + 1}")
-
-                # Préparer les paramètres comme dictionnaire
-                '''connection_params = {
-                    'init_type': self.params.init_type,
-                    'local_root': self.params.local_root,
-                    'max_samples': self.params.max_samples,
-                    'file_pattern': getattr(self.params, 'file_pattern', '**/*.nc'),
-                    'keep_variables': self.params.keep_variables,
-                }'''
                 
                 # Créer les tâches avec les données pré-extraites (sérialisables)
                 delayed_tasks = [
@@ -1690,40 +1700,6 @@ class ArgoManager(BaseConnectionManager):
 
         return metadata_list
 
-
-    '''def _extract_lightweight_argo_geometry(self, ds: xr.Dataset, coord_sys) -> Any:
-        """Extraction géométrique allégée pour réduire l'usage mémoire - spécifique ARGO."""
-        try:
-            # Pour ARGO, utiliser un sous-échantillonnage très agressif car tous les points 
-            # du profil ont la même position horizontale
-            return get_dataset_geometry(ds, coord_sys, max_points=100)  # Très peu de points pour ARGO
-        except Exception:
-            # Fallback : géométrie par défaut
-            return gpd.GeoSeries([geometry.Point(0, 0)])'''
-
-    '''@staticmethod
-    def _cleanup_worker_memory():
-        """Fonction de nettoyage à exécuter sur chaque worker."""
-        import gc
-        gc.collect()'''
-
-    '''def _sequential_argo_fallback(self, list_dates: List[pd.Timestamp]) -> List[CatalogEntry]:
-        """Méthode de fallback séquentielle optimisée pour ARGO."""
-        metadata_list = []
-        logger.info("Using sequential fallback for ARGO metadata extraction")
-        
-        for i, start_date in enumerate(list_dates):
-            try:
-                if i % 5 == 0:
-                    logger.info(f"Sequential ARGO processing: {i}/{len(list_dates)}")
-                
-                meta = self._extract_argo_metadata_safe(start_date)
-                if meta is not None:
-                    metadata_list.append(meta)
-            except Exception as exc:
-                logger.warning(f"Failed to process ARGO date {start_date}: {exc}")
-        
-        return metadata_list'''
 
     def list_files(self) -> List[str]:
         """Liste les dates où il y a effectivement des données ARGO avec découpage temporel fin."""
@@ -1868,7 +1844,7 @@ class ArgoManager(BaseConnectionManager):
         if end_date < ref_start_date or start_date > ref_end_date:
             return None
         
-        start_date, end_date = self.adjust_full_day_if_needed(start_date, end_date)
+        start_date, end_date = self.adjust_full_day(start_date, end_date)
 
         profile = self.argo_loader.region([
             min(self.lon_range), max(self.lon_range),

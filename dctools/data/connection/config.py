@@ -37,6 +37,7 @@ class LocalConnectionConfig(BaseConnectionConfig):
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
         time_interval: Optional[Tuple[str, str]] = None,
+        full_day_data:  Optional[bool] = False,
     ):
         """Init.
         Args:
@@ -55,6 +56,7 @@ class LocalConnectionConfig(BaseConnectionConfig):
             file_cache=file_cache,
             dask_cluster=dask_cluster,
             time_interval=time_interval,
+            full_day_data=full_day_data,
         )
 
 
@@ -72,13 +74,22 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
         time_interval: Optional[Tuple[str, str]] = None,
+        full_day_data:  Optional[bool] = False,
     ):
         """Init.
 
         Args:
             cmems_credentials(Optional[str]): path to CMEMS credentials file
         """
-        fs = fsspec.filesystem("file")
+
+        self.cache_dir = "/tmp/s3_cache"
+        os.makedirs(self.cache_dir, exist_ok=True)
+        fs = fsspec.filesystem(
+            "file",
+            cache_storage=self.cache_dir,
+            cache_type='filecache',  # Cache sur disque
+            cache_check=False,  # Ne pas vérifier si le fichier distant a changé
+        )
         if cmems_credentials_path:
             cmems_credentials_path = cmems_credentials_path
         else:
@@ -101,6 +112,7 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
             file_cache=file_cache,
             dask_cluster=dask_cluster,
             time_interval=time_interval,
+            full_day_data=full_day_data,
         )
 
 
@@ -118,6 +130,7 @@ class FTPConnectionConfig(BaseConnectionConfig):
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
         time_interval: Optional[Tuple[str, str]] = None,
+        full_day_data:  Optional[bool] = False,
     ):
         fs = fsspec.filesystem("ftp", host=host, username=user, password=password)
         super().__init__(
@@ -133,6 +146,7 @@ class FTPConnectionConfig(BaseConnectionConfig):
             file_cache=file_cache,
             dask_cluster=dask_cluster,
             time_interval=time_interval,
+            full_day_data=full_day_data,
         )
 
 
@@ -153,6 +167,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
         time_interval: Optional[Tuple[str, str]] = None,
+        full_day_data:  Optional[bool] = False,
         protocol: str = "s3",
 
     ):
@@ -178,6 +193,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
             file_cache=file_cache,
             dask_cluster=dask_cluster,
             time_interval=time_interval,
+            full_day_data=full_day_data,
         )
 
 
@@ -198,6 +214,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
         time_interval: Optional[Tuple[str, str]] = None,
+        full_day_data:  Optional[bool] = False,
     ):
         super().__init__(
             init_type=init_type,
@@ -213,6 +230,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
             file_cache=file_cache,
             dask_cluster=dask_cluster,
             time_interval=time_interval,
+            full_day_data=full_day_data,
             protocol="wasabi",
         )
 
@@ -231,9 +249,13 @@ class GlonetConnectionConfig(BaseConnectionConfig):
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
         time_interval: Optional[Tuple[str, str]] = None,
+        full_day_data:  Optional[bool] = False,
     ):
         client_kwargs={'endpoint_url': endpoint_url} if endpoint_url else None
-        fs = fsspec.filesystem('s3', anon=True, client_kwargs=client_kwargs)
+        fs = fsspec.filesystem(
+            's3', anon=True, client_kwargs=client_kwargs,
+
+        )
 
         super().__init__(
             "glonet", 
@@ -250,6 +272,7 @@ class GlonetConnectionConfig(BaseConnectionConfig):
             file_cache=file_cache,
             dask_cluster=dask_cluster,
             time_interval=time_interval,
+            full_day_data=full_day_data,
         )
 
 
@@ -265,6 +288,7 @@ class ARGOConnectionConfig(BaseConnectionConfig):
         file_cache: Optional[FileCacheManager] = None,
         dask_cluster: Optional[object] = None,
         time_interval: Optional[Tuple[str, str]] = None,
+        full_day_data:  Optional[bool] = False,
     ):
         fs = fsspec.filesystem("file")
 
@@ -280,5 +304,6 @@ class ARGOConnectionConfig(BaseConnectionConfig):
             file_cache=file_cache,
             dask_cluster=dask_cluster,
             time_interval=time_interval,
+            full_day_data=full_day_data,
         )
 

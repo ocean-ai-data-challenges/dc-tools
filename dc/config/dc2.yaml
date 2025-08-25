@@ -10,15 +10,15 @@ n_days_forecast: 10
 n_days_interval: 7
 
 delta_time: 12   #
-max_samples: 20
+max_samples: 2000
 max_cache_files: 1000
 ###########################################
 
 ## start time
-start_time: "2024-01-03"
+start_time: "2024-01-01"
 ## end time
 #end_time: "2024-01-11"
-end_time: "2024-01-04"
+end_time: "2024-06-01"
 
 
 # Target region coordinates
@@ -31,7 +31,7 @@ max_lat: 66.146
 catalog_path: ""
 
 # Datasets
-batch_size: 2
+batch_size: 1
 
 sources:
   - dataset: glorys
@@ -42,6 +42,7 @@ sources:
     connection_type:
     cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
     file_pattern: "**/*.nc"
+    full_day_data: true
     keep_variables:
       - "so"
       - "thetao"
@@ -304,6 +305,7 @@ sources:
     s3_bucket: "project-oceanbench"
     s3_folder: "public/glonet_full_2024"
     file_pattern: "**/*.nc"
+    full_day_data: true
     keep_variables:
       - "so"
       - "thetao"

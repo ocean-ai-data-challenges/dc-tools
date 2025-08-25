@@ -37,11 +37,21 @@ def setup_dask(args: Optional[Namespace] = None):
     #dask.config.set(get=dask.async.get_sync())
     dask.config.set(scheduler='threads')
     dask.config.set({"temporary-directory": "/tmp/dask",
-                     #"distributed.worker.memory.target": 0.5,
-                     #"distributed.worker.memory.pause": 0.7,
-                     #"distributed.worker.memory.spill": 0.8,
-                     #"distributed.worker.memory.terminate": 0.95,
-                    })
+                     "distributed.worker.memory.target": 0.6,
+                     "distributed.worker.memory.pause": 0.7,
+                     "distributed.worker.memory.spill": 0.8,
+                     "distributed.worker.memory.terminate": 0.95,
+
+                    # Réduire le parallélisme pour éviter trop de requêtes simultanées
+                    "distributed.comm.timeouts.tcp": '300s',
+                    
+                    # Paramètres spécifiques pour S3
+                    "distributed.worker.connections.outgoing": 2,  # Limite les connexions
+                    "distributed.worker.connections.incoming": 2,
+                    
+                    # Chunking plus gros pour réduire le nombre de requêtes
+                    "array.chunk-size": "256MB",  # Plus gros chunks = moins de requêtes
+    })
     dask.config.set({"distributed.nanny.pre-spawn-environ.MALLOC_TRIM_THRESHOLD_": 1})
     cluster = LocalCluster(n_workers=num_workers,
         threads_per_worker=1,
