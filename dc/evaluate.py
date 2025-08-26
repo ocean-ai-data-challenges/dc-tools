@@ -32,8 +32,6 @@ def main() -> int:
             print("Config loading failed.")
             return 1
 
-        '''vars(args)['glonet_data_dir'] = os.path.join(args.data_directory, 'glonet')
-        vars(args)['glorys_data_dir'] = os.path.join(args.data_directory, 'glorys')'''
         vars(args)['regridder_weights'] = os.path.join(args.data_directory, 'weights')
         vars(args)['catalog_dir'] = os.path.join(args.data_directory, "catalogs")
         vars(args)['result_dir'] = os.path.join(args.data_directory, "results")
@@ -41,8 +39,6 @@ def main() -> int:
         if os.path.exists(args.regridder_weights):
             os.remove(args.regridder_weights)
 
-        #os.makedirs(args.glonet_data_dir, exist_ok=True)
-        #os.makedirs(args.glorys_data_dir, exist_ok=True)
         os.makedirs(args.catalog_dir, exist_ok=True)
 
         evaluator_instance = DC2Evaluation(args)
@@ -53,15 +49,12 @@ def main() -> int:
     except KeyboardInterrupt:
         # raise Exception("Manual abort.")
         print("Manual abort.")
-        # Error = non-zero return code
         return 1
     except SystemExit:
         # SystemExit is raised when the user calls sys.exit()
         # or when an error occurs in the argument parsing
-        # (e.g. --help)
         # raise Exception("SystemExit.")
         print("SystemExit.")
-        # Error = non-zero return code
         return 1
 
 if __name__ == "__main__":

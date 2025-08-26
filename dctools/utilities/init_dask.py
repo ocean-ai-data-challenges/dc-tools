@@ -30,7 +30,7 @@ def get_optimal_memory_limit():
 def setup_dask(args: Optional[Namespace] = None):
     """Configure automatiquement Dask en fonction des ressources disponibles."""
     # Déterminer mémoire et CPU disponibles
-    num_workers = 1 ######################## TODO : REMOVE get_optimal_workers()
+    num_workers = 1 ######################## TODO : REMOVE -> use get_optimal_workers()
     memory_limit = get_optimal_memory_limit()
 
     os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'

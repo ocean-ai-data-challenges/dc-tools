@@ -26,13 +26,8 @@ import xarray as xr
 from dctools.data.coordinates import (
     GEO_STD_COORDS
 )
-HAS_PYINTERP = False
+from dctools.utilities.misc_utils import log_memory
 
-
-def log_memory(stage):
-    process = psutil.Process(os.getpid())
-    mem_mb = process.memory_info().rss / 1e6
-    print(f"[{stage}] Memory usage: {mem_mb:.2f} MB")
 
 def create_empty_dataset(dimensions: dict) -> xr.Dataset:
     """
@@ -62,18 +57,18 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
         xr.Dataset: Dataset renommé.
     """
     # ds = ds.copy(deep=True)
-    # 1. Renommer les coordonnées (sans toucher aux dimensions)
-    log_memory("START rename_coordinates")
+    # Renommer les coordonnées (sans toucher aux dimensions)
+    # log_memory("START rename_coordinates")
     coords_to_rename = {k: v for k, v in rename_dict.items() if k in ds.coords and k != v}
     if coords_to_rename:
         ds = ds.rename(coords_to_rename)
 
-    # 2. S'assurer que les nouvelles coordonnées sont bien présentes
+    # S'assurer que les nouvelles coordonnées sont bien présentes
     for old, new in coords_to_rename.items():
         if new in ds.variables and new not in ds.coords:
             ds = ds.set_coords(new)
 
-    # 3. Utiliser swap_dims pour transformer les coordonnées en dimensions principales
+    # Utiliser swap_dims pour transformer les coordonnées en dimensions principales
     swap_dict = {}
     for old, new in coords_to_rename.items():
         if old in ds.dims and new in ds.coords and old != new:
@@ -81,18 +76,18 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
     if swap_dict:
         ds = ds.swap_dims(swap_dict)
 
-    # 4. Supprimer les anciennes coordonnées si elles existent encore
+    # Supprimer les anciennes coordonnées si elles existent encore
     for old, new in coords_to_rename.items():
         if old in ds.coords and old != new:
             ds = ds.drop_vars(old)
-    log_memory("END rename_coordinates")
+    # log_memory("END rename_coordinates")
     return ds
 
 
 def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict] = None):
     """Rename variables according to a given dictionary."""
     try:
-        log_memory("START rename_variables")
+        # log_memory("START rename_variables")
         if not rename_dict:
             return ds
         # ds = ds.copy(deep=True)
@@ -112,7 +107,7 @@ def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict] = None):
         for old, new in rename_dict.items():
             if old in ds.variables and new in ds.variables and old != new:
                 ds = ds.drop_vars(old)
-        log_memory("END rename_variables")
+        # log_memory("END rename_variables")
         return ds
     except Exception as e:
         logger.error(f"Error renaming variables: {e}")
@@ -126,11 +121,11 @@ def rename_coords_and_vars(
 ):
     """Rename variables and coordinates according to given dictionaries."""
     try:
-        log_memory("START rename_coords_and_vars")
+        # log_memory("START rename_coords_and_vars")
         ds = rename_variables(ds, rename_vars_dict)
         ds = rename_coordinates(ds, rename_coords_dict)
 
-        log_memory("END rename_coords_and_vars")
+        # log_memory("END rename_coords_and_vars")
         return ds
     except Exception as e:
         logger.error(f"Error renaming coordinates or variables: {e}")
@@ -313,7 +308,7 @@ def apply_standard_dimension_order(da: xr.DataArray) -> xr.DataArray:
     
     return da.transpose(*final_order)
 
-'''def interpolate_xesmf(
+'''def interpolate_xesmf(  # TODO : check and uncomment
         ds: xr.Dataset, ranges: Dict[str, np.ndarray],
         weights_filepath: Optional[str] = None,
     ) -> xr.Dataset:
@@ -396,7 +391,7 @@ def interpolate_pyinterp(ds: xr.Dataset,
     with the same variables and dimensions as the original, but interpolated onto
     the new coordinate grid.
     """
-    log_memory("START interpolate_pyinterp")
+    # log_memory("START interpolate_pyinterp")
     varnames = ds.data_vars
     # Create a working copy of the dataset
     ds_work = ds.copy()
@@ -632,7 +627,7 @@ def interpolate_pyinterp(ds: xr.Dataset,
         if final_order != list(da.dims):  # Seulement si l'ordre change
             ds_result[var_name] = da.transpose(*final_order)
 
-    log_memory("END interpolate_pyinterp")
+    # log_memory("END interpolate_pyinterp")
     return ds_result
 
 
@@ -682,7 +677,6 @@ def interpolate_dataset(
         interpolation_lib: Optional[str] = "pyinterp",
     ) -> xr.Dataset:
 
-    # ds = ds.copy(deep=True)
     for variable_name in ds.variables:
         var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
         if not var_std_name:
@@ -1051,7 +1045,7 @@ class UnifiedObservationView:
         xr.Dataset
             Dataset concaténé sur la dimension 'time'.
         """
-        log_memory("START open_concat_in_time")
+        # log_memory("START open_concat_in_time")
         t0, t1 = time_interval
         t0 = t0 - self.time_tolerance
         t1 = t1 + self.time_tolerance
@@ -1079,7 +1073,7 @@ class UnifiedObservationView:
                 dataset.close()
             del dataset
         gc.collect()
-        log_memory("END open_concat_in_time")
+        # log_memory("END open_concat_in_time")
 
         return combined
 

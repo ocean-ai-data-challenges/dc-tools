@@ -4,21 +4,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from datetime import datetime
 import geopandas as gpd
-import json
 from loguru import logger
 import pandas as pd
 from shapely.geometry import box
 from torchvision import transforms
 import xarray as xr
 
-from dctools.data.connection.config import BaseConnectionConfig
 from dctools.data.coordinates import (
     LIST_VARS_GLONET,
     GLONET_DEPTH_VALS,
     RANGES_GLONET,
     CoordinateSystem,
 )
-from dctools.data.datasets.dataset import BaseDataset, DatasetConfig
+from dctools.data.datasets.dataset import BaseDataset
 from dctools.data.datasets.forecast import build_forecast_index_from_catalog
 from dctools.data.transforms import CustomTransforms, WrapLongitudeTransform
 from dctools.data.datasets.dc_catalog import DatasetCatalog

@@ -1,16 +1,13 @@
-from abc import ABC
+
 from argparse import Namespace
 import gc
-from os import stat
 from tracemalloc import start
 from typing import Any, Callable, Dict, List, Optional
 
 import dask
-from dask.distributed import Client, as_completed, get_worker
+from dask.distributed import Client
 
-from distributed import get_worker, performance_report
 from loguru import logger
-from memory_profiler import profile
 import numpy as np
 import pandas as pd
 import shapely.geometry.base as shapely_base
@@ -102,36 +99,6 @@ def make_fully_serializable(obj):
         return [make_fully_serializable(v) for v in obj]
     # Fallback: string
 
-
-"""def log_memory_and_objects(tag=""):
-    process = psutil.Process(os.getpid())
-    mem = process.memory_info().rss / 1024**2  # en MiB
-    print(f"[{tag}] Mémoire utilisée : {mem:.2f} MiB")
-    
-    # Afficher les objets les plus nombreux
-    gc.collect()
-    print("Top objets vivants :")
-    for obj_type, count in objgraph.most_common_types(limit=10):
-        print(f"  {obj_type}: {count}")"""
-
-
-"""def debug_worker_memory():
-    import objgraph
-    from pympler import muppy, summary
-    print("==== OBJECT TYPES ====")
-    objgraph.show_most_common_types(limit=10)
-    print("==== MEMORY SUMMARY ====")
-    all_objects = muppy.get_objects()
-    summary.print_(summary.summarize(all_objects), limit=10)
-
-    # Optionnel : dump graphique
-    objgraph.show_backrefs(
-        objgraph.by_type('dict')[0],
-        max_depth=3,
-        filename='/tmp/debug_backref.png'
-    )
-
-    gc.collect()"""
 
 class Evaluator:
     def __init__(

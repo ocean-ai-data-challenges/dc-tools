@@ -1,5 +1,5 @@
 
-from abc import ABC, abstractmethod
+from abc import ABC
 import os
 from types import SimpleNamespace
 from typing import Optional, Tuple
@@ -94,9 +94,6 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
             cmems_credentials_path = cmems_credentials_path
         else:
             home_path = get_home_path()
-            '''cmems_credentials = os.path.expanduser(
-                "~/.copernicusmarine/.copernicusmarine-credentials"
-            )'''
             cmems_credentials_path = os.path.join(
                 home_path, ".copernicusmarine", ".copernicusmarine-credentials"
             )

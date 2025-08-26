@@ -4,11 +4,14 @@
 """Miscellaneous utils functions."""
 
 import os
+import pickle
+import psutil
 from typing import Dict, List
 
 
 from cartopy import crs as ccrs
 from cartopy.feature import NaturalEarthFeature
+import dill
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -203,3 +206,74 @@ def to_float32(ds: xr.Dataset) -> xr.Dataset:
         if np.issubdtype(ds[var].dtype, np.floating):
             ds[var] = ds[var].astype("float32")
     return ds
+
+
+def find_unpicklable_objects(self, obj, path=""):
+    """
+    Trouve récursivement les objets non sérialisables.
+    """
+    try:
+        # Test avec pickle standard
+        pickle.dumps(obj)
+        return []
+    except Exception as e:
+        print(f"Not serializable at {path}: {type(obj)} - {str(e)[:100]}")
+        
+        # Si c'est un dictionnaire, tester chaque clé/valeur
+        if isinstance(obj, dict):
+            problematic = []
+            for key, value in obj.items():
+                try:
+                    pickle.dumps(value)
+                except:
+                    problematic.extend(self.find_unpicklable_objects(value, f"{path}.{key}"))
+            return problematic
+            
+        # Si c'est une liste/tuple
+        elif isinstance(obj, (list, tuple)):
+            problematic = []
+            for i, item in enumerate(obj):
+                try:
+                    pickle.dumps(item)
+                except:
+                    problematic.extend(self.find_unpicklable_objects(item, f"{path}[{i}]"))
+            return problematic
+            
+        # Si c'est un objet avec __dict__
+        elif hasattr(obj, "__dict__"):
+            problematic = []
+            for attr_name, attr_value in obj.__dict__.items():
+                try:
+                    pickle.dumps(attr_value)
+                except:
+                    problematic.extend(self.find_unpicklable_objects(attr_value, f"{path}.{attr_name}"))
+            return problematic
+            
+        # Objet problématique trouvé
+        return [(path, type(obj), str(e))]
+
+
+def debug_serialization(self, your_object):
+    """Debug la sérialisation d'un objet."""
+
+    print(f"🔍 Testing serialization of {type(your_object)}")
+    
+    # Test avec different serializers
+    for serializer_name, serializer in [("pickle", pickle), ("dill", dill)]:
+        try:
+            serializer.dumps(your_object)
+            print(f"{serializer_name}: OK")
+        except Exception as e:
+            print(f"{serializer_name}: {e}")
+            
+            # Analyse détaillée pour pickle
+            if serializer_name == "pickle":
+                problematic = self.find_unpicklable_objects(your_object)
+                for path, obj_type, error in problematic:
+                    print(f"        {path}: {obj_type} - {error}")
+                
+
+def log_memory(stage):
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / 1e6
+    print(f"[{stage}] Memory usage: {mem_mb:.2f} MB")

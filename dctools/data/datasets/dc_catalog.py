@@ -18,8 +18,6 @@ from shapely.geometry import mapping, shape
 
 from dctools.data.coordinates import CoordinateSystem
 from dctools.utilities.misc_utils import (
-    transform_in_place,
-    make_serializable,
     make_timestamps_serializable,
     make_fully_serializable,
 )
@@ -40,14 +38,7 @@ class CatalogEntry:
     date_start: pd.Timestamp
     date_end: pd.Timestamp
     variables: Dict[str, List[str]]
-    # variables_dict: Dict[str, List[str]]
-    # variables_rename_dict: Dict[str, str]
-    # dimensions: Dict[str, str]
-    # keep_variables: List[str]
-    # coord_type: str
-    # crs: str
     geometry: gpd.GeoSeries
-    # resolution: Optional[Dict[str, float]] = None
 
     def to_dict(self):
         try:
@@ -128,10 +119,6 @@ class DatasetCatalog:
         """
         try:
             # Convertir le GeoDataFrame en GeoJSON (dict)
-
-            # serial_metadata = transform_in_place(
-            #    self._global_metadata.copy(), make_serializable
-            # )
             serial_metadata = make_fully_serializable(self._global_metadata.copy())
             gdf_serializable = make_timestamps_serializable(self.gdf)
             geojson_dict = json.loads(gdf_serializable.to_json())
@@ -160,13 +147,10 @@ class DatasetCatalog:
             features = data["features"]
             global_metadata = data.get("global_metadata", {})
 
-
-            # désérialiser coord_system si besoin ---
             coord_system = global_metadata.get("coord_system")
             if isinstance(coord_system, str):
-                import json as _json
                 try:
-                    coord_system = _json.loads(coord_system)
+                    coord_system = json.loads(coord_system)
                 except Exception:
                     # Si ce n'est pas du JSON, ignorer ou lever une erreur explicite
                     raise ValueError("coord_system in global_metadata is a string but not valid JSON")
@@ -242,7 +226,6 @@ class DatasetCatalog:
 
     def filter_attrs(
         self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
-        #filters: Dict[str, Callable[[Any], bool]],
     ) -> None:
         gdf = self.gdf.copy()
         for key, func in filters.items():
@@ -353,7 +336,7 @@ class DatasetCatalog:
             if len(start) != len(end):
                 logger.warning("start and end must have the same number of elements.")
                 return
-            mask = (self.gdf["date_end"] >= start[0]) # Initialize mask 
+            mask = (self.gdf["date_end"] >= start[0])
             for start_el, end_el in zip(start, end):
                 in_period = (
                     (self.gdf["date_end"] >= start_el) & 
@@ -371,50 +354,47 @@ class DatasetCatalog:
 
     def check_geometries_compatibility(self, gdf: gpd.GeoDataFrame, region: geometry.Polygon):
         # 1. Vérifier le CRS
-        print(f"GeoDataFrame CRS: {gdf.crs}")
+        logger.debug(f"GeoDataFrame CRS: {gdf.crs}")
         if hasattr(region, 'crs'):
-            print(f"Region CRS: {region.crs}")
+            logger.debug(f"Region CRS: {region.crs}")
         else:
-            print("Region CRS: None (shapely geometry, assumed EPSG:4326)")
+            logger.debug("Region CRS: None (shapely geometry, assumed EPSG:4326)")
 
         if gdf.crs is None:
-            print("WARNING: GeoDataFrame has no CRS defined.")
+            logger.warning("GeoDataFrame has no CRS defined.")
         if hasattr(region, 'crs') and region.crs is not None and gdf.crs != region.crs:
-            print("WARNING: CRS mismatch between GeoDataFrame and region.")
+            logger.warning("WARNING: CRS mismatch between GeoDataFrame and region.")
 
         # 2. Vérifier le type de géométrie
-        print(f"GeoDataFrame geometry type: {gdf.geometry.geom_type.unique()}")
-        print(f"Region type: {type(region)}")
+        logger.debug(f"GeoDataFrame geometry type: {gdf.geometry.geom_type.unique()}")
+        logger.debug(f"Region type: {type(region)}")
 
         # 3. Vérifier l’amplitude des longitudes
         if "lon" in gdf.columns:
             lon_min, lon_max = gdf["lon"].min(), gdf["lon"].max()
-            print(f"GeoDataFrame longitude range: {lon_min} to {lon_max}")
+            logger.debug(f"GeoDataFrame longitude range: {lon_min} to {lon_max}")
         else:
-            print("GeoDataFrame has no 'lon' column.")
+            logger.debug("GeoDataFrame has no 'lon' column.")
 
         # 4. Vérifier l’amplitude des latitudes
         if "lat" in gdf.columns:
             lat_min, lat_max = gdf["lat"].min(), gdf["lat"].max()
-            print(f"GeoDataFrame latitude range: {lat_min} to {lat_max}")
+            logger.debug(f"GeoDataFrame latitude range: {lat_min} to {lat_max}")
         else:
-            print("GeoDataFrame has no 'lat' column.")
+            logger.debug("GeoDataFrame has no 'lat' column.")
 
         # 5. Vérifier la validité des géométries
         if not gdf.geometry.is_valid.all():
-            print("WARNING: Some geometries in GeoDataFrame are invalid.")
+            logger.debug("WARNING: Some geometries in GeoDataFrame are invalid.")
         if hasattr(region, 'is_valid') and not region.is_valid:
-            print("WARNING: Region geometry is invalid.")
+            logger.debug("WARNING: Region geometry is invalid.")
 
         # 6. Vérifier la plage de longitude du polygone
         if hasattr(region, 'bounds'):
-            print(f"Region bounds: {region.bounds}")
+            logger.debug(f"Region bounds: {region.bounds}")
 
         # 7. Vérifier le nombre de points dans le GeoDataFrame
-        print(f"GeoDataFrame length: {len(gdf)}")
-
-        print("---- End of geometry checks ----")
-
+        logger.debug(f"GeoDataFrame length: {len(gdf)}")
 
 
     def filter_by_region(self, region: geometry.Polygon) -> None:
@@ -424,24 +404,9 @@ class DatasetCatalog:
         Args:
             region (gpd.GeoSeries): Un polygone ou une collection de polygones.
         """
-        self.gdf.set_crs("EPSG:4326", inplace=True)   # TODO : SET AT INIT
+        # self.gdf.set_crs("EPSG:4326", inplace=True)   # TODO : SET AT INIT
         self.check_geometries_compatibility(self.gdf, region)
-        '''if not isinstance(region, shapely.MultiPoint):
-            logger.warning("Region must be a GeoSeries.")
-            return'''
-        # Si region contient un seul polygone, prends-le directement
-        '''print(self.gdf.crs)
-        print(region.crs)
-        region_geom = region.unary_union
-        mask = self.gdf.geometry.within(region_geom)
-        self.gdf = self.gdf[mask]'''
-        # region_geometry = region.geometry  #.iloc[0]
-        gdf_geometry0 = self.gdf.geometry.iloc[0]
-        # self.gdf = self.gdf.explode(index_parts=False, ignore_index=True)
-        # self.gdf = self.gdf[self.gdf.geometry.within(region.geometry.iloc[0])]
         self.gdf = self.gdf[self.gdf.within(region)]
-        gdf_geometry1 = self.gdf.geometry  #.iloc[0]
-        print(f"INTERSECT: {self.gdf}")
 
     def filter_by_variables(self, variables: List[str]) -> None:
         """
@@ -477,11 +442,3 @@ class DatasetCatalog:
             List[str]: Liste des chemins.
         """
         return [entry["path"] for _, entry in self.gdf.iterrows()]
-
-
-
-
-
-
-
-

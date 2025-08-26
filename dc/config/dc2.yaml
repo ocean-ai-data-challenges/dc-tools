@@ -1,31 +1,31 @@
 # This file lists variables used in configuring dc2 evaluation 
 ################################################################
 ##  WASABI credentials
-define: &WASABI_KEY "EG5GYSEYI5C20O6IHNEJ"
-define: &WASABI_SECRET_KEY "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
+define: &WASABI_KEY 
+define: &WASABI_SECRET_KEY 
 
 ################################################################
 
 n_days_forecast: 10
 n_days_interval: 7
 
-delta_time: 12   #
-max_samples: 2000
-max_cache_files: 1000
+delta_time: 12   # delta time (hours) when matching observation data
+max_samples: 
+max_cache_files: 1000  # max files to store (older files are deleted)
 ###########################################
 
 ## start time
-start_time: "2024-01-01"
+start_time: "2023-01-01"
 ## end time
 #end_time: "2024-01-11"
-end_time: "2024-06-01"
+end_time: "2026-01-01"
 
 
 # Target region coordinates
-min_lon: 173.037
-max_lon: 338.715
-min_lat: -66.146
-max_lat: 66.146
+min_lon: -180
+max_lon: 180
+min_lat: -90
+max_lat: 90
 
 # Path to catalog file
 catalog_path: ""
@@ -33,7 +33,7 @@ catalog_path: ""
 # Datasets
 batch_size: 1
 
-sources:
+sources:  # lists all datasets used in the DC
   - dataset: glorys
     observation_dataset: false
     metrics:
@@ -124,14 +124,6 @@ sources:
       - "TEMP"
       - "TEMP_QC"
       - "TIME_QC"
-    #  - "latitude"
-    #  - "longitude"
-    #  - "depth"
-    #  - "n_points"
-    #  - "ID"
-    #  - "profile_date"
-    #  - "temperature"
-    #  - "salinity"
     
     eval_variables:
       - "PSAL"  # Utiliser les variables ajustées

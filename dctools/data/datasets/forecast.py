@@ -6,7 +6,7 @@ from typing import Callable
 import pandas as pd
 import xarray as xr
 
-def evaluate_forecast_leadtimes(
+'''def evaluate_forecast_leadtimes(
     forecast_index: pd.DataFrame,
     open_pred: Callable[[str], xr.Dataset],
     open_ref: Callable[[str], xr.Dataset],
@@ -66,7 +66,7 @@ def evaluate_forecast_leadtimes(
                 "valid_time": valid_time,
                 "scores": score_dict,
             }
-    return results
+    return results'''
     
 
 def build_forecast_index_from_catalog(

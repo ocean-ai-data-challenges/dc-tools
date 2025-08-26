@@ -300,8 +300,7 @@ class CoordinateSystem:
             if {lat_name, lon_name, time_name} <= cols:
                 return "L3"
 
-        # --- Fallback: try to detect from attributes or structure ---
-        # L1: If no spatial/temporal info at all
+        # --- Fallback: try to detect from attributes or structure --
         if hasattr(data, "attrs"):
             attrs = getattr(data, "attrs", {})
             if "level" in attrs:
@@ -393,7 +392,6 @@ class CoordinateSystem:
                 for key, config in VARIABLES_ALIASES.items():
                     # Condition 1 : standard_name exact
                     condition1 = std_name and std_name in config["standard_names"]
-                    #condition1 = std_name and std_name in [s.lower() for s in config["standard_names"]]
 
                     # Condition 2 : alias exact sur un mot du nom de variable
                     condition2 = any(alias.lower() == name for alias in config["aliases"])
@@ -481,7 +479,7 @@ def get_dataset_geometry_light(ds: xr.Dataset, coord_sys: dict) -> gpd.GeoSeries
         lon_name = coords.get("lon", "x")
         
         if lat_name in ds.coords and lon_name in ds.coords:
-            # Prendre SEULEMENT les extrêmes (pas tous les points)
+            # Prendre les points extrêmes
             lat_min = float(ds[lat_name].min().values)
             lat_max = float(ds[lat_name].max().values)
             lon_min = float(ds[lon_name].min().values)
@@ -489,7 +487,7 @@ def get_dataset_geometry_light(ds: xr.Dataset, coord_sys: dict) -> gpd.GeoSeries
             
             # Créer un rectangle simple (bbox)
             bbox = box(lon_min, lat_min, lon_max, lat_max)
-            return bbox #gpd.GeoSeries([bbox])
+            return bbox
 
         return None
         

@@ -6,18 +6,15 @@
 from argparse import Namespace
 import json
 import os
-import sys
-from typing import Any, Optional
+# from typing import Any, Optional
 
 
 from dask.distributed import Client
 from datetime import timedelta
 import geopandas as gpd
 from loguru import logger
-from matplotlib.pylab import poly
 import pandas as pd
-from shapely import geometry, points
-from torchvision import transforms
+from shapely import geometry
 
 from dctools.data.datasets.dataset import get_dataset_from_config
 from dctools.data.datasets.dataloader import EvaluationDataloader
@@ -26,7 +23,6 @@ from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.evaluator import Evaluator
 from dctools.metrics.metrics import MetricComputer
 from dctools.utilities.init_dask import setup_dask
-from dctools.utilities.file_utils import FileCacheManager
 from dctools.data.coordinates import (
     RANGES_GLONET,
     GLONET_DEPTH_VALS,
@@ -35,7 +31,6 @@ from dctools.utilities.misc_utils import (
     make_serializable,
     nan_to_none,
     transform_in_place,
-    walk_obj,
 )
 
 class DC2Evaluation:
@@ -48,7 +43,13 @@ class DC2Evaluation:
             aruguments (str): Namespace with config.
         """
         self.args = arguments
-        self.dataset_references = {"glonet": ["glorys", "jason3"]}
+        self.dataset_references = {
+            "glonet": [
+                "glorys", "argo_profiles", "argo_velocities",
+                "jason1", "jason2", "jason3",
+                "saral", "swot", "SSS_fields", "SST_fields",
+            ]
+        }
 
     def filter_data(
         self, manager: MultiSourceDatasetManager,
@@ -74,36 +75,19 @@ class DC2Evaluation:
     ):
         """Fixture pour configurer les transformations."""
         transforms_dict = {}
-        if "jason3" in aliases:
-            # logger.warning("Jason3 dataset is not available, skipping its transform setup.")
-            transforms_dict["jason3"] = dataset_manager.get_transform(
-                "standardize",
-                dataset_alias="jason3",
-            )
-        if "amsr2" in aliases:
-            # logger.warning("AMSR2 dataset is not available, skipping its transform setup.")
-            transforms_dict["amsr2"] = dataset_manager.get_transform(
-                "standardize",
-                dataset_alias="amsr2",
-            )
-        if "glonet" in aliases:
-            transforms_dict["glonet"] = dataset_manager.get_transform(
-                "standardize",
-                dataset_alias="glonet",
-            )
-        if "glorys" in aliases:
-            transforms_dict["glorys"] = dataset_manager.get_transform(
-                "standardize_interpolate",
-                dataset_alias="glorys",
-                interp_ranges=RANGES_GLONET,
-                weights_path=self.args.regridder_weights,
-            )
-        if "argo_profiles" in aliases:
-            transforms_dict["argo_profiles"] = dataset_manager.get_transform(
-                "standardize",
-                dataset_alias="argo_profiles",
-            )
-
+        for alias in aliases:
+            if alias == "glorys":
+                transforms_dict["glorys"] = dataset_manager.get_transform(
+                    "standardize_interpolate",
+                    dataset_alias="glorys",
+                    interp_ranges=RANGES_GLONET,
+                    weights_path=self.args.regridder_weights,
+                )
+            else:
+                transforms_dict[alias] = dataset_manager.get_transform(
+                    "standardize",
+                    dataset_alias=alias,
+                )
         return transforms_dict
 
 
@@ -130,18 +114,9 @@ class DC2Evaluation:
         datasets = {}
         for source in self.args.sources:
             source_name = source['dataset']
-            #if source_name != "SST_fields" and source_name != "glonet" and source_name != "jason3" and source_name != "glorys":
-            #    logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
+
+            #if source_name != "glonet" and source_name != "" and source_name != "jason3" and source_name != "glorys" and source_name != "saral" and source_name != "argo_profiles" and source_name != "glorys":
             #    continue
-            #if source_name != "glonet" and source_name != "jason3" and source_name != "glorys" and source_name != "argo_profiles" and source_name != "argo_velocities" and source_name != "SSS_fields":
-            #    logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
-            #    continue
-            #if source_name == "argo_profiles" or source_name == "argo_velocities":
-            #    continue
-            #if source_name == "swot" or source_name == "glorys" or source_name == "argo_profiles":
-            #    continue
-            if source_name != "glonet" and source_name != "argo_velocities" and source_name != "jason3" and source_name != "glorys" and source_name != "saral":
-                continue
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory
@@ -149,7 +124,6 @@ class DC2Evaluation:
             kwargs["max_samples"] = self.args.max_samples
             kwargs["file_cache"] = manager.file_cache
             kwargs["time_interval"] = (self.args.start_time, self.args.end_time)
-            #kwargs["dask_cluster"] = dask_cluster
 
             logger.debug(f"\n\nSetup dataset {source_name}\n\n")
             datasets[source_name] = get_dataset_from_config(
@@ -162,12 +136,11 @@ class DC2Evaluation:
             [(self.args.min_lon,self.args.min_lat),
             (self.args.min_lon,self.args.max_lat),
             (self.args.max_lon,self.args.max_lat),
-            (self.args.max_lon,self.args.min_lat)] #,
-            #(self.args.min_lon,self.args.min_lat)],
+            (self.args.max_lon,self.args.min_lat)]
         )
 
         # Appliquer les filtres spatio-temporels
-        # manager = self.filter_data(manager, filter_region) ##  TODO : check filtering validity
+        manager = self.filter_data(manager, filter_region) ##  TODO : check filtering validity
 
         return manager
 
@@ -210,8 +183,6 @@ class DC2Evaluation:
                 metrics_names[ref_alias] = ref_source_dict.get("metrics", ["rmsd"])
                 ref_is_observation = dataset_manager.datasets[ref_alias].get_global_metadata()["is_observation"]
                 pred_eval_vars = dataset_manager.datasets[alias].get_eval_variables()
-                #ref_eval_vars = dataset_manager.datasets[ref_alias].get_eval_variables()
-                #common_variables = [var for var in pred_eval_vars if var in ref_eval_vars]
                 common_metrics = [metric for metric in metrics_names[alias] if metric in metrics_names[ref_alias]]
                 metrics_kwargs[alias][ref_alias] = {
                     "add_noise": False,
@@ -324,4 +295,3 @@ class DC2Evaluation:
 
         dask_client.close()
         dask_cluster.close()
-
