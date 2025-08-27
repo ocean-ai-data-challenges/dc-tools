@@ -117,43 +117,100 @@ def make_timestamps_serializable(gdf: pd.DataFrame) -> pd.DataFrame:
             gdf[col] = gdf[col].apply(lambda x: x.isoformat() if pd.notnull(x) else None)
     return gdf
 
+def _replace_nan_in_nested_list(obj):
+    """Fonction helper pour remplacer les NaN dans les listes imbriquées."""
+    if isinstance(obj, list):
+        return [_replace_nan_in_nested_list(item) for item in obj]
+    elif isinstance(obj, float):
+        if np.isnan(obj):
+            return None
+        elif np.isposinf(obj):
+            return "Infinity"
+        elif np.isneginf(obj):
+            return "-Infinity"
+        return obj
+    else:
+        return obj
+
 def make_fully_serializable(obj):
+    # Gestion des valeurs NaN
+    if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+        if np.isnan(obj):
+            return None  # ou "NaN" si vous préférez garder l'information
+        elif np.isposinf(obj):
+            return "Infinity"
+        elif np.isneginf(obj):
+            return "-Infinity"
+    
     # Types de base
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
+    
     # Numpy types
     if isinstance(obj, (np.integer, np.floating)):
-        return obj.item()
+        value = obj.item()
+        # Vérifier si la valeur extraite est NaN ou infinie
+        if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+            if np.isnan(value):
+                return None
+            elif np.isposinf(value):
+                return "Infinity"
+            elif np.isneginf(value):
+                return "-Infinity"
+        return value
+    
     if isinstance(obj, np.ndarray):
+        # Gérer les NaN dans les arrays numpy
+        if obj.dtype.kind in ['f', 'c']:  # float ou complex
+            # Remplacer NaN par None et inf par des strings
+            result = obj.tolist()
+            return _replace_nan_in_nested_list(result)
         return obj.tolist()
-    # Pandas Timestamp/Timedelta
+    
+    # Pandas Timestamp/Timedelta avec gestion des NaT
     if isinstance(obj, pd.Timestamp):
+        if pd.isna(obj):
+            return None
         return obj.isoformat()
     if isinstance(obj, pd.Timedelta):
+        if pd.isna(obj):
+            return None
         return str(obj)
+    
     # Pandas DataFrame/Series
     if isinstance(obj, pd.DataFrame):
-        return obj.to_dict(orient="records")
+        # Remplacer NaN par None avant conversion
+        df_clean = obj.where(pd.notnull(obj), None)
+        return df_clean.to_dict(orient="records")
     if isinstance(obj, pd.Series):
-        return obj.tolist()
+        # Remplacer NaN par None
+        series_clean = obj.where(pd.notnull(obj), None)
+        return series_clean.tolist()
+    
     # xarray Dataset/DataArray
     if isinstance(obj, (xr.Dataset, xr.DataArray)):
         return obj.to_dict()
+    
     # Shapely geometry
     if isinstance(obj, shapely_base.BaseGeometry):
         return mapping(obj)
+    
     # Dataclasses
     if hasattr(obj, "__dataclass_fields__"):
         return {k: make_fully_serializable(v) for k, v in obj.__dict__.items()}
+    
     # Classes avec __dict__
     if hasattr(obj, "__dict__"):
         return {k: make_fully_serializable(v) for k, v in obj.__dict__.items() if not k.startswith("_")}
+    
     # Mapping (dict-like)
     if isinstance(obj, dict):
         return {make_fully_serializable(k): make_fully_serializable(v) for k, v in obj.items()}
+    
     # Iterable (list, tuple, set)
     if isinstance(obj, (list, tuple, set)):
         return [make_fully_serializable(v) for v in obj]
+    
     # Fallback: string representation
     return str(obj)
 

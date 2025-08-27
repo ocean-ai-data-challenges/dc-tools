@@ -47,29 +47,104 @@ from dctools.dcio.loader import FileLoader
 
 
 def get_time_bound_values(ds: xr.Dataset) -> tuple:
-    """Obtient les bornes min/max de manière sécurisée."""
+    """
+    Obtient les bornes min/max temporelles d'un dataset xarray de manière robuste.
+    
+    Explore différentes configurations où 'time' peut être :
+    - Une dimension principale
+    - Une coordonnée 
+    - Une variable de données
+    - Absente du dataset
+    
+    Args:
+        ds: Dataset xarray
+        
+    Returns:
+        tuple: (min_time, max_time) ou (None, None) si aucune donnée temporelle trouvée
+    """
+    # Liste des noms possibles pour la dimension temporelle
+    time_names = ['time', 'Time', 'TIME', 'date', 'datetime', 'valid_time', 
+                  'forecast_time', 'time_counter', 'profile_date']
+    
+    time_vals = None
+    time_source = None
+    
     try:
-        time_vals = ds["time"]
-        # Vérifier le type de données
-        if np.issubdtype(time_vals.dtype, np.datetime64):
-            # Pour les données temporelles
-            min_val = pd.to_datetime(time_vals.values.min())
-            max_val = pd.to_datetime(time_vals.values.max())
-            return (min_val, max_val)
-        elif np.issubdtype(time_vals.dtype, np.floating) or np.issubdtype(time_vals.dtype, np.integer):
-            # Pour les données numériques
-            min_val = float(time_vals.min().values)
-            max_val = float(time_vals.max().values)
+        # 1. Chercher dans les dimensions principales
+        for time_name in time_names:
+            if time_name in ds.dims:
+                try:
+                    time_vals = ds.coords[time_name]
+                    time_source = f"dimension '{time_name}'"
+                    break
+                except KeyError:
+                    continue
+        
+        # 2. Si pas trouvé, chercher dans les coordonnées
+        if time_vals is None:
+            for time_name in time_names:
+                if time_name in ds.coords:
+                    try:
+                        time_vals = ds.coords[time_name]
+                        time_source = f"coordinate '{time_name}'"
+                        break
+                    except KeyError:
+                        continue
+        
+        # 3. Si pas trouvé, chercher dans les variables de données
+        if time_vals is None:
+            for time_name in time_names:
+                if time_name in ds.data_vars:
+                    try:
+                        time_vals = ds[time_name]
+                        time_source = f"data variable '{time_name}'"
+                        break
+                    except KeyError:
+                        continue
+        
+        # 4. Si toujours pas trouvé, chercher des variables avec attributs temporels
+        if time_vals is None:
+            for var_name, var in ds.data_vars.items():
+                if hasattr(var, 'attrs'):
+                    attrs = var.attrs
+                    # Chercher des indices d'attributs temporels
+                    temporal_indicators = ['time', 'date', 'temporal', 'calendar']
+                    if any(indicator in str(attrs).lower() for indicator in temporal_indicators):
+                        try:
+                            # Vérifier si ça ressemble à des données temporelles
+                            if np.issubdtype(var.dtype, np.datetime64) or 'time' in var_name.lower():
+                                time_vals = var
+                                time_source = f"temporal variable '{var_name}'"
+                                break
+                        except Exception:
+                            continue
 
-            # Vérifier que les valeurs sont valides
-            if np.isnan(min_val) or np.isnan(max_val):
+        if time_vals is not None:
+            # Vérifier le type de données
+            if np.issubdtype(time_vals.dtype, np.datetime64):
+                # Pour les données temporelles
+                min_val = pd.to_datetime(time_vals.values.min())
+                max_val = pd.to_datetime(time_vals.values.max())
+                return (min_val, max_val)
+            elif np.issubdtype(time_vals.dtype, np.floating) or np.issubdtype(time_vals.dtype, np.integer):
+                # Pour les données numériques
+                min_val = float(time_vals.min().values)
+                max_val = float(time_vals.max().values)
+
+                # Vérifier que les valeurs sont valides
+                if np.isnan(min_val) or np.isnan(max_val):
+                    return (None, None)
+                return (min_val, max_val)
+            else:
+                logger.warning(f"Unsupported time data type: {time_vals.dtype}")
                 return (None, None)
-            return (min_val, max_val)
         else:
-            logger.warning(f"Unsupported data type: {time_vals.dtype}")
+            logger.debug("No temporal data found in dataset")
             return (None, None)
+
+            
     except Exception as exc:
-        logger.warning(f"Failed to get bounds: {exc}")
+        logger.warning(f"Failed to get time bounds: {repr(exc)}")
         return (None, None)
 
 
@@ -77,7 +152,7 @@ class BaseConnectionManager(ABC):
     def __init__(
         self, connect_config: BaseConnectionConfig | Namespace,
         call_list_files: bool = True,
-        batch_size: Optional[int] = 1  # Taille de batch adaptée aux métadonnées
+        batch_size: Optional[int] = 16  # Taille de batch adaptée aux métadonnées
     ):
         self.connect_config = connect_config
         self.batch_size = batch_size
@@ -104,9 +179,27 @@ class BaseConnectionManager(ABC):
     def setup_dask(self):
         """Configuration Dask robuste pour éviter les données perdues."""
         
-        num_workers = 1
-        total_memory = psutil.virtual_memory().total / 1e9
-        memory_limit = f"{int(total_memory * 0.4)}GB"
+        # Importer et configurer xarray pour Dask
+        #from dctools.dcio.loader import configure_xarray_for_dask
+        #configure_xarray_for_dask()
+    
+        from dctools.utilities.init_dask import get_optimal_workers, get_optimal_memory_limit
+        num_workers = get_optimal_workers()
+        memory_limit = get_optimal_memory_limit()
+        # Supprimer les logs verbeux de Dask
+        import logging
+        logging.getLogger("distributed").setLevel(logging.WARNING)
+        logging.getLogger("distributed.core").setLevel(logging.WARNING)
+        logging.getLogger("distributed.comm").setLevel(logging.WARNING)
+        logging.getLogger("distributed.worker").setLevel(logging.WARNING)
+        logging.getLogger("distributed.scheduler").setLevel(logging.WARNING)
+        logging.getLogger("distributed.batched").setLevel(logging.WARNING)
+        logging.getLogger("tornado").setLevel(logging.WARNING)
+    
+
+        #num_workers = 3
+        #total_memory = psutil.virtual_memory().total / 1e9
+        #memory_limit = f"{int(total_memory * 0.4)}GB"
         
         temp_dir = tempfile.mkdtemp(prefix="dask_", dir="/tmp")
         
@@ -114,7 +207,7 @@ class BaseConnectionManager(ABC):
         os.environ['NETCDF4_DEACTIVATE_MPI'] = '1'
         
         # Configuration Dask
-        dask.config.set({
+        '''dask.config.set({
             'scheduler': 'threads',
             'temporary-directory': temp_dir,
             
@@ -154,6 +247,21 @@ class BaseConnectionManager(ABC):
             'distributed.worker.profile.enabled': False,
             'distributed.worker.multiprocessing.method': 'spawn',
             'distributed.worker.multiprocessing.nthreads': 1,
+        })'''
+        dask.config.set({
+            'scheduler': 'threads', 
+            'distributed.scheduler.keep-small-data': True,
+            'distributed.scheduler.work-stealing': False,
+            'distributed.worker.memory.target': 0.6,
+            'distributed.worker.memory.pause': 0.7,
+            'distributed.worker.memory.spill': 0.8,
+            'distributed.worker.memory.terminate': 0.95,
+            'distributed.comm.timeouts.tcp': 300,
+            'distributed.comm.timeouts.connect': 180,
+            'distributed.worker.connections.outgoing': 1,
+            'distributed.worker.connections.incoming': 1,
+            'array.chunk-size': '256MB',
+            'array.slicing.split_large_chunks': False,
         })
         
         cluster = LocalCluster(
@@ -246,6 +354,7 @@ class BaseConnectionManager(ABC):
             return FileLoader.open_dataset_auto(
                 local_path, self,
                 groups=self.params.groups,
+                # dask_safe=True,  # Important pour éviter les deadlocks
             )
         return None
 
@@ -271,6 +380,7 @@ class BaseConnectionManager(ABC):
             return FileLoader.open_dataset_auto(
                 path, self,
                 groups=self.params.groups,
+                # dask_safe=True,  # Important pour éviter les deadlocks
             )
         except Exception as exc:
             logger.warning(
@@ -418,12 +528,8 @@ class BaseConnectionManager(ABC):
 
         try:
             with self.open(path, "rb") as ds:
-                date_start = pd.to_datetime(
-                    ds.time.min().values
-                ) if "time" in ds.coords else None
-                date_end = pd.to_datetime(
-                    ds.time.max().values
-                ) if "time" in ds.coords else None
+                time_bounds = get_time_bound_values(ds)
+                date_start, date_end = time_bounds
 
                 if self.params.full_day_data:
                     date_start, date_end = self.adjust_full_day(date_start, date_end)
@@ -615,8 +721,8 @@ class BaseConnectionManager(ABC):
             logger.info(f"Dask client created: {dask_client}")
 
             # Scatter une seule fois les objets volumineux
-            scattered_config = dask_client.scatter(self.connect_config, broadcast=True)
-            scattered_metadata = dask_client.scatter(self._global_metadata, broadcast=True)
+            #scattered_config = dask_client.scatter(self.connect_config, broadcast=True)
+            #scattered_metadata = dask_client.scatter(self._global_metadata, broadcast=True)
             
             # Parallélisation par batch pour contrôler la charge mémoire
             
@@ -629,8 +735,8 @@ class BaseConnectionManager(ABC):
                 # Créer les tâches pour ce batch
                 delayed_tasks = [
                     dask.delayed(self.extract_metadata_worker)(
-                        path, scattered_metadata,
-                        scattered_config,
+                        path, self._global_metadata,
+                        self.connect_config,
                         self.__class__.__name__,
                     ) for path in batch_files
                 ]
@@ -647,7 +753,7 @@ class BaseConnectionManager(ABC):
                     logger.info(f"Batch completed: {len(valid_results)}/{len(batch_files)} files processed")
                     
                     # Nettoyage explicite entre les batches
-                    del batch_results, batch_futures
+                    #del batch_results, batch_futures
                     dask_client.run(self._cleanup_worker_memory)
                     
                 except Exception as exc:
@@ -734,7 +840,6 @@ class CMEMSManager(BaseConnectionManager):
         super().__init__(connect_config, call_list_files=False)  # Appeler l'initialisation de la classe parente
 
         self.batch_size = 1
-        logger.debug(f"CMEMS file : {self.params.cmems_credentials_path}")
         self.cmems_login()
 
         if self.init_type != "from_json" and call_list_files:
@@ -1030,7 +1135,7 @@ class FTPManager(BaseConnectionManager):
 
             # Lister les fichiers correspondant au motif
             files = sorted(fs.glob(remote_path))
-            logger.info(f"Files found in {remote_path} : {files}")
+            # logger.info(f"Files found in {remote_path} : {files}")
 
             if not files:
                 logger.warning(f"Aucun fichier trouvé sur le serveur FTP avec le motif : {self.params.file_pattern}")
@@ -1494,8 +1599,8 @@ class ArgoManager(BaseConnectionManager):
                     metadata_list.extend(valid_results)
 
                     # Nettoyage explicite entre les batches
-                    del batch_results
-                    del batch_futures
+                    #del batch_results
+                    #del batch_futures
                     dask_client.run(self._cleanup_worker_memory)
                     
                 except Exception as exc:
@@ -1579,7 +1684,7 @@ class ArgoManager(BaseConnectionManager):
         return unique_dates
 
     def open(self, start_date: pd.Timestamp, mode: str = "rb") -> Optional[xr.Dataset]:
-        """Version optimisée qui utilise les profils individuels identifiés."""
+        """Ouvre les profils Argo individuels identifiés."""
         
         # Vérifier dans l'index local les profils disponibles
         selected_profiles = self.argo_index[
@@ -1596,7 +1701,7 @@ class ArgoManager(BaseConnectionManager):
             logger.debug(f"No ARGO profiles found for {start_date}")
             return None
         
-        logger.info(f"Found {len(selected_profiles)} ARGO profiles for {start_date}")
+        # logger.info(f"Found {len(selected_profiles)} ARGO profiles for {start_date}")
         
         # Charger les profils individuellement plutôt qu'avec une requête régionale
         try:
@@ -1619,11 +1724,10 @@ class ArgoManager(BaseConnectionManager):
                     
                     if profile_ds is not None and len(profile_ds.N_POINTS) > 0:
                         datasets.append(profile_ds)
-                        
+
                 except Exception as e:
-                    logger.warning(f"Failed to load profile WMO={wmo}, cycle={cycle}: {e}")
+                    # logger.warning(f"Failed to load profile WMO={wmo}, cycle={cycle}: {e}")
                     continue
-            
             if datasets:
                 # Concaténer tous les profils chargés
                 combined_ds = xr.concat(datasets, dim='N_POINTS')
@@ -1637,7 +1741,7 @@ class ArgoManager(BaseConnectionManager):
                 return None
                 
         except Exception as e:
-            logger.error(f"Failed to load ARGO data for {start_date}: {e}")
+            logger.warning(f"Failed to load ARGO data for {start_date}: {e}")
             return None
 
     def _add_depth_dimension(self, ds: xr.Dataset) -> xr.Dataset:

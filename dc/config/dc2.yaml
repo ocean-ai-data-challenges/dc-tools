@@ -1,8 +1,8 @@
 # This file lists variables used in configuring dc2 evaluation 
 ################################################################
 ##  WASABI credentials
-define: &WASABI_KEY 
-define: &WASABI_SECRET_KEY 
+define: &WASABI_KEY "EG5GYSEYI5C20O6IHNEJ"
+define: &WASABI_SECRET_KEY "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
 
 ################################################################
 
@@ -10,7 +10,7 @@ n_days_forecast: 10
 n_days_interval: 7
 
 delta_time: 12   # delta time (hours) when matching observation data
-max_samples: 
+max_samples: 15
 max_cache_files: 1000  # max files to store (older files are deleted)
 ###########################################
 

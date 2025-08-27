@@ -112,8 +112,11 @@ class DC2Evaluation:
             self.args.max_cache_files,
         )
         datasets = {}
-        for source in self.args.sources:
+        for source in sorted(self.args.sources, key=lambda x: x["dataset"], reverse=True):
             source_name = source['dataset']
+
+            if source_name != "glorys" and source_name != "glonet" and source_name != "jason1" and source_name != "jason2" and source_name != "SST_fields" and source_name != "SSS_fields" and source_name != "jason3" and source_name != "swot" and source_name != "saral" and source_name != "argo_profiles" and source_name != "argo_velocities" and source_name != "glorys":
+                continue
 
             #if source_name != "glonet" and source_name != "" and source_name != "jason3" and source_name != "glorys" and source_name != "saral" and source_name != "argo_profiles" and source_name != "glorys":
             #    continue
