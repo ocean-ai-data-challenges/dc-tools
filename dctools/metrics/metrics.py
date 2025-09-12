@@ -7,6 +7,7 @@ import xarray as xr
 
 from loguru import logger
 
+from oceanbench.core.distributed import DatasetProcessor
 from dctools.data.coordinates import CoordinateSystem
 from dctools.metrics.oceanbench_metrics import OceanbenchMetrics
 from dctools.utilities.misc_utils import add_noise_with_snr  #, to_float32
@@ -15,11 +16,14 @@ from dctools.utilities.misc_utils import add_noise_with_snr  #, to_float32
 class MetricComputer(OceanbenchMetrics):
     def __init__(
             self,
+            dataset_processor: DatasetProcessor,
             is_class4: bool = False,
             class4_kwargs: dict = None,
             **kwargs,
         ):
-        super().__init__(is_class4=is_class4, class4_kwargs=class4_kwargs, **kwargs)
+        super().__init__(
+            dataset_processor, is_class4=is_class4, class4_kwargs=class4_kwargs, **kwargs
+        )
         self.is_class4 = is_class4
         self.class4_kwargs = class4_kwargs or {}
         self.eval_variables = kwargs.get("eval_variables", None)
@@ -35,7 +39,8 @@ class MetricComputer(OceanbenchMetrics):
                 # Renommer 'sla' en 'ssh' si nécessaire
                 ref_data = ref_data.rename(name_dict={'sla': 'ssh'})    # TODO : compute sla from ssh
             if "ssh" in pred_data.data_vars:
-                # Renommer 'sla' en 'ssh' si nécessaire
+                # TODO Renommer 'sla' en 'ssh' si nécessaire
+                # TODO : compute SST from "temperature" (surface value)
                 pred_data = pred_data.rename(name_dict={'sla': 'ssh'})    # TODO : compute sla from ssh
         except ValueError as exc:
             logger.warning("Cannot rename SLA")

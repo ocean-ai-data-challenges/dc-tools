@@ -2,6 +2,10 @@
 from abc import ABC, abstractmethod
 import logging
 import tempfile
+import threading
+import time
+import random
+import re
 import traceback
 from typing import (
     Any, Callable, Dict, List, Optional, Type, Union
@@ -42,6 +46,7 @@ from dctools.data.coordinates import (
 
 from dctools.data.datasets.dc_catalog import GLOBAL_METADATA
 from dctools.dcio.loader import FileLoader
+from dctools.utilities.misc_utils import ensure_timestamp
 # from dctools.dcio.saver import DataSaver
 # from dctools.utilities.init_dask import setup_dask
 
@@ -67,42 +72,38 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                   'forecast_time', 'time_counter', 'profile_date']
     
     time_vals = None
-    time_source = None
     
     try:
-        # 1. Chercher dans les dimensions principales
+        # Chercher dans les dimensions principales
         for time_name in time_names:
             if time_name in ds.dims:
                 try:
                     time_vals = ds.coords[time_name]
-                    time_source = f"dimension '{time_name}'"
                     break
                 except KeyError:
                     continue
         
-        # 2. Si pas trouvé, chercher dans les coordonnées
+        # Si pas trouvé, chercher dans les coordonnées
         if time_vals is None:
             for time_name in time_names:
                 if time_name in ds.coords:
                     try:
                         time_vals = ds.coords[time_name]
-                        time_source = f"coordinate '{time_name}'"
                         break
                     except KeyError:
                         continue
         
-        # 3. Si pas trouvé, chercher dans les variables de données
+        # Si pas trouvé, chercher dans les variables de données
         if time_vals is None:
             for time_name in time_names:
                 if time_name in ds.data_vars:
                     try:
                         time_vals = ds[time_name]
-                        time_source = f"data variable '{time_name}'"
                         break
                     except KeyError:
                         continue
         
-        # 4. Si toujours pas trouvé, chercher des variables avec attributs temporels
+        # Si toujours pas trouvé, chercher des variables avec attributs temporels
         if time_vals is None:
             for var_name, var in ds.data_vars.items():
                 if hasattr(var, 'attrs'):
@@ -114,7 +115,6 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                             # Vérifier si ça ressemble à des données temporelles
                             if np.issubdtype(var.dtype, np.datetime64) or 'time' in var_name.lower():
                                 time_vals = var
-                                time_source = f"temporal variable '{var_name}'"
                                 break
                         except Exception:
                             continue
@@ -152,7 +152,7 @@ class BaseConnectionManager(ABC):
     def __init__(
         self, connect_config: BaseConnectionConfig | Namespace,
         call_list_files: bool = True,
-        batch_size: Optional[int] = 16  # Taille de batch adaptée aux métadonnées
+        batch_size: Optional[int] = 64  # Taille de batch adaptée aux métadonnées
     ):
         self.connect_config = connect_config
         self.batch_size = batch_size
@@ -162,9 +162,9 @@ class BaseConnectionManager(ABC):
             self.params = connect_config
         else:
             raise TypeError("Unknown type of connection config.")
-        
-        self.start_time = self.params.time_interval[0]
-        self.end_time = self.params.time_interval[1]
+
+        self.start_time = self.params.filter_values.get("start_time")
+        self.end_time = self.params.filter_values.get("end_time")
 
         self.init_type = self.params.init_type
         if self.init_type != "from_json" and call_list_files:
@@ -178,78 +178,17 @@ class BaseConnectionManager(ABC):
 
     def setup_dask(self):
         """Configuration Dask robuste pour éviter les données perdues."""
-        
-        # Importer et configurer xarray pour Dask
-        #from dctools.dcio.loader import configure_xarray_for_dask
-        #configure_xarray_for_dask()
     
         from dctools.utilities.init_dask import get_optimal_workers, get_optimal_memory_limit
         num_workers = get_optimal_workers()
         memory_limit = get_optimal_memory_limit()
-        # Supprimer les logs verbeux de Dask
-        import logging
-        logging.getLogger("distributed").setLevel(logging.WARNING)
-        logging.getLogger("distributed.core").setLevel(logging.WARNING)
-        logging.getLogger("distributed.comm").setLevel(logging.WARNING)
-        logging.getLogger("distributed.worker").setLevel(logging.WARNING)
-        logging.getLogger("distributed.scheduler").setLevel(logging.WARNING)
-        logging.getLogger("distributed.batched").setLevel(logging.WARNING)
-        logging.getLogger("tornado").setLevel(logging.WARNING)
-    
-
-        #num_workers = 3
-        #total_memory = psutil.virtual_memory().total / 1e9
-        #memory_limit = f"{int(total_memory * 0.4)}GB"
         
         temp_dir = tempfile.mkdtemp(prefix="dask_", dir="/tmp")
-        
-        os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-        os.environ['NETCDF4_DEACTIVATE_MPI'] = '1'
-        
+    
         # Configuration Dask
-        '''dask.config.set({
+        dask.config.set({
             'scheduler': 'threads',
             'temporary-directory': temp_dir,
-            
-            # paramètres pour éviter les données perdues
-            'distributed.scheduler.keep-small-data': True,
-            'distributed.scheduler.bandwidth': 1e6,  # Numérique, pas string
-            'distributed.scheduler.work-stealing': False,
-            
-            # Gestion mémoire
-            'distributed.worker.memory.target': 0.6,
-            'distributed.worker.memory.pause': 0.7,
-            'distributed.worker.memory.spill': 0.8,
-            'distributed.worker.memory.terminate': 0.95,
-            
-            # timeouts en secondes (valeurs numériques)
-            'distributed.comm.timeouts.tcp': 300,
-            'distributed.comm.timeouts.connect': 180,
-            
-            # retry configuration
-            'distributed.comm.retry.count': 3,
-            'distributed.comm.retry.delay': {
-                'min': '1s',
-                'max': '10s'
-            },
-            
-            # connexions
-            'distributed.worker.connections.outgoing': 1,
-            'distributed.worker.connections.incoming': 1,
-            
-            # Chunking pour réduire le nombre de requêtes
-            'array.chunk-size': '256MB',
-            'array.slicing.split_large_chunks': False,
-
-            # désactiver l'optimisation agressive
-            'distributed.scheduler.active-memory-manager.start': False,
-            'distributed.worker.daemon': False,
-            'distributed.worker.profile.enabled': False,
-            'distributed.worker.multiprocessing.method': 'spawn',
-            'distributed.worker.multiprocessing.nthreads': 1,
-        })'''
-        dask.config.set({
-            'scheduler': 'threads', 
             'distributed.scheduler.keep-small-data': True,
             'distributed.scheduler.work-stealing': False,
             'distributed.worker.memory.target': 0.6,
@@ -260,8 +199,8 @@ class BaseConnectionManager(ABC):
             'distributed.comm.timeouts.connect': 180,
             'distributed.worker.connections.outgoing': 1,
             'distributed.worker.connections.incoming': 1,
-            'array.chunk-size': '256MB',
-            'array.slicing.split_large_chunks': False,
+            #'array.chunk-size': '256MB',
+            #'array.slicing.split_large_chunks': False,
         })
         
         cluster = LocalCluster(
@@ -277,14 +216,14 @@ class BaseConnectionManager(ABC):
         logger.info(
             f"Dask cluster: {num_workers} workers, {memory_limit} memory, temp_dir: {temp_dir}"
         )
-        return Client(cluster)
+        return cluster
+
 
     def adjust_full_day(
         self,
         date_start: pd.Timestamp, date_end: pd.Timestamp
     ) -> tuple[pd.Timestamp, pd.Timestamp]:
         """
-        cas des réanalyses (Glorys) ou des forecasts (Glonet) :
         Si date_start == date_end et date_start est à minuit,
         ajuste date_end pour couvrir toute la journée.
         """
@@ -318,7 +257,6 @@ class BaseConnectionManager(ABC):
                 return dataset
         # Tenter d'ouvrir le fichier en ligne
         elif self.supports(path):
-            # logger.debug(f"Open remote file: {path}")
             dataset = self.open_remote(path, mode)
             if dataset:
                 return dataset
@@ -327,12 +265,11 @@ class BaseConnectionManager(ABC):
         try:
             local_path = self._get_local_path(path)
             if not os. path. isfile(local_path):
-                # logger.debug(f"Downloading file to local path: {local_path}")
                 self.download_file(path, local_path)
 
             return self.open_local(local_path)
         except Exception as exc:
-            logger.error(f"Failed to open file: {path}. Error: {repr(exc)}")
+            logger.warning(f"Failed to open file: {path}. Error: {repr(exc)}")
             raise
 
     def open_local(
@@ -376,11 +313,9 @@ class BaseConnectionManager(ABC):
             extension = Path(path).suffix
             if extension != '.zarr':
                 return None
-            #logger.info(f"Open remote file: {path}")
             return FileLoader.open_dataset_auto(
                 path, self,
                 groups=self.params.groups,
-                # dask_safe=True,  # Important pour éviter les deadlocks
             )
         except Exception as exc:
             logger.warning(
@@ -506,8 +441,6 @@ class BaseConnectionManager(ABC):
                 "resolution": dict_resolution,
                 "coord_system": coord_sys,
                 "keep_variables": self.params.keep_variables,
-                # "is_observation": coord_sys.is_observation_dataset(),
-                #"dimensions_rename_dict": dimensions_rename_dict,
             }
         return global_metadata
 
@@ -556,9 +489,10 @@ class BaseConnectionManager(ABC):
         global_metadata: dict,
         connection_params: dict,
         class_name: Any,
-    ):  #, global_metadata: Dict[str, Any]) -> CatalogEntry:
+    ):
         """
         Extract metadata for a specific file, combining global metadata with file-specific information.
+        Version thread-safe pour éviter les conflits NetCDF.
 
         Args:
             path (str): Path to the file.
@@ -567,6 +501,7 @@ class BaseConnectionManager(ABC):
         Returns:
             CatalogEntry: Metadata for the specific file as a CatalogEntry.
         """
+        
         # Dictionnaire de mapping des noms vers les classes
         CLASS_REGISTRY: Dict[Type[BaseConnectionConfig], Type[BaseConnectionManager]] = {
             "S3WasabiManager": S3WasabiManager,
@@ -580,16 +515,27 @@ class BaseConnectionManager(ABC):
         try:
             # Supprimer les logs "INFO" des workers Dask
             logging.getLogger("distributed.worker").setLevel(logging.WARNING)
+            logging.getLogger("netCDF4").setLevel(logging.WARNING)
+            
             # Récupérer la classe depuis le registre
             if class_name not in CLASS_REGISTRY:
                 raise ValueError(f"Unknown class name: {class_name}")
             
             manager_class = CLASS_REGISTRY[class_name]
-            manager = manager_class(
-                connection_params, call_list_files=False
-            )
-
+            if class_name == "CMEMSManager":
+                manager = manager_class(
+                    connection_params, call_list_files=False,
+                    do_logging=False,
+                )
+            else:
+                manager = manager_class(
+                    connection_params, call_list_files=False
+                )
             ds = manager.open(path, "rb")
+            if ds is None:
+                logger.warning(f"Could not open {path}")
+                return None
+                
             time_bounds = get_time_bound_values(ds)
             date_start = time_bounds[0]
             date_end = time_bounds[1]
@@ -597,6 +543,15 @@ class BaseConnectionManager(ABC):
             ds_region = get_dataset_geometry_light(
                 ds, global_metadata.get('coord_system')
             )
+            
+            # Fermer explicitement le dataset
+            if hasattr(ds, 'close'):
+                ds.close()
+
+            if global_metadata.get("full_day_data", False):
+                if date_start and date_end:
+                    date_start = date_start.replace(hour=0, minute=0, second=0, microsecond=0)
+                    date_end = date_end.replace(hour=23, minute=59, second=59, microsecond=999999)
 
             # Créer une instance de CatalogEntry
             return CatalogEntry(
@@ -607,10 +562,10 @@ class BaseConnectionManager(ABC):
                 geometry=ds_region,
             )
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 f"Failed to extract metadata for file {path}: {traceback.format_exc()}"
             )
-            raise
+            return None
 
     def estimate_resolution(
         self,
@@ -665,44 +620,12 @@ class BaseConnectionManager(ABC):
                 res["time"] = f"{int(np.median(diffs))}s"
         return res
 
-    '''def list_files_with_metadata(self) -> List[CatalogEntry]:
-        """
-        List all files with their metadata by combining global metadata and file-specific information.
-
-        Returns:
-            List[CatalogEntry]: List of metadata entries for each file.
-        """
-        # Récupérer les métadonnées globales
-        global_metadata = self.extract_global_metadata()
-        self._global_metadata = global_metadata
-
-        metadata_list = []
-        limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
-        # self._list_files = [s for s in self._list_files if s.count("_2024") >= 2]    # TODO : REMOVE
-
-        file_list = self._list_files[:limit]
-
-        coord_system = self._global_metadata.get('coord_system')
-        variables = self._global_metadata.get("variables")
-
-        metadata_list = [self.extract_metadata(
-            path
-        ) for path in file_list]
-
-        if not metadata_list:
-            logger.error("No valid metadata entries were generated.")
-            raise ValueError("No valid metadata entries were generated.")
-
-        #if must_close_dask:
-        #    client.close()
-
-        return metadata_list'''
 
     def list_files_with_metadata(self) -> List[CatalogEntry]:
         """
         Version avec client Dask intégré et configuration optimisée.
         """
-        
+
         # Récupérer les métadonnées globales
         global_metadata = self.extract_global_metadata()
         self._global_metadata = global_metadata
@@ -713,25 +636,22 @@ class BaseConnectionManager(ABC):
         logger.info(f"Processing {len(file_list)} files with integrated Dask client")
 
         metadata_list = []
+        dask_cluster = None
         dask_client = None
-        
+
         try:
             # Configuration et création du client Dask
-            dask_client = self.setup_dask()
+            dask_cluster = self.setup_dask()
+            dask_client = Client(dask_cluster, serializers=['dask'], deserializers=['dask'])
             logger.info(f"Dask client created: {dask_client}")
 
-            # Scatter une seule fois les objets volumineux
-            #scattered_config = dask_client.scatter(self.connect_config, broadcast=True)
-            #scattered_metadata = dask_client.scatter(self._global_metadata, broadcast=True)
-            
             # Parallélisation par batch pour contrôler la charge mémoire
-            
             for i in range(0, len(file_list), self.batch_size):
                 batch_files = file_list[i:i + self.batch_size]
                 logger.info(
                     f"Processing metadata batch {i//self.batch_size + 1}/{(len(file_list)-1)//self.batch_size + 1}"
                 )
-                
+
                 # Créer les tâches pour ce batch
                 delayed_tasks = [
                     dask.delayed(self.extract_metadata_worker)(
@@ -740,24 +660,24 @@ class BaseConnectionManager(ABC):
                         self.__class__.__name__,
                     ) for path in batch_files
                 ]
-                
+
                 try:
                     # Exécuter le batch avec le client
                     batch_futures = dask_client.compute(delayed_tasks, sync=False)
                     batch_results = dask_client.gather(batch_futures)
-                    
+
                     # Filtrer et ajouter les résultats valides
                     valid_results = [meta for meta in batch_results if meta is not None]
                     metadata_list.extend(valid_results)
-                    
+
                     logger.info(f"Batch completed: {len(valid_results)}/{len(batch_files)} files processed")
-                    
+
                     # Nettoyage explicite entre les batches
                     #del batch_results, batch_futures
                     dask_client.run(self._cleanup_worker_memory)
-                    
+
                 except Exception as exc:
-                    logger.error(f"Batch {i//self.batch_size + 1} failed: {exc}")
+                    logger.warning(f"Batch {i//self.batch_size + 1} failed: {exc}")
                     # Fallback séquentiel pour ce batch
                     for path in batch_files:
                         try:
@@ -770,9 +690,11 @@ class BaseConnectionManager(ABC):
         except Exception as exc:
             logger.error(f"Dask metadata extraction failed: {exc}")
             raise
-            
+
         finally:
             # Nettoyage du client Dask
+            if dask_cluster is not None:
+                dask_cluster.close()
             if dask_client is not None:
                 try:
                     logger.info("Closing Dask client and cluster")
@@ -787,6 +709,7 @@ class BaseConnectionManager(ABC):
             raise ValueError("No valid metadata entries were generated.")
 
         return metadata_list
+                                           
 
     @staticmethod
     def _cleanup_worker_memory():
@@ -830,6 +753,7 @@ class CMEMSManager(BaseConnectionManager):
     def __init__(
         self, connect_config: BaseConnectionConfig,
         call_list_files: Optional[bool] = True,
+        do_logging: Optional[bool] = True,
     ):
         """
         Initialise le gestionnaire CMEMS et effectue la connexion.
@@ -839,8 +763,8 @@ class CMEMSManager(BaseConnectionManager):
         """
         super().__init__(connect_config, call_list_files=False)  # Appeler l'initialisation de la classe parente
 
-        self.batch_size = 1
-        self.cmems_login()
+        if do_logging:
+            self.cmems_login()
 
         if self.init_type != "from_json" and call_list_files:
             self._list_files = self.list_files()
@@ -965,12 +889,7 @@ class CMEMSManager(BaseConnectionManager):
     def list_files(self) -> List[str]:
         """List files in the Copernicus Marine directory."""
         logger.info("Listing files in Copernicus Marine directory.")
-        # tmp_filepath = os.path.join(self.params.local_root, "files.txt")
         try:
-            '''copernicusmarine.get(
-                dataset_id=self.params.dataset_id, create_file_list=tmp_filepath
-            )
-            self._files = read_file_tolist(tmp_filepath)'''
             start_dt = pd.to_datetime(self.start_time)
             start_year = start_dt.year
             start_month = start_dt.month
@@ -989,19 +908,20 @@ class CMEMSManager(BaseConnectionManager):
             list_dates = list_dates [:self.params.max_samples]
             valid_dates = []
             for date in list_dates:
-                if self.remote_file_exists(date):
-                    valid_dates.append(date)
+                valid_dates.append(date)
             return valid_dates
         except Exception as exc:
             logger.error(f"Failed to list files from CMEMS: {repr(exc)}")
             return []
 
-    def open_remote(self, dt: str, mode: str = "rb") -> Optional[xr.Dataset]:
+    def open_remote(
+            self, dt: Union[str, datetime.datetime], mode: str = "rb"
+        ) -> Optional[xr.Dataset]:
         """
-        Open a file remotely from CMEMS using S3 URLs.
+        Open a file remotely from CMEMS using a date.
 
         Args:
-            path (str): Remote S3 path of the file.
+            dt (str): Date string in ISO format (YYYY-MM-DDTHH:MM:SS).
             mode (str): Mode to open the file (default is "rb").
 
         Returns:
@@ -1017,57 +937,21 @@ class CMEMSManager(BaseConnectionManager):
                 start_datetime=start_datetime,
                 end_datetime=end_datetime,
                 vertical_axis='depth',
-                #minimum_longitude=,
-                #maximum_longitude=,
-                #minimum_latitude=,
-                #maximum_latitude=,
+                #minimum_longitude=self.params.filter_values.get("min_lon"),
+                #maximum_longitude=self.params.filter_values.get("max_lon"),
+                #minimum_latitude=self.params.filter_values.get("min_lat"),
+                #maximum_latitude=self.params.filter_values.get("max_lat"),
                 # variables=[]
                 credentials_file=self.params.cmems_credentials_path,
             ) 
-            '''# TODO : get back the remote opening after solving the 429 error "too many requests"
-            date_string = start_datetime.strftime("%Y-%m-%d %H:%M:%S")
-            # Remplacer les caractères problématiques
-            date_string = date_string.replace(" ", "_").replace(":", "-")
-    
-            filename = f"{date_string}.nc"
-            local_path = Path(os.path.join(self.params.local_root, filename))
-            # Sauvegarder en local en Zarr
-            # ds.to_zarr(local_path, mode="w", consolidated=True)
-            ds.to_netcdf(local_path)
-            ds.close()
-            ds_local = xr.open_dataset(local_path, chunks="auto")
-            return ds_local'''
             return ds
+            # TODO : get back the remote opening after solving (?) the pickling error
+            # with botocore features
+
         except Exception as e:
-            traceback.print_exc()
+            logger.warning(f"Failed to open CMEMS dataset for date : {dt}")
+            # traceback.print_exc()
             return None
-
-        # return None
-
-    '''def download_file(self, remote_path: str, local_path: str):
-        """
-        Download a specific file from CMEMS.
-
-        Args:
-            path (str): Path to the file to download.
-        """
-        # Extraire la date à partir du nom du fichier
-        filename = Path(local_path).name
-        try:
-            # Télécharger le fichier via l'API CMEMS
-            logger.info(f"Downloading file {filename} from CMEMS...")
-            copernicusmarine.get(
-                dataset_id=self.params.dataset_id,
-                filter=filename,
-                output_directory=self.params.local_root,
-                no_directories=True,
-                credentials_file=self.params.cmems_credentials,
-            )
-            if  self.file_cache is not None:
-                self.file_cache.add(filename)
-        except Exception as exc:
-            logger.error(f"download from CMEMS failed: {repr(exc)}")
-        return None'''
 
     @classmethod
     def supports(cls, path: str) -> bool:
@@ -1082,6 +966,8 @@ class CMEMSManager(BaseConnectionManager):
         """
         # CMEMS ne supporte pas un protocole spécifique comme cmems://
         # On utilise la date (format datetime) comme identifiant des fichiers individuels
+        if not isinstance(path, datetime.datetime):
+            path = datetime.datetime.strptime(path, "%Y-%m-%dT%H:%M:%S")
         return isinstance(path, datetime.datetime)
 
     def list_all_days(
@@ -1285,7 +1171,6 @@ class GlonetManager(BaseConnectionManager):
                 date = date + datetime.timedelta(days=7)
             else:
                 break
-        #logger.info(f"List of files: {list_files}")
         return list_f
 
 
@@ -1345,26 +1230,72 @@ class ArgoManager(BaseConnectionManager):
         self.depth_values = depth_values
         self.time_step_days = time_step_days
 
+
+        super().__init__(connect_config, call_list_files=False)  # Appeler l'initialisation de la classe parente
+
         # Charger l'index
         self.argo_index = argo_index
         if argo_index is None:
             self._load_index_once()
-        super().__init__(connect_config, call_list_files)
+
+        if self.init_type != "from_json" and call_list_files:
+            self._list_files = self.list_files()
+
+        # logger.info(f"Finished initializing ArgoManager with {len(self.argo_index)} profiles")
+        # self.run_complete_diagnosis()
+        logger.debug("ArgoManager initialized.")
+
 
     def _load_index_once(self):
-        """Load ARGO index once."""
+        """Load ARGO index using modern argopy API with proper initialization."""
+        logger.info("Loading ARGO index via argopy IndexFetcher (modern API)")
+        
+        # Configurer argopy
+        from argopy import set_options
+        set_options(
+            src="erddap",  # Source par défaut
+            mode="standard",  # Mode standard
+            cachedir=os.path.expanduser("~/.cache/argopy"),  # Cache local
+        )
+        
+        # Index via région avec les bonnes conversions de dates
         try:
-            idx = ArgoIndex()
-            idx = idx.load()
-            self.argo_index = idx.to_dataframe()
-
-            # Normalize all timestamps to the minute
-            self.argo_index['date'] = self.argo_index['date'].dt.floor('min')
+            logger.debug("Attempting regional index via correct argopy syntax...")
             
-            logger.info(f"Loaded ARGO index with {len(self.argo_index)} profiles")
-        except Exception as e:
-            logger.error(f"Failed to load ARGO index: {e}")
-            self.argo_index = pd.DataFrame()
+            idx_fetcher = IndexFetcher(src="erddap")
+            
+            # Période basée sur les filtres si disponibles
+            if not hasattr(self, 'start_time') or not hasattr(self, 'end_time'):
+                self.start_time = self.params.filter_values.get("start_time")
+                self.end_time = self.params.filter_values.get("end_time")
+            start_date = pd.to_datetime(self.start_time)
+            end_date = pd.to_datetime(self.end_time)
+
+            start_date_str = start_date.strftime('%Y-%m-%d')
+            end_date_str = end_date.strftime('%Y-%m-%d')
+            
+            logger.debug(
+                f"Fetching ARGO index for region lat{self.lat_range}, lon{self.lon_range}, {start_date_str} to {end_date_str}"
+            )
+
+            region_box = [
+                self.lon_range[0], self.lon_range[1],  # longitude min/max
+                self.lat_range[0], self.lat_range[1],  # latitude min/max
+                start_date_str, end_date_str           # dates en format string
+            ]
+            
+            idx = idx_fetcher.region(region_box).load()
+            
+            self.argo_index = idx.to_dataframe()
+            
+            # Normalisation des timestamps
+            self.argo_index['date'] = pd.to_datetime(self.argo_index['date']).dt.floor("min")
+            
+            logger.info(f"✅ Loaded ARGO index via ERDDAP region with {len(self.argo_index)} profiles")
+            return
+            
+        except Exception as erddap_error:
+            logger.warning(f"ERDDAP regional index loading failed: {erddap_error}")
 
     @classmethod
     def supports(cls, path: str) -> bool:
@@ -1383,131 +1314,10 @@ class ArgoManager(BaseConnectionManager):
         max_date = index['date'].max()
         return pd.to_datetime(min_date), pd.to_datetime(max_date)
 
-    '''def load_argo_profile_from_url(wmo: int, cycle: int) -> xr.Dataset:
-        """
-        Télécharge et charge un profil Argo à partir de son WMO et numéro de cycle.
-
-        Parameters
-        ----------
-        wmo : int
-            Numéro WMO de la flotte.
-        cycle : int
-            Numéro de cycle du profil.
-
-        Returns
-        -------
-        xr.Dataset
-            Profil Argo avec temps décodé.
-        """
-        # Construire l'URL standard Ifremer
-        filename = f"D{wmo}_{str(cycle).zfill(3)}.nc"
-        url = f"https://data-argo.ifremer.fr/dac/coriolis/{wmo}/profiles/{filename}"
-        import requests
-        import tempfile
-        # Télécharger dans un fichier temporaire
-        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
-            response = requests.get(url)
-            if response.status_code != 200:
-                raise RuntimeError(f"Erreur {response.status_code} pour l'URL : {url}")
-            tmp.write(response.content)
-            tmp_path = Path(tmp.name)
-
-        # Ouvrir le fichier avec xarray (sans décodage)
-        ds = xr.open_dataset(tmp_path, decode_times=False)
-
-        # Décodage manuel du temps à partir de JULD
-        if "JULD" in ds:
-            ref_time = pd.Timestamp("1950-01-01")
-            ds["time"] = ref_time + pd.to_timedelta(ds["JULD"].values, unit="D")
-            ds = ds.assign_coords(time=ds["time"])
-
-        return ds'''
-
-    '''def list_files_with_metadata(
-            self
-    ) -> List[CatalogEntry]:
-        """
-        List all files with their metadata by combining global metadata and file-specific information.
-
-        Args:
-            geometry_filter (Optional[gpd.GeoDataFrame]): Geometry filter to apply on the catalog.
-
-        Returns:
-            List[CatalogEntry]: List of metadata entries for each file.
-        """
-        list_dates = self._list_files
-
-
-        metadata_list: List[CatalogEntry] = []
-
-        first_elem = True
-
-        for n_elem, start_date in enumerate(list_dates):
-            ds = self.open(start_date)
-            if ds is None:
-                continue
-
-            # get coordinate system
-            if first_elem:
-                coord_sys = CoordinateSystem.get_coordinate_system(ds)
-
-                # Inférer la résolution spatiale et temporelle
-                #dict_resolution = self.estimate_resolution(
-                #    ds, coord_sys
-                #)
-                dict_resolution  = {}
-                dict_resolution["time"] = "60s"
-                dict_resolution["latitude"] = None
-                dict_resolution["longitude"] = None
-
-                # Associer les variables à leurs dimensions
-                variables = {}
-                for var_name, var in ds.variables.items():
-
-                    if var_name in self.params.keep_variables:
-                        variables[var_name] = {
-                            "dims": list(var.dims),
-                            "std_name": var.attrs.get("standard_name", ""),
-                        }
-
-                # variables = {v: list(ds[v].dims) for v in ds.data_vars if v in self.params.keep_variables}
-                variables_dict = CoordinateSystem.detect_oceanographic_variables(variables)
-                variables_rename_dict = {v: k for k, v in variables_dict.items()}
-                # dimensions = dict(ds.dims)
-
-                # coord_sys = CoordinateSystem.get_coordinate_system(ds)
-                # dimensions = coord_sys.coordinates
-                #resolution={"lon": self.lon_step, "lat": self.lat_step, "time": self.time_step_days}
-
-                global_metadata = {
-                    "variables": variables,
-                    "variables_dict": variables_dict,
-                    "variables_rename_dict": variables_rename_dict,
-                    "resolution": dict_resolution,
-                    "coord_system": coord_sys,
-                    "keep_variables": self.params.keep_variables,
-                }
-                self.global_metadata = global_metadata
-                first_elem = False
-            geometry = get_dataset_geometry(ds, coord_sys)
-
-            # date_start, date_end = self.adjust_full_day(date_start, date_end)
-            entry = CatalogEntry(
-                path=start_date,  #f"argo://{df['file']}",
-                date_start=start_date,
-                date_end= start_date + pd.Timedelta(minutes=1),
-                variables=variables,
-                geometry=geometry,
-            )
-            metadata_list.append(entry)
-
-        return metadata_list'''
-
-
 
     @staticmethod
     def _extract_argo_metadata(
-        start_date: pd.Timestamp,
+        path: pd.Timestamp,
         connection_params: dict,
         global_metadata: dict,
         argo_index: Any,
@@ -1523,10 +1333,12 @@ class ArgoManager(BaseConnectionManager):
             )
             
             # Traitement
-            ds = manager.open(start_date)
+            ds = manager.open(path)
             if ds is None:
                 return None
-            
+        
+            time_bounds = get_time_bound_values(ds)
+            date_start, date_end = time_bounds
             # Extraction des coordonnées ARGO
             coord_sys = global_metadata.get('coord_system', {})
             
@@ -1537,23 +1349,20 @@ class ArgoManager(BaseConnectionManager):
             
             # Créer l'entrée
             metadata = CatalogEntry(
-                path=str(start_date),
-                date_start=start_date,
-                date_end=start_date + pd.Timedelta(minutes=1),
+                path=str(path),
+                date_start=ensure_timestamp(date_start),
+                date_end=ensure_timestamp(date_end) + pd.Timedelta(minutes=1),
                 variables=variables,
                 geometry=geometry,
             )
-            
             return metadata
             
         except Exception as exc:
             # Logger pas disponible dans le worker
-            print(f"ARGO worker error for {start_date}: {exc}")
-            import traceback
+            print(f"ARGO worker error for {path}: {exc}")
             traceback.print_exc()
             return None
 
-    # Mise à jour de la fonction principale
     def list_files_with_metadata(self) -> List[CatalogEntry]:
         """Liste les fichiers avec leurs métadonnées."""
         global_metadata = self.extract_global_metadata()
@@ -1570,16 +1379,20 @@ class ArgoManager(BaseConnectionManager):
         
         try:
             # Configuration et création du client Dask
-            dask_client = self.setup_dask()
+            dask_client = Client(self.setup_dask())
 
             # Scatter une seule fois les objets volumineux
             scattered_config = dask_client.scatter(self.connect_config, broadcast=True)
             scattered_metadata = dask_client.scatter(self._global_metadata, broadcast=True)
             scattered_argo_index = dask_client.scatter(self.argo_index, broadcast=True)
 
+            # Calculer le nombre total de batches correctement
+            total_batches = (len(list_dates) + self.batch_size - 1) // self.batch_size
+
             for i in range(0, len(list_dates), self.batch_size):
                 batch_dates = list_dates[i:i + self.batch_size]
-                logger.info(f"Processing ARGO batch {i//self.batch_size + 1}/{(len(list_dates)-1)//self.batch_size + 1}")
+                current_batch = i // self.batch_size + 1
+                logger.info(f"Processing ARGO batch {current_batch}/{total_batches} ({len(batch_dates)} items)")
                 
                 # Créer les tâches avec les données pré-extraites (sérialisables)
                 delayed_tasks = [
@@ -1598,13 +1411,15 @@ class ArgoManager(BaseConnectionManager):
                     valid_results = [meta for meta in batch_results if meta is not None]
                     metadata_list.extend(valid_results)
 
+                    logger.info(f"Batch {current_batch} completed: {len(valid_results)}/{len(batch_dates)} items processed")
+
                     # Nettoyage explicite entre les batches
                     #del batch_results
                     #del batch_futures
                     dask_client.run(self._cleanup_worker_memory)
                     
                 except Exception as exc:
-                    logger.error(f"ARGO batch {i//self.batch_size + 1} failed: {exc}")
+                    logger.error(f"ARGO batch {current_batch} failed: {exc}")
                     # Fallback pour ce batch
                     for start_date in batch_dates:
                         try:
@@ -1638,110 +1453,113 @@ class ArgoManager(BaseConnectionManager):
         return metadata_list
 
 
-    def list_files(self) -> List[str]:
-        """Liste les dates où il y a effectivement des données ARGO avec découpage temporel fin."""
-        if self.argo_index.empty:
-            return []
+    def safe_numeric_conversion(self, series, column_name):
+        """Conversion numérique sécurisée avec diagnostic."""
+        original_count = len(series)
+        converted = pd.to_numeric(series, errors='coerce')
+        nan_count = converted.isna().sum()
+        
+        if nan_count > 0:
+            logger.warning(f"{column_name}: {nan_count}/{original_count} values became NaN")
+            # Montrer les valeurs problématiques
+            problem_values = series[converted.isna()].unique()
+            logger.debug(f"Problematic {column_name} values: {problem_values}")
 
+        return converted
+
+    def list_files(self) -> list[str]:
+        """Liste les couples (wmo, cycle) sous forme de string 'wmo:cycle'."""
+        if self.argo_index is None:
+            return []
+        else:
+            if self.argo_index.empty:
+                logger.warning("ARGO index is empty")
+                return []
+        
         start_dt = pd.to_datetime(self.start_time)
         end_dt = pd.to_datetime(self.end_time)
         
-        # Découper en chunks de 6 heures pour éviter les surcharges
-        chunk_size_hours = 6
-        all_dates = []
-        
-        current_start = start_dt
-        while current_start < end_dt:
-            current_end = min(current_start + pd.Timedelta(hours=chunk_size_hours), end_dt)
-            
-            # logger.info(f"Processing ARGO temporal chunk: {current_start} to {current_end}")
-            
-            # Filtrer pour ce chunk temporel de quelques heures
-            chunk_filtered = self.argo_index[
-                (self.argo_index['date'] >= current_start) &
-                (self.argo_index['date'] <= current_end) &
-                (self.argo_index['latitude'] >= self.lat_range[0]) &
-                (self.argo_index['latitude'] <= self.lat_range[1]) &
-                (self.argo_index['longitude'] >= self.lon_range[0]) &
-                (self.argo_index['longitude'] <= self.lon_range[1])
-            ]
+        # Conversions numériques
+        self.argo_index['latitude'] = self.safe_numeric_conversion(self.argo_index['latitude'], 'latitude')
+        self.argo_index['longitude'] = self.safe_numeric_conversion(self.argo_index['longitude'], 'longitude')
 
-            if not chunk_filtered.empty:
-                #chunk_dates = chunk_filtered['date'].dt.floor('min').unique()
-                chunk_dates = chunk_filtered['date'].unique()
-                all_dates.extend([pd.Timestamp(date) for date in chunk_dates])
-                # logger.info(f"Found {len(chunk_dates)} minute slots with ARGO data in chunk")
-
-            current_start = current_end
-        
-        # Supprimer les doublons et trier
-        unique_dates = sorted(list(set(all_dates)))
-
-        limit = self.params.max_samples if self.params.max_samples else len(unique_dates)
-        unique_dates = unique_dates[-limit:]
-        logger.info(f"Total unique minutes timestamps with ARGO data: {len(unique_dates)}")
-
-        return unique_dates
-
-    def open(self, start_date: pd.Timestamp, mode: str = "rb") -> Optional[xr.Dataset]:
-        """Ouvre les profils Argo individuels identifiés."""
-        
-        # Vérifier dans l'index local les profils disponibles
-        selected_profiles = self.argo_index[
-            #(self.argo_index['date'] >= interval_start) &
-            #(self.argo_index['date'] < interval_end) &  # Intervalle fermé-ouvert [start, start+1s[
-            (self.argo_index['date'] == start_date) &  # Correspondance exacte
+        # Filtrage temporel et spatial
+        filtered = self.argo_index[
+            (self.argo_index['date'] >= start_dt) &
+            (self.argo_index['date'] <= end_dt) &
             (self.argo_index['latitude'] >= self.lat_range[0]) &
             (self.argo_index['latitude'] <= self.lat_range[1]) &
             (self.argo_index['longitude'] >= self.lon_range[0]) &
             (self.argo_index['longitude'] <= self.lon_range[1])
         ]
+
+        if filtered.empty:
+            logger.warning("No ARGO profiles found in requested range")
+            return []
+
+        # Extraire le cycle à partir du nom de fichier (3 chiffres avant ".nc")
+        filtered["cycle"] = (
+            filtered["file"].str.extract(r"_(\d{3})\.nc$").astype(float).astype("Int64")
+        )
+        cycle_na_count = filtered["cycle"].isna().sum()
+        wmo_na_count = filtered["wmo"].isna().sum()
         
-        if selected_profiles.empty:
-            logger.debug(f"No ARGO profiles found for {start_date}")
-            return None
+        logger.debug(f"NA values in cycle column: {cycle_na_count}")
+        logger.debug(f"NA values in wmo column: {wmo_na_count}")
         
-        # logger.info(f"Found {len(selected_profiles)} ARGO profiles for {start_date}")
+        if cycle_na_count > 0:
+            logger.warning(f"{cycle_na_count} profiles have invalid cycle numbers")
+            # Montrer quelques exemples de fichiers problématiques
+            problematic_files = filtered[filtered["cycle"].isna()]["file"].head(5)
+            logger.debug(f"Examples of problematic file names: {problematic_files.tolist()}")
+
+        filtered_clean = filtered.dropna(subset=['wmo', 'cycle'])
         
-        # Charger les profils individuellement plutôt qu'avec une requête régionale
+        logger.debug(f"Dataset shape after removing NA values: {filtered_clean.shape}")
+        
+        if filtered_clean.empty:
+            logger.warning("No valid ARGO profiles after removing NA values")
+            return []
+
         try:
-            datasets = []
-            #max_profiles = 20  # Limite pour éviter la surcharge
-            
-            # Filtrer par correspondance exacte temporelle
-            #selected_profiles = available_profiles[
-            #    available_profiles['date'] == start_date
-            #]
-            
-            for _, profile_info in selected_profiles.iterrows():
-                try:
-                    # Charger chaque profil individuellement par WMO et cycle
-                    wmo = int(profile_info['wmo'])
-                    cycle = int(profile_info['cyc'])
-                    
-                    # Utiliser le DataFetcher avec des coordonnées spécifiques du profil
-                    profile_ds = self.argo_loader.profile(wmo, cycle).load().data
-                    
-                    if profile_ds is not None and len(profile_ds.N_POINTS) > 0:
-                        datasets.append(profile_ds)
-
-                except Exception as e:
-                    # logger.warning(f"Failed to load profile WMO={wmo}, cycle={cycle}: {e}")
-                    continue
-            if datasets:
-                # Concaténer tous les profils chargés
-                combined_ds = xr.concat(datasets, dim='N_POINTS')
-                # logger.info(f"  Successfully loaded {len(combined_ds.N_POINTS)} ARGO N_POINTS for {start_date}")
-
-                # Ajouter la profondeur comme dimension
-                combined_ds = self._add_depth_dimension(combined_ds)
-                return combined_ds
-            else:
-                logger.warning(f"No ARGO profiles could be loaded for {start_date}")
-                return None
-                
+            couples = sorted(set(zip(filtered_clean['wmo'], filtered_clean['cycle'])))
+            logger.debug(f"Successfully created {len(couples)} unique WMO:cycle couples")
         except Exception as e:
-            logger.warning(f"Failed to load ARGO data for {start_date}: {e}")
+            logger.error(f"Error creating couples even after NA removal: {e}")
+            return []
+
+        # Limite si besoin
+        limit = self.params.max_samples if self.params.max_samples else len(couples)
+        couples = couples[:limit]
+
+        # Formatter en string "wmo:cycle"
+        couples_str = [f"{int(wmo)}:{int(cycle)}" for wmo, cycle in couples]
+
+        logger.info(f"Found {len(couples_str)} valid ARGO profiles (formatted as 'wmo:cycle')")
+        return couples_str
+
+    def open(self, wmo_cycle_str: str, mode: str = "rb") -> Optional[xr.Dataset]:
+        """Ouvre un profil ARGO à partir d'un string 'wmo:profiler_code'."""
+        try:
+            # Parse le string
+            wmo_str, cycle_str = wmo_cycle_str.split(":")
+            wmo, cycle = int(wmo_str), int(cycle_str)
+
+            # Charger le profil
+            profile = self.argo_loader.profile(wmo, cycle)
+            if profile is None: # or profile.data is None or profile.data.size == 0:
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} is empty on server")
+                return None
+            profile_ds = profile.load().data
+
+            if profile_ds is not None and "N_POINTS" in profile_ds.dims and len(profile_ds.N_POINTS) > 0:
+                profile_ds = self._add_depth_dimension(profile_ds)
+                return profile_ds
+            else:
+                logger.warning(f"Empty profile for WMO={wmo}, cycle={cycle}")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to load ARGO profile {wmo_cycle_str}: {e}")
             return None
 
     def _add_depth_dimension(self, ds: xr.Dataset) -> xr.Dataset:

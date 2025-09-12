@@ -7,7 +7,7 @@ import json
 from loguru import logger
 import numpy as np
 from oceanbench.core.lagrangian_trajectory import ZoneCoordinates
-from oceanbench.core.rmsd import rmsd, Variable
+from oceanbench.core.rmsd import Variable
 import pandas as pd
 from shapely.geometry import Polygon, Point
 from shapely import box, MultiPoint, simplify
@@ -54,6 +54,7 @@ VARIABLES_ALIASES = {
             "sst_foundation", "sst_fnd",
             "sstfoundation", "sstfnd", "sst_ref",
             "foundation_temperature", "t_surf_foundation",
+            "adjusted_sea_surface_temperature",    # TODO : check this one
         ]
     },
     "sss": {
@@ -248,7 +249,7 @@ class CoordinateSystem:
         lat_name = names_dict.get("lat", None)
         lon_name = names_dict.get("lon", None)
         time_name = names_dict.get("time", None)
-        # --- xarray.Dataset ---
+        # xarray.Dataset
         if isinstance(data, xr.Dataset):
             dims = set(data.dims)
             vars_ = set(data.variables)
@@ -282,7 +283,7 @@ class CoordinateSystem:
             if not ({lat_name, lon_name} & all_names):
                 return "L1"
 
-        # --- DataFrame / GeoDataFrame ---
+        # DataFrame / GeoDataFrame
         if isinstance(data, (pd.DataFrame, gpd.GeoDataFrame)):
             cols = set(data.columns)
             # L2: lat/lon/time as columns
@@ -300,7 +301,7 @@ class CoordinateSystem:
             if {lat_name, lon_name, time_name} <= cols:
                 return "L3"
 
-        # --- Fallback: try to detect from attributes or structure --
+        # Fallback: try to detect from attributes or structure
         if hasattr(data, "attrs"):
             attrs = getattr(data, "attrs", {})
             if "level" in attrs:
@@ -464,7 +465,7 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
 
         boundary = MultiPoint(points).convex_hull
         boundary = simplify(boundary, tolerance=0.1, preserve_topology=False)
-        return boundary  #MultiPoint(points)
+        return boundary
 
     except Exception as exc:
         logger.error(f"Error in geometry extraction: {repr(exc)}")
@@ -509,8 +510,6 @@ def is_rectangular_grid(points: np.ndarray, tol: float = 1e-5) -> bool:
     match = sum(np.any(np.all(np.abs(points - c) < tol, axis=1)) for c in corners)
     return match == 4
 
-
-import xarray as xr
 
 def is_ungridded_observation_dataset(ds: xr.Dataset) -> bool:
     """

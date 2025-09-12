@@ -9,6 +9,7 @@ import ast
 from loguru import logger
 from memory_profiler import profile
 import numpy as np
+from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
 from torchvision import transforms
 import xarray as xr
@@ -17,13 +18,16 @@ from pyproj import Transformer
 from dctools.data.coordinates import (
     LIST_VARS_GLONET,
 )
+# from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.xarray_utils import (
     rename_coordinates,
     rename_coords_and_vars,
     subset_variables,
-    interpolate_dataset,
     assign_coordinate,
     reset_time_coordinates,
+)
+from dctools.processing.interpolation import (
+    interpolate_dataset,
 )
 
 
@@ -67,13 +71,20 @@ class SelectVariablesTransform:
 
 
 class InterpolationTransform:
-    def __init__(self, ranges: Dict[str, np.arange], weights_filepath: str):
+    def __init__(
+        self,
+        dataset_processor: DatasetProcessor,
+        ranges: Dict[str, np.arange], weights_filepath: str
+    ):
         self.weights_filepath = weights_filepath
         self.ranges = ranges
+        self.dataset_processor = dataset_processor
 
     def __call__(self, data):
         data = interpolate_dataset(
-            data, self.ranges,
+            data,
+            self.ranges,
+            self.dataset_processor,
             self.weights_filepath,
             interpolation_lib='pyinterp',
         )
@@ -204,8 +215,14 @@ class SubsetCoordTransform:
 
 
 class CustomTransforms:
-    def __init__(self, transform_name: str, **kwargs):
+    def __init__(
+        self, 
+        transform_name: str,
+        dataset_processor: DatasetProcessor,
+        **kwargs,
+    ):
         self.transform_name = transform_name
+        self.dataset_processor = dataset_processor
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -301,7 +318,10 @@ class CustomTransforms:
         assert(hasattr(self, "interp_ranges"))
         assert(hasattr(self, "weights_path"))
 
-        transform = InterpolationTransform(self.interp_ranges, self.weights_path)
+        transform = InterpolationTransform(
+            self.dataset_processor,
+            self.interp_ranges, self.weights_path
+        )
         interp_dataset = transform(dataset)
         return interp_dataset
 
@@ -312,13 +332,13 @@ class CustomTransforms:
         assert(hasattr(self, "depth_coord_vals"))
         assert(hasattr(self, "weights_path"))
         assert(hasattr(self, "interp_ranges"))
-        dict_rename = self.dict_rename if hasattr(self, "dict_rename") else None
         depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
-        list_vars = self.list_vars if hasattr(self, "list_vars") else LIST_VARS_GLONET
 
         transform=transforms.Compose([
             SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
-            InterpolationTransform(self.interp_ranges, self.weights_path),
+            InterpolationTransform(self.dataset_processor,
+                                   self.interp_ranges, self.weights_path,
+            ),
         ])
         transf_dataset = transform(dataset)
         return transf_dataset
@@ -345,7 +365,6 @@ class CustomTransforms:
         Convert the time coordinate to a timestamp.
         """
         assert(hasattr(self, "time_names"))
-        # Supposons que ds est ton xr.Dataset et "time" la coordonnée temporelle
         transform = ToTimestampTransform(self.time_names)
         return transform(ds)
 

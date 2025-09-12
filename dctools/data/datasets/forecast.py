@@ -3,71 +3,10 @@ from datetime import timedelta
 import os
 from typing import Callable
 
+from loguru import logger
 import pandas as pd
 import xarray as xr
 
-'''def evaluate_forecast_leadtimes(
-    forecast_index: pd.DataFrame,
-    open_pred: Callable[[str], xr.Dataset],
-    open_ref: Callable[[str], xr.Dataset],
-    eval_variables: list,
-    compute_metrics: Callable,
-    binning: dict,
-    metrics: list,
-    max_open_files: int = 20,  # Limite le nombre de fichiers ouverts/téléchargés
-    remove_file: Callable[[str], None] = None,  # Fonction pour supprimer un fichier du disque
-):
-    results = {}
-    pred_cache = OrderedDict()
-    ref_cache = OrderedDict()
-
-    for ref_time, group in forecast_index.groupby("forecast_reference_time"):
-        results[ref_time] = {}
-        for _, row in group.iterrows():
-            lead_time = row["lead_time"]
-            valid_time = row["valid_time"]
-            pred_path = row["pred_data"]
-            ref_path = row["ref_data"]
-
-            # --- Gestion du cache et suppression des anciens fichiers ---
-            if pred_path not in pred_cache:
-                pred_ds = open_pred(pred_path)
-                pred_cache[pred_path] = pred_ds
-                # Si le fichier a été téléchargé, on peut le supprimer plus tard
-                if len(pred_cache) > max_open_files:
-                    old_path, _ = pred_cache.popitem(last=False)
-                    if remove_file:
-                        remove_file(old_path)
-            else:
-                pred_ds = pred_cache[pred_path]
-
-            if ref_path not in ref_cache:
-                ref_ds = open_ref(ref_path)
-                ref_cache[ref_path] = ref_ds
-                if len(ref_cache) > max_open_files:
-                    old_path, _ = ref_cache.popitem(last=False)
-                    if remove_file:
-                        remove_file(old_path)
-            else:
-                ref_ds = ref_cache[ref_path]
-
-            # (Optionnel) Sélectionne la tranche temporelle si besoin
-            # pred_ds_sel = pred_ds.sel(time=valid_time, method="nearest")
-            # ref_ds_sel = ref_ds.sel(time=valid_time, method="nearest")
-            
-            # Calcul des scores
-            score_dict = compute_metrics(
-                pred_ds, ref_ds,
-                eval_variables=eval_variables,
-                binning=binning,
-                metrics=metrics,
-            )
-            results[ref_time][lead_time] = {
-                "valid_time": valid_time,
-                "scores": score_dict,
-            }
-    return results'''
-    
 
 def build_forecast_index_from_catalog(
     catalog: pd.DataFrame,
@@ -132,6 +71,10 @@ def build_forecast_index_from_catalog(
     records = []
 
     for init_time in init_times:
+        # check if a complete sequence can be built for this init_time
+        complete_sequence = True
+        sequence_records = []
+        
         for lead_time in lead_times:
             if lead_time_unit == "days":
                 valid_time = init_time + pd.Timedelta(days=lead_time)
@@ -167,15 +110,60 @@ def build_forecast_index_from_catalog(
             elif len(matching_files) == 1:
                 selected_file = matching_files.iloc[0]
             else:
-                # Aucun fichier ne contient ce valid_time, passer au suivant
-                continue
+                # Aucun fichier ne contient ce valid_time, séquence incomplète
+                complete_sequence = False
+                break
             
-            records.append({
+            sequence_records.append({
                 "forecast_reference_time": init_time,
                 "lead_time": lead_time_value,
                 "valid_time": valid_time,
                 "file": selected_file["path"]
             })
-    return pd.DataFrame.from_records(records)
-
-
+        
+        # Ajouter la séquence seulement si elle est complète (tous les lead_times de 0 à n_days_forecast-1)
+        if complete_sequence and len(sequence_records) == n_days_forecast:
+            # Vérifier que la séquence commence bien par lead_time=0 et finit par lead_time=n_days_forecast-1
+            lead_times_in_sequence = [r["lead_time"] for r in sequence_records]
+            expected_lead_times = list(range(n_days_forecast))
+            
+            if lead_times_in_sequence == expected_lead_times:
+                records.extend(sequence_records)
+            else:
+                logger.warning(f"Incomplete lead time sequence for init_time {init_time}: "
+                             f"got {lead_times_in_sequence}, expected {expected_lead_times}")
+    
+    # Créer le DataFrame final
+    df_result = pd.DataFrame.from_records(records)
+    
+    # Vérification finale : s'assurer qu'on n'a que des séquences complètes
+    if not df_result.empty:
+        # Grouper par forecast_reference_time et vérifier que chaque groupe a exactement n_days_forecast entrées
+        grouped = df_result.groupby('forecast_reference_time')
+        valid_groups = []
+        
+        for init_time, group in grouped:
+            if len(group) == n_days_forecast:
+                # Vérifier que les lead_times vont de 0 à n_days_forecast-1
+                lead_times_sorted = sorted(group['lead_time'].tolist())
+                expected_lead_times = list(range(n_days_forecast))
+                
+                if lead_times_sorted == expected_lead_times:
+                    valid_groups.append(group)
+                else:
+                    logger.warning(f"Removing incomplete sequence for {init_time}: "
+                                 f"lead_times {lead_times_sorted} != expected {expected_lead_times}")
+            else:
+                logger.warning(f"Removing incomplete sequence for {init_time}: "
+                             f"got {len(group)} entries, expected {n_days_forecast}")
+        
+        if valid_groups:
+            df_result = pd.concat(valid_groups, ignore_index=True)
+        else:
+            df_result = pd.DataFrame(columns=['forecast_reference_time', 'lead_time', 'valid_time', 'file'])
+            logger.warning("No complete forecast sequences found after filtering")
+    
+    logger.info(f"Built forecast index with {len(df_result)} entries "
+               f"({len(df_result)//n_days_forecast if not df_result.empty else 0} complete forecast sequences)")
+    
+    return df_result

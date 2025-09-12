@@ -4,29 +4,14 @@
 """Misc. functions to aid in the processing xr.Datasets and DataArrays."""
 
 import ast
-from datetime import datetime
-import gc
-from loguru import logger
-import os
-import traceback
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import cftime
-import geopandas as gpd
 from loguru import logger
 import numpy as np
 import pandas as pd
-from pathlib import Path
-import psutil
-import pyinterp
-import pyinterp.backends.xarray
 import xarray as xr
-#import xesmf as xe
 
-from dctools.data.coordinates import (
-    GEO_STD_COORDS
-)
-from dctools.utilities.misc_utils import log_memory
 
 
 def create_empty_dataset(dimensions: dict) -> xr.Dataset:
@@ -56,9 +41,7 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
     Returns:
         xr.Dataset: Dataset renommé.
     """
-    # ds = ds.copy(deep=True)
     # Renommer les coordonnées (sans toucher aux dimensions)
-    # log_memory("START rename_coordinates")
     coords_to_rename = {k: v for k, v in rename_dict.items() if k in ds.coords and k != v}
     if coords_to_rename:
         ds = ds.rename(coords_to_rename)
@@ -80,17 +63,14 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
     for old, new in coords_to_rename.items():
         if old in ds.coords and old != new:
             ds = ds.drop_vars(old)
-    # log_memory("END rename_coordinates")
     return ds
 
 
 def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict] = None):
     """Rename variables according to a given dictionary."""
     try:
-        # log_memory("START rename_variables")
         if not rename_dict:
             return ds
-        # ds = ds.copy(deep=True)
         if isinstance(rename_dict, str):
             rename_dict = ast.literal_eval(rename_dict)
 
@@ -107,7 +87,6 @@ def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict] = None):
         for old, new in rename_dict.items():
             if old in ds.variables and new in ds.variables and old != new:
                 ds = ds.drop_vars(old)
-        # log_memory("END rename_variables")
         return ds
     except Exception as e:
         logger.error(f"Error renaming variables: {e}")
@@ -121,11 +100,9 @@ def rename_coords_and_vars(
 ):
     """Rename variables and coordinates according to given dictionaries."""
     try:
-        # log_memory("START rename_coords_and_vars")
         ds = rename_variables(ds, rename_vars_dict)
         ds = rename_coordinates(ds, rename_coords_dict)
 
-        # log_memory("END rename_coords_and_vars")
         return ds
     except Exception as e:
         logger.error(f"Error renaming coordinates or variables: {e}")
@@ -133,7 +110,7 @@ def rename_coords_and_vars(
 
 def subset_variables(ds: xr.Dataset, list_vars: List[str]):
     """Extract a sub-dataset containing only listed variables, preserving attributes."""
-    # ds = ds.copy(deep=True)
+
     for variable_name in ds.variables:
         var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
         if not var_std_name:
@@ -158,139 +135,6 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
     return subset
 
 
-def interpolate_xarray_dataset(ds: xr.Dataset, 
-                              varname: str,
-                              coordinates: Dict[str, np.ndarray],
-                              interpolator: str = "bilinear",
-                              **kwargs) -> np.ndarray:
-    """
-    Interpolate an xarray dataset using pyinterp, automatically handling 2D or 3D cases
-    based on available dimensions.
-    
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Input dataset containing the variable to interpolate
-    varname : str
-        Name of the variable to interpolate
-    coordinates : dict
-        Dictionary containing interpolation coordinates:
-        - 'longitude': array of longitude values
-        - 'latitude': array of latitude values  
-        - 'time': array of time values (optional, for 3D interpolation)
-        - 'depth': array of depth values (optional, for 4D interpolation)
-    interpolator : str, optional
-        Interpolation method, by default "bilinear"
-        Options: "bilinear", "inverse_distance_weighting", "nearest"
-    **kwargs
-        Additional arguments passed to the interpolation function
-        
-    Returns
-    -------
-    numpy.ndarray
-        Interpolated values at the specified coordinates
-        
-    Raises
-    ------
-    ValueError
-        If required coordinates are missing or dimensions are not supported
-    """
-    
-    # Check if the variable exists in the dataset
-    if varname not in ds.data_vars:
-        raise ValueError(f"Variable '{varname}' not found in dataset")
-    
-    data_array = ds[varname]
-    dims = list(data_array.dims)
-    
-    # Determine interpolation type based on dimensions
-    has_depth = any(dim in dims for dim in ['depth', 'z', 'level'])
-    has_time = 'time' in dims
-    
-    # Validate required coordinates
-    required_coords = ['longitude', 'latitude']
-    if has_time:
-        required_coords.append('time')
-    if has_depth:
-        required_coords.append('depth')
-        
-    missing_coords = [coord for coord in required_coords if coord not in coordinates]
-    if missing_coords:
-        raise ValueError(f"Missing required coordinates: {missing_coords}")
-    
-    # Create interpolation coordinates dictionary
-    interp_coords = {
-        'longitude': coordinates['longitude'],
-        'latitude': coordinates['latitude']
-    }
-    
-    # Handle different interpolation cases
-    try:
-        if has_time and not has_depth:
-            # 3D interpolation (longitude, latitude, time)
-            logger.info("Performing 3D interpolation (lon, lat, time)")
-            grid = pyinterp.backends.xarray.Grid3D(data_array)
-            interp_coords['time'] = coordinates['time']
-            result = grid.trivariate(interp_coords, interpolator=interpolator, **kwargs)
-            
-        elif has_depth and not has_time:
-            # 3D interpolation (longitude, latitude, depth)
-            logger.info("Performing 3D interpolation (lon, lat, depth)")
-            grid = pyinterp.backends.xarray.Grid3D(data_array)
-            interp_coords['depth'] = coordinates['depth']
-            result = grid.trivariate(interp_coords, interpolator=interpolator, **kwargs)
-            
-        elif has_depth and has_time:
-            # Process time step by time step for 4D data
-            logger.info("Performing 4D interpolation (lon, lat, time, depth) - processing by time steps")
-            time_coords = coordinates['time']
-            n_points = len(coordinates['longitude'])
-            n_times = len(time_coords)
-            
-            # Initialize result array
-            result = np.full((n_times, n_points), np.nan)
-            
-            # Process each time step
-            for t_idx, time_val in enumerate(time_coords):
-                try:
-                    # Select data for this time step
-                    data_at_time = data_array.sel(time=time_val, method='nearest')
-                    
-                    # Create 3D grid for this time step (lon, lat, depth)
-                    grid_3d = pyinterp.backends.xarray.Grid3D(data_at_time)
-                    
-                    # Interpolate for this time step
-                    time_result = grid_3d.trivariate({
-                        'longitude': coordinates['longitude'],
-                        'latitude': coordinates['latitude'],
-                        'depth': coordinates['depth']
-                    }, interpolator=interpolator, **kwargs)
-                    
-                    result[t_idx, :] = time_result
-                    
-                except Exception as e:
-                    logger.info(f"Warning: Failed to interpolate time step {t_idx}: {e}")
-                    continue
-            
-            result = result.flatten() if n_times == 1 else result
-            
-        else:
-            # 2D interpolation (longitude, latitude)
-            logger.info("Performing 2D interpolation (lon, lat)")
-            grid = pyinterp.backends.xarray.Grid2D(data_array)
-            result = grid.bivariate(interp_coords, interpolator=interpolator, **kwargs)
-        
-        return result
-        
-    except Exception as e:
-        logger.info(f"Error during interpolation: {e}")
-        logger.info(f"Data array dimensions: {dims}")
-        logger.info(f"Data array shape: {data_array.shape}")
-        logger.info(f"Available coordinates: {list(coordinates.keys())}")
-        raise
-
-
-
 def apply_standard_dimension_order(da: xr.DataArray) -> xr.DataArray:
     """
     Réorganise les dimensions d'un DataArray dans l'ordre standard : (time, depth, lat, lon).
@@ -307,462 +151,6 @@ def apply_standard_dimension_order(da: xr.DataArray) -> xr.DataArray:
     final_order = existing_dims + other_dims
     
     return da.transpose(*final_order)
-
-'''def interpolate_xesmf(  # TODO : check and uncomment
-        ds: xr.Dataset, ranges: Dict[str, np.ndarray],
-        weights_filepath: Optional[str] = None,
-    ) -> xr.Dataset:
-
-    for variable_name in ds.variables:
-        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
-        if not var_std_name:
-            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
-
-    # 1. Sauvegarder les attributs des coordonnées AVANT interpolation
-    coords_attrs = {}
-    for coord in ds.coords:
-        coords_attrs[coord] = ds.coords[coord].attrs.copy()
-
-    # (optionnel) Sauvegarder aussi les attrs des variables si besoin
-    vars_attrs = {}
-    for var in ds.data_vars:
-        vars_attrs[var] = ds[var].attrs.copy()
-
-    for key in ranges.keys():
-        assert(key in list(ds.dims))
-
-    out_dict = {}
-    for key in ranges.keys():
-        out_dict[key] = ranges[key]
-    for dim in GEO_STD_COORDS.keys():
-        if dim not in out_dict.keys():
-            out_dict[dim] = ds.coords[dim].values
-    ds_out = create_empty_dataset(out_dict)
-
-    # TODO : adapt chunking depending on the dataset type
-    ds_out = ds_out.chunk(chunks={"lat": -1, "lon": -1, "time": 1})
-
-    if weights_filepath and Path(weights_filepath).is_file():
-        # Use precomputed weights
-        logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
-        regridder = xe.Regridder(
-            ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
-        )
-    else:
-        # Compute weights
-        regridder = xe.Regridder(
-            ds, ds_out, "bilinear"
-        )
-        # Save the weights to a file
-        regridder.to_netcdf(weights_filepath)
-    # Regrid the dataset
-    ds_out = regridder(ds)
-
-    # 2. Réaffecter les attributs des variables (déjà fait dans ton code)
-    for var in ds_out.data_vars:
-        if var in vars_attrs:
-            ds_out[var].attrs = vars_attrs[var].copy()
-
-    # 3. Réaffecter les attributs des coordonnées
-    for coord in ds_out.coords:
-        if coord in coords_attrs:
-            # Crée un nouveau DataArray avec les attrs sauvegardés
-            new_coord = xr.DataArray(
-                ds_out.coords[coord].values,
-                dims=ds_out.coords[coord].dims,
-                attrs=coords_attrs[coord].copy()
-            )
-            ds_out = ds_out.assign_coords({coord: new_coord})
-
-    for variable_name in ds.variables:
-        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
-        if not var_std_name:
-            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
-
-    return ds_out'''
-
-def interpolate_pyinterp(ds: xr.Dataset,
-                                 # varnames: list,
-                                 target_grid: Dict[str, np.ndarray],
-                                 interpolator: str = "bilinear",
-                                 **kwargs) -> xr.Dataset:
-    """
-    Interpolate multiple variables from an xarray dataset and return a new Dataset
-    with the same variables and dimensions as the original, but interpolated onto
-    the new coordinate grid.
-    """
-    # log_memory("START interpolate_pyinterp")
-    varnames = ds.data_vars
-    # Create a working copy of the dataset
-    ds_work = ds.copy()
-
-    # Detect coordinate names in the original dataset
-    lon_coord_orig = None
-    lat_coord_orig = None
-    
-    for coord_name in ['longitude', 'lon']:
-        if coord_name in ds_work.coords:
-            lon_coord_orig = coord_name
-            break
-    
-    for coord_name in ['latitude', 'lat']:
-        if coord_name in ds_work.coords:
-            lat_coord_orig = coord_name
-            break
-    
-    if lon_coord_orig is None or lat_coord_orig is None:
-        raise ValueError("Could not find longitude/latitude coordinates in dataset")
-    
-    # Rename coordinates to pyinterp standard if needed
-    rename_dict = {}
-    if lon_coord_orig != 'longitude':
-        rename_dict[lon_coord_orig] = 'longitude'
-    if lat_coord_orig != 'latitude':
-        rename_dict[lat_coord_orig] = 'latitude'
-    
-    if rename_dict:
-        ds_work = ds_work.rename(rename_dict)
-        logger.info(f"Renamed coordinates: {rename_dict}")
-    
-    # Extract coordinate arrays
-    lon_interp = np.asarray(target_grid['lon'])
-    lat_interp = np.asarray(target_grid['lat'])
-    
-    # Handle optional coordinates
-    time_interp = None
-    depth_interp = None
-    if 'time' in target_grid:
-        time_interp = np.asarray(target_grid['time'])
-    if 'depth' in target_grid:
-        depth_interp = np.asarray(target_grid['depth'])
-    
-    # Create new coordinate system using original coordinate names
-    new_coords = {}
-    new_coords[lon_coord_orig] = lon_interp
-    new_coords[lat_coord_orig] = lat_interp
-    
-    if time_interp is not None and 'time' in ds_work.coords:
-        new_coords['time'] = time_interp
-    
-    if depth_interp is not None:
-        depth_coord = next((k for k in ['depth', 'z', 'level'] if k in ds_work.coords), 'depth')
-        new_coords[depth_coord] = depth_interp
-  
-    # Initialize result dataset with new coordinates
-    data_vars = {}
-
-    # Interpolate each requested variable
-    for varname in varnames:
-        if varname not in ds_work.data_vars:
-            logger.warning(f"Variable '{varname}' not found in dataset, skipping...")
-            continue
-        try:
-            # logger.info(f"Interpolating variable: {varname}")
-            
-            # Get original variable
-            original_var = ds_work[varname]
-            original_dims = list(original_var.dims)
-            
-            # Determine interpolation type based on dimensions
-            has_depth = any(dim in original_dims for dim in ['depth', 'z', 'level'])
-            has_time = 'time' in original_dims
-            
-            # Case 1: 2D variables (lon, lat only)
-            if not has_time and not has_depth:
-                # logger.info(f"    2D interpolation for {varname}")
-                grid_2d = pyinterp.backends.xarray.Grid2D(original_var)
-                
-                # Create meshgrid for interpolation points
-                lon_mesh, lat_mesh = np.meshgrid(lon_interp, lat_interp, indexing='ij')
-                
-                # Interpolate
-                result = grid_2d.bivariate({
-                    'longitude': lon_mesh.ravel(),
-                    'latitude': lat_mesh.ravel()
-                }, interpolator=interpolator, **kwargs)
-                
-                # Reshape to grid
-                interpolated_values = result.reshape(len(lon_interp), len(lat_interp))
-                
-                # Create dimensions using original names
-                new_dims = [lon_coord_orig, lat_coord_orig]
-                
-            # Case 2: 3D variables with depth but no time (lon, lat, depth)
-            elif has_depth and not has_time:
-                # logger.info(f"   3D interpolation (lon, lat, depth) for {varname}")
-                grid_3d = pyinterp.backends.xarray.Grid3D(original_var)
-                
-                # Create meshgrid for interpolation points
-                lon_mesh, lat_mesh, depth_mesh = np.meshgrid(
-                    lon_interp, lat_interp, depth_interp, indexing='ij')
-                
-                # Interpolate
-                result = grid_3d.trivariate({
-                    'longitude': lon_mesh.ravel(),
-                    'latitude': lat_mesh.ravel(),
-                    'depth': depth_mesh.ravel()
-                }, interpolator=interpolator, **kwargs)
-                
-                # Reshape to grid
-                interpolated_values = result.reshape(len(lon_interp), len(lat_interp), len(depth_interp))
-                
-                # Determine depth coordinate name
-                depth_coord_name = next((k for k in ['depth', 'z', 'level'] if k in original_dims), 'depth')
-                new_dims = [lon_coord_orig, lat_coord_orig, depth_coord_name]
-                
-            # Case 3: 3D variables with time but no depth (time, lon, lat)
-            elif has_time and not has_depth:
-                # logger.info(f"  -> 3D interpolation (time, lon, lat) for {varname}")
-                n_times = len(time_interp) if time_interp is not None else len(ds_work.time)
-                n_lon = len(lon_interp)
-                n_lat = len(lat_interp)
-                
-                # Initialize result array
-                interpolated_values = np.full((n_times, n_lon, n_lat), np.nan)
-                
-                # Create meshgrid for spatial coordinates
-                lon_mesh, lat_mesh = np.meshgrid(lon_interp, lat_interp, indexing='ij')
-                flat_lon = lon_mesh.ravel()
-                flat_lat = lat_mesh.ravel()
-
-                # Process each time step
-                times_to_process = time_interp if time_interp is not None else ds_work.time.values
-
-                for t_idx, time_val in enumerate(times_to_process):
-                    try:
-                        # Select data for this time step
-                        data_at_time = original_var.sel(time=time_val, method='nearest')
-
-                        # Create 2D grid for this time step
-                        grid_2d = pyinterp.backends.xarray.Grid2D(data_at_time)
-
-                        # Interpolate for this time step
-                        time_result = grid_2d.bivariate({
-                            'longitude': flat_lon,
-                            'latitude': flat_lat
-                        }, interpolator=interpolator)  #, **kwargs)
-
-                        # Reshape and store
-                        interpolated_values[t_idx, :, :] = time_result.reshape(n_lon, n_lat)
-
-                    except Exception as e:
-                        logger.warning(f"    Failed to interpolate {varname} at time step {t_idx}: {e}")
-                        continue
-
-                new_dims = ['time', lon_coord_orig, lat_coord_orig]
-
-            # Case 4: 4D variables with time and depth (time, lon, lat, depth)
-            elif has_time and has_depth:
-                # logger.info(f"   4D interpolation (time, lon, lat, depth) for {varname}")
-                n_times = len(time_interp) if time_interp is not None else len(ds_work.time)
-                n_lon = len(lon_interp)
-                n_lat = len(lat_interp)
-                n_depth = len(depth_interp) if depth_interp is not None else len(ds_work.depth)
-
-                # Initialize result array
-                interpolated_values = np.full((n_times, n_lon, n_lat, n_depth), np.nan)
-
-                # Create meshgrid for spatial coordinates
-                lon_mesh, lat_mesh, depth_mesh = np.meshgrid(
-                    lon_interp, lat_interp, depth_interp, indexing='ij')
-                flat_lon = lon_mesh.ravel()
-                flat_lat = lat_mesh.ravel()
-                flat_depth = depth_mesh.ravel()
-
-                # Process each time step
-                times_to_process = time_interp if time_interp is not None else ds_work.time.values
-
-                for t_idx, time_val in enumerate(times_to_process):
-                    try:
-                        # Select data for this time step
-                        data_at_time = original_var.sel(time=time_val, method='nearest')
-
-                        # Create 3D grid for this time step
-                        grid_3d = pyinterp.backends.xarray.Grid3D(data_at_time)
-
-                        # Interpolate for this time step
-                        time_result = grid_3d.trivariate({
-                            'longitude': flat_lon,
-                            'latitude': flat_lat,
-                            'depth': flat_depth
-                        }, interpolator=interpolator) #, **kwargs)
-
-                        # Reshape and store
-                        interpolated_values[t_idx, :, :, :] = time_result.reshape(n_lon, n_lat, n_depth)
-
-                    except Exception as e:
-                        logger.warning(f"    Failed to interpolate {varname} at time step {t_idx}: {e}")
-                        continue
-
-                # Determine depth coordinate name
-                depth_coord_name = next((k for k in ['depth', 'z', 'level'] if k in original_dims), 'depth')
-                new_dims = ['time', lon_coord_orig, lat_coord_orig, depth_coord_name]
-
-            # Create new variable with interpolated values using original coordinate names
-            data_vars[varname] = (new_dims, interpolated_values, original_var.attrs)
-            # logger.info(f"  -> Successfully interpolated variable: {varname}")
-
-        except Exception as e:
-            logger.error(f"Error interpolating variable {varname}: {e}")
-            continue
-
-
-    # Create result dataset with original coordinate names
-    ds_result = xr.Dataset(
-        data_vars=data_vars,
-        coords=new_coords,
-        attrs=ds.attrs
-    )
-
-    # Réorganiser toutes les variables selon l'ordre standard
-    standard_order = ['time', 'depth', 'lat', 'lon']
-    for var_name in ds_result.data_vars:
-        da = ds_result[var_name]
-        # Garder seulement les dimensions qui existent
-        existing_dims = [dim for dim in standard_order if dim in da.dims]
-        # Ajouter les autres dimensions à la fin
-        other_dims = [dim for dim in da.dims if dim not in standard_order]
-        final_order = existing_dims + other_dims
-        
-        if final_order != list(da.dims):  # Seulement si l'ordre change
-            ds_result[var_name] = da.transpose(*final_order)
-
-    # log_memory("END interpolate_pyinterp")
-    return ds_result
-
-
-
-def create_interpolation_coordinates(lon_points: np.ndarray,
-                                   lat_points: np.ndarray,
-                                   time_points: np.ndarray = None,
-                                   depth_points: np.ndarray = None) -> Dict[str, np.ndarray]:
-    """
-    Helper function to create interpolation coordinates dictionary.
-    
-    Parameters
-    ----------
-    lon_points : numpy.ndarray
-        Longitude coordinates for interpolation
-    lat_points : numpy.ndarray
-        Latitude coordinates for interpolation
-    time_points : numpy.ndarray, optional
-        Time coordinates for interpolation
-    depth_points : numpy.ndarray, optional
-        Depth coordinates for interpolation
-        
-    Returns
-    -------
-    dict
-        Dictionary of interpolation coordinates
-    """
-    
-    coords = {
-        'lon': np.asarray(lon_points),
-        'lat': np.asarray(lat_points)
-    }
-    
-    if time_points is not None:
-        coords['time'] = np.asarray(time_points)
-    
-    if depth_points is not None:
-        coords['depth'] = np.asarray(depth_points)
-    
-    return coords
-
-
-#@profile
-def interpolate_dataset(
-        ds: xr.Dataset, ranges: Dict[str, np.ndarray],
-        weights_filepath: Optional[str] = None,
-        interpolation_lib: Optional[str] = "pyinterp",
-    ) -> xr.Dataset:
-
-    for variable_name in ds.variables:
-        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
-        if not var_std_name:
-            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
-
-    # 1. Sauvegarder les attributs des coordonnées AVANT interpolation
-    coords_attrs = {}
-    for coord in ds.coords:
-        coords_attrs[coord] = ds.coords[coord].attrs.copy()
-
-    # (optionnel) Sauvegarder aussi les attrs des variables si besoin
-    vars_attrs = {}
-    for var in ds.data_vars:
-        vars_attrs[var] = ds[var].attrs.copy()
-
-    out_dict = {}
-    for key in ranges.keys():
-        out_dict[key] = ranges[key]
-    for dim in GEO_STD_COORDS.keys():
-        if dim not in out_dict.keys():
-            out_dict[dim] = ds.coords[dim].values
-    # ds_out = create_empty_dataset(out_dict)
-
-    #for key in ranges.keys():
-    #    assert(key in list(ds.dims))
-    ranges = {k: v for k, v in ranges.items() if k in ds.dims}
-
-    # TODO : adapt chunking depending on the dataset type
-    # ds_out = ds_out.chunk(chunks={"lat": 10, "lon": 10, "time": 1})
-
-    if interpolation_lib == "pyinterp":
-        ds = interpolate_pyinterp(
-            ds,
-            target_grid=out_dict,
-        )
-    #elif interpolation_lib == "xesmf":
-    #    if weights_filepath and Path(weights_filepath).is_file():
-    #        # Use precomputed weights
-    #        logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
-    #        '''regridder = xe.Regridder(
-    #            ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
-    #        )'''
-    #        ds = interpolate_xesmf(
-    #            ds,
-    #            target_grid=out_dict,
-    #            reuse_weights=True,
-    #            weights_file=weights_filepath,
-    #            method="bilinear",
-    #        )
-    #    else:
-    #        ds = interpolate_xesmf(
-    #            ds,
-    #            target_grid=out_dict,
-    #            reuse_weights=False,
-    #            weights_file=weights_filepath,
-    #            method="bilinear",
-    #        )
-    else:
-        raise("Unknown interpolation lib")
-
-    # Compute weights
-    # Regrid the dataset
-    # ds_out = regridder(ds)
-
-    # 2. Réaffecter les attributs des variable
-    for var in ds.data_vars:
-        if var in vars_attrs:
-            ds[var].attrs = vars_attrs[var].copy()
-
-    # 3. Réaffecter les attributs des coordonnées
-    for coord in ds.coords:
-        if coord in coords_attrs:
-            # Crée un nouveau DataArray avec les attrs sauvegardés
-            new_coord = xr.DataArray(
-                ds.coords[coord].values,
-                dims=ds.coords[coord].dims,
-                attrs=coords_attrs[coord].copy()
-            )
-            ds = ds.assign_coords({coord: new_coord})
-
-    for variable_name in ds.variables:
-        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
-        if not var_std_name:
-            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
-
-    return ds
 
 def assign_coordinate(
     ds: xr.Dataset, coord_name: str, coord_vals: List[Any], coord_attrs: Dict[str, str]
@@ -873,18 +261,18 @@ def filter_time_interval(ds: xr.Dataset, start_time: str, end_time: str) -> xr.D
         A filtered dataset containing only data within the time range.
         Returns None if no data is within the time range.
     """
-    # Step 1: Analyze the time axis
+    # Analyze the time axis
     time_info = get_time_info(ds)
     
     # Convert start and end times to pandas Timestamp
     start_time = pd.to_datetime(start_time)
     end_time = pd.to_datetime(end_time)
 
-    # Step 2: Check if the time axis is present and valid
+    # Check if the time axis is present and valid
     if time_info["start"] is None or time_info["end"] is None:
         return None
 
-    # Step 3: Filter the time coordinate within the given interval
+    # Filter the time coordinate within the given interval
     time_coord = ds.coords["time"]
     mask = (time_coord >= start_time) & (time_coord <= end_time)
 
@@ -893,7 +281,6 @@ def filter_time_interval(ds: xr.Dataset, start_time: str, end_time: str) -> xr.D
         logger.warning("No data found in the specified time interval.")
         return None
 
-    # Step 4: Return the filtered dataset
     return ds.sel(time=mask)
 
 
@@ -907,16 +294,6 @@ def extract_spatial_bounds(ds: xr.Dataset) -> dict:
     Returns:
         dict: Dictionary with lat/lon min/max.
     """
-    # Tentatives courantes pour les noms de coordonnées
-    #lat_names = ["lat", "latitude"]
-    #lon_names = ["lon", "longitude"]
-
-    #lat_var = next((name for name in lat_names if name in ds.coords), None)
-    #lon_var = next((name for name in lon_names if name in ds.coords), None)
-
-    #if lat_var is None or lon_var is None:
-    #    raise ValueError("Could not identify latitude or longitude coordinates in dataset.")
-
     lat_vals = ds["lat"].values
     lon_vals = ds["lon"].values
 
@@ -999,135 +376,360 @@ def reset_time_coordinates(dataset: xr.Dataset) -> xr.Dataset:
     dataset = dataset.assign_coords(time=new_time_values)
     return dataset
 
-
-
-class UnifiedObservationView:
-    def __init__(
-        self,
-        source: Union[xr.Dataset, List[xr.Dataset], pd.DataFrame, gpd.GeoDataFrame],
-        load_fn: Callable[[str], xr.Dataset],
-        alias: Optional[str] = None,
-        time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
-    ):
-        """
-        Parameters:
-            source: either
-                - one or more xarray Datasets (data already loaded)
-                - a DataFrame/GeoDataFrame containing metadata, including file links
-            load_fn: a callable that loads a dataset given a link (required if source is a DataFrame)
-        """
-        self.is_metadata = isinstance(source, (pd.DataFrame, gpd.GeoDataFrame))
-        self.load_fn = load_fn
-        self.time_tolerance = time_tolerance
-        self.alias = alias
-
-        if self.is_metadata:
-            if self.load_fn is None:
-                raise ValueError("A `load_fn(link: str)` must be provided when using metadata.")
-            self.meta_df = source
-        else:
-            self.datasets = source if isinstance(source, list) else [source]
-
-
-    #@profile
-    def open_concat_in_time(self, time_interval: tuple) -> xr.Dataset:
-        """
-        Filtre les métadonnées selon l'intervalle de temps, ouvre les fichiers correspondants,
-        puis concatène les datasets le long de la dimension 'time'.
-
-        Parameters
-        ----------
-        time_interval : tuple
-            (start_time, end_time) sous forme de pd.Timestamp ou de string compatible pandas.
-
-        Returns
-        -------
-        xr.Dataset
-            Dataset concaténé sur la dimension 'time'.
-        """
-        # log_memory("START open_concat_in_time")
-        t0, t1 = time_interval
-        t0 = t0 - self.time_tolerance
-        t1 = t1 + self.time_tolerance
-        # Filtrage des métadonnées
-        filtered = self.meta_df[
-            (self.meta_df["date_start"] <= t1) & (self.meta_df["date_end"] >= t0)
-        ]
-        if filtered.empty:
-            logger.warning("Aucune donnée dans l'intervalle de temps demandé.")
-            return None
-
-        # Ouverture des fichiers NetCDF/Zarr
-        if self.alias is not None:
-            datasets = [self.load_fn(row["path"], self.alias) for _, row in filtered.iterrows()]
-        else:
-            datasets = [self.load_fn(row["path"]) for _, row in filtered.iterrows()]
-
-        # Concaténation sur la dimension 'time'
-        combined = xr.concat(datasets, dim="time")
-        # Optionnel : trier et supprimer les doublons temporels
-        combined = combined.sortby("time")
-        combined = combined.sel(time=slice(t0, t1))
-        for dataset in datasets:
-            if hasattr(dataset, "close"):
-                dataset.close()
-            del dataset
-        gc.collect()
-        # log_memory("END open_concat_in_time")
-
-        return combined
-
-    def filter_by_time(self, time_range: Tuple[pd.Timestamp, pd.Timestamp]) -> List[xr.Dataset]:
-        """
-        Returns a list of datasets that fall within the time window.
-        If source is metadata, loads only the required datasets.
-        """
-        t0, t1 = time_range
-
-        if self.is_metadata:
-            filtered = self.meta_df[
-                (self.meta_df["date_start"] >= t0) & (self.meta_df["date_end"] <= t1)
-            ]
-            if filtered.empty:
-                return []
-
-            return [self.load_fn(row["link"]) for _, row in filtered.iterrows()]
-        else:
-            return [
-                ds.sel(time=slice(t0, t1)) for ds in self.datasets
-                if "time" in ds.dims or "time" in ds.coords
-            ]
-
-    def filter_by_time_and_region(
-        self,
-        time_range: Tuple[pd.Timestamp, pd.Timestamp],
-        lon_bounds: Tuple[float, float],
-        lat_bounds: Tuple[float, float]
-    ) -> List[xr.Dataset]:
-        """
-        Filters by both time and bounding box [lon_min, lon_max], [lat_min, lat_max].
-        Only applies to datasets that contain time and spatial coordinates.
-        """
-        t0, t1 = time_range
-        lon_min, lon_max = lon_bounds
-        lat_min, lat_max = lat_bounds
-
-        if self.is_metadata:
-            filtered = self.meta_df[
-                (self.meta_df["date_start"] >= t0) & (self.meta_df["date_end"] <= t1) &
-                (self.meta_df["lon"] >= lon_min) & (self.meta_df["lon"] <= lon_max) &
-                (self.meta_df["lat"] >= lat_min) & (self.meta_df["lat"] <= lat_max)
-            ]
-            return [self.load_fn(row["link"]) for _, row in filtered.iterrows()]
-        else:
-            result = []
-            for ds in self.datasets:
-                if not all(k in ds.coords for k in ["lat", "lon", "time"]):
+def subsample_dataset(
+    ds: xr.Dataset,
+    subsample_values: Dict[str, Union[List, np.ndarray, slice]] = None,
+    method: str = "nearest",
+    tolerance: Optional[Dict[str, float]] = None
+) -> xr.Dataset:
+    """
+    Sous-échantillonne un dataset xarray sur une ou plusieurs dimensions.
+    
+    Args:
+        ds (xr.Dataset): Dataset xarray d'entrée
+        subsample_values (Dict[str, Union[List, np.ndarray, slice]]): 
+            Dictionnaire spécifiant les valeurs à garder pour chaque dimension.
+            - Clé : nom de la dimension (ex: 'time', 'lat', 'lon', 'depth')
+            - Valeur : liste/array des valeurs à sélectionner, ou slice object
+            Si une dimension n'est pas dans le dictionnaire, toutes ses valeurs sont gardées.
+        method (str): Méthode de sélection ('nearest', 'exact', 'ffill', 'bfill')
+        tolerance (Optional[Dict[str, float]]): Tolérance pour chaque dimension lors de la sélection
+        
+    Returns:
+        xr.Dataset: Dataset sous-échantillonné
+        
+    Examples:
+        # Sous-échantillonner temps et profondeur
+        subsample_values = {
+            'time': pd.date_range('2024-01-01', '2024-01-10', freq='2D'),
+            'depth': [0, 10, 50, 100]
+        }
+        ds_sub = subsample_dataset(ds, subsample_values)
+        
+        # Utiliser des slices pour sous-échantillonner
+        subsample_values = {
+            'lat': slice(-60, 60, 2),  # Latitudes de -60 à 60 avec pas de 2
+            'time': slice('2024-01-01', '2024-01-10')
+        }
+        ds_sub = subsample_dataset(ds, subsample_values)
+    """
+    
+    if subsample_values is None:
+        subsample_values = {}
+    
+    if tolerance is None:
+        tolerance = {}
+    
+    ds_result = ds.copy()
+    
+    # Parcourir chaque dimension à sous-échantillonner
+    for dim_name, values in subsample_values.items():
+        
+        # Vérifier que la dimension existe dans le dataset
+        if dim_name not in ds_result.dims:
+            logger.warning(f"Dimension '{dim_name}' not found in dataset. Available dimensions: {list(ds_result.dims)}")
+            continue
+        
+        try:
+            if isinstance(values, slice):
+                # Cas où on utilise un slice
+                ds_result = ds_result.sel({dim_name: values})
+                
+            else:
+                # Obtenir la tolérance pour cette dimension
+                dim_tolerance = tolerance.get(dim_name, None)
+                
+                # Construire les arguments pour sel()
+                sel_kwargs = {dim_name: values, 'method': method}
+                if dim_tolerance is not None:
+                    sel_kwargs['tolerance'] = dim_tolerance
+                
+                ds_result = ds_result.sel(**sel_kwargs)
+                
+        except Exception as e:
+            logger.error(f"Failed to subsample dimension '{dim_name}': {e}")
+            # En cas d'erreur, essayer avec drop=True pour ignorer les valeurs manquantes
+            try:
+                if not isinstance(values, slice):
+                    sel_kwargs['drop'] = True
+                    ds_result = ds_result.sel(**sel_kwargs)
+                    logger.info(f"Successfully subsampled '{dim_name}' with drop=True")
+                else:
+                    logger.error(f"Cannot subsample dimension '{dim_name}' with slice")
                     continue
-                ds_subset = ds.sel(
-                    time=slice(t0, t1),
-                    lon=slice(lon_min, lon_max),
-                    lat=slice(lat_min, lat_max)
-                )
-                result.append(ds_subset)
-            return result
+            except Exception as e2:
+                logger.error(f"Failed to subsample dimension '{dim_name}' even with drop=True: {e2}")
+                continue
+    
+    # Log des informations sur le résultat
+    original_shape = {dim: size for dim, size in ds.dims.items()}
+    result_shape = {dim: size for dim, size in ds_result.dims.items()}
+    
+    logger.info(f"Dataset subsampling completed:")
+    logger.info(f"  Original shape: {original_shape}")
+    logger.info(f"  Result shape: {result_shape}")
+    
+    return ds_result
+
+
+def subsample_dataset_by_indices(
+    ds: xr.Dataset,
+    subsample_indices: Dict[str, Union[List[int], np.ndarray, slice]] = None
+) -> xr.Dataset:
+    """
+    Sous-échantillonne un dataset xarray en utilisant des indices plutôt que des valeurs.
+    
+    Args:
+        ds (xr.Dataset): Dataset xarray d'entrée
+        subsample_indices (Dict[str, Union[List[int], np.ndarray, slice]]): 
+            Dictionnaire spécifiant les indices à garder pour chaque dimension.
+            
+    Returns:
+        xr.Dataset: Dataset sous-échantillonné
+        
+    Examples:
+        # Garder seulement certains indices temporels et de profondeur
+        subsample_indices = {
+            'time': [0, 2, 4, 6],  # Garder les indices 0, 2, 4, 6
+            'depth': slice(0, 10, 2)  # Garder les indices 0, 2, 4, 6, 8
+        }
+        ds_sub = subsample_dataset_by_indices(ds, subsample_indices)
+    """
+    
+    if subsample_indices is None:
+        subsample_indices = {}
+    
+    ds_result = ds.copy()
+    
+    # Parcourir chaque dimension à sous-échantillonner
+    for dim_name, indices in subsample_indices.items():
+        
+        # Vérifier que la dimension existe dans le dataset
+        if dim_name not in ds_result.dims:
+            logger.warning(f"Dimension '{dim_name}' not found in dataset. Available dimensions: {list(ds_result.dims)}")
+            continue
+        
+        try:
+            # logger.debug(f"Subsampling dimension '{dim_name}' with indices: {indices}")
+            ds_result = ds_result.isel({dim_name: indices})
+            
+        except Exception as e:
+            logger.error(f"Failed to subsample dimension '{dim_name}' by indices: {e}")
+            continue
+    
+    # Log des informations sur le résultat
+    original_shape = {dim: size for dim, size in ds.dims.items()}
+    result_shape = {dim: size for dim, size in ds_result.dims.items()}
+    
+    logger.info(f"Dataset subsampling by indices completed:")
+    logger.info(f"  Original shape: {original_shape}")
+    logger.info(f"  Result shape: {result_shape}")
+    
+    return ds_result
+
+
+def subsample_dataset_uniform(
+    ds: xr.Dataset,
+    subsample_steps: Dict[str, int] = None
+) -> xr.Dataset:
+    """
+    Sous-échantillonne un dataset xarray de manière uniforme avec un pas donné.
+    
+    Args:
+        ds (xr.Dataset): Dataset xarray d'entrée
+        subsample_steps (Dict[str, int]): 
+            Dictionnaire spécifiant le pas pour chaque dimension.
+            Par exemple: {'time': 2, 'depth': 3} prendra 1 valeur sur 2 pour le temps
+            et 1 valeur sur 3 pour la profondeur.
+            
+    Returns:
+        xr.Dataset: Dataset sous-échantillonné
+        
+    Examples:
+        # Prendre 1 valeur sur 2 pour le temps, 1 sur 3 pour la profondeur
+        subsample_steps = {
+            'time': 2,
+            'depth': 3,
+            'lat': 4,
+            'lon': 4
+        }
+        ds_sub = subsample_dataset_uniform(ds, subsample_steps)
+    """
+    
+    if subsample_steps is None:
+        subsample_steps = {}
+    
+    ds_result = ds.copy()
+    
+    # Parcourir chaque dimension à sous-échantillonner
+    for dim_name, step in subsample_steps.items():
+        
+        # Vérifier que la dimension existe dans le dataset
+        if dim_name not in ds_result.dims:
+            logger.warning(f"Dimension '{dim_name}' not found in dataset. Available dimensions: {list(ds_result.dims)}")
+            continue
+        
+        if not isinstance(step, int) or step < 1:
+            logger.warning(f"Invalid step value for dimension '{dim_name}': {step}. Must be a positive integer.")
+            continue
+        
+        try:
+            # Créer un slice avec le pas spécifié
+            indices_slice = slice(None, None, step)
+            # logger.debug(f"Subsampling dimension '{dim_name}' with step {step}")
+            ds_result = ds_result.isel({dim_name: indices_slice})
+            
+        except Exception as e:
+            logger.error(f"Failed to subsample dimension '{dim_name}' with step {step}: {e}")
+            continue
+    
+    # Log des informations sur le résultat
+    original_shape = {dim: size for dim, size in ds.dims.items()}
+    result_shape = {dim: size for dim, size in ds_result.dims.items()}
+    
+    logger.info(f"Uniform dataset subsampling completed:")
+    logger.info(f"  Original shape: {original_shape}")
+    logger.info(f"  Result shape: {result_shape}")
+    
+    return ds_result
+
+
+def get_dimension_info(ds: xr.Dataset, dim_name: str) -> Dict[str, any]:
+    """
+    Obtient des informations détaillées sur une dimension du dataset.
+    
+    Args:
+        ds (xr.Dataset): Dataset xarray
+        dim_name (str): Nom de la dimension
+        
+    Returns:
+        Dict: Informations sur la dimension (taille, valeurs min/max, type, etc.)
+    """
+    
+    if dim_name not in ds.dims:
+        return {"exists": False}
+    
+    coord = ds.coords.get(dim_name)
+    if coord is None:
+        return {
+            "exists": True,
+            "size": ds.dims[dim_name],
+            "has_coordinates": False
+        }
+    
+    values = coord.values
+    
+    info = {
+        "exists": True,
+        "size": ds.dims[dim_name],
+        "has_coordinates": True,
+        "dtype": str(values.dtype),
+        "first_value": values[0] if len(values) > 0 else None,
+        "last_value": values[-1] if len(values) > 0 else None,
+    }
+    
+    # Ajouter min/max pour les types numériques
+    if np.issubdtype(values.dtype, np.number):
+        info["min_value"] = float(np.min(values))
+        info["max_value"] = float(np.max(values))
+    
+    return info
+
+
+def suggest_subsample_values(
+    ds: xr.Dataset, 
+    target_sizes: Dict[str, int] = None
+) -> Dict[str, Union[List, slice]]:
+    """
+    Suggère des valeurs de sous-échantillonnage pour réduire le dataset à des tailles cibles.
+    
+    Args:
+        ds (xr.Dataset): Dataset xarray
+        target_sizes (Dict[str, int]): Tailles cibles pour chaque dimension
+        
+    Returns:
+        Dict: Valeurs suggérées pour le sous-échantillonnage
+        
+    Example:
+        target_sizes = {'time': 10, 'depth': 5, 'lat': 100, 'lon': 100}
+        suggestions = suggest_subsample_values(ds, target_sizes)
+        ds_sub = subsample_dataset(ds, suggestions)
+    """
+    
+    if target_sizes is None:
+        target_sizes = {}
+    
+    suggestions = {}
+    
+    for dim_name, target_size in target_sizes.items():
+        if dim_name not in ds.dims:
+            logger.warning(f"Dimension '{dim_name}' not found in dataset")
+            continue
+        
+        current_size = ds.dims[dim_name]
+        
+        if target_size >= current_size:
+            logger.info(f"Target size for '{dim_name}' ({target_size}) >= current size ({current_size}), no subsampling needed")
+            continue
+        
+        # Calculer le pas pour obtenir approximativement la taille cible
+        step = max(1, current_size // target_size)
+        
+        if dim_name in ds.coords:
+            # Si on a des coordonnées, prendre des valeurs spécifiques
+            coord_values = ds.coords[dim_name].values
+            subsampled_values = coord_values[::step][:target_size]
+            suggestions[dim_name] = subsampled_values.tolist()
+            logger.info(f"Dimension '{dim_name}': {current_size} -> {len(subsampled_values)} values (step={step})")
+        else:
+            # Sinon, utiliser un slice
+            suggestions[dim_name] = slice(None, None, step)
+            estimated_size = (current_size + step - 1) // step
+            logger.info(f"Dimension '{dim_name}': {current_size} -> ~{estimated_size} values (step={step})")
+    
+    return suggestions
+
+
+def preview_display_dataset(ds, variables=None, max_values=500000):
+    """Affiche un dataset en gérant la mémoire."""
+    print("DATASET SUMMARY")
+    print("="*50)
+    print(f"Nombre de dimensions: {len(ds.dims)}")
+    print(f"Nombre de coordonnées: {len(ds.coords)}")
+    print(f"Nombre de variables: {len(ds.data_vars)}")
+    print(f"Taille totale: {ds.nbytes / 1e6:.2f} MB")
+    
+    print("\nDIMENSIONS:")
+    for dim, size in ds.dims.items():
+        print(f"  {dim}: {size}")
+    
+    print("\nCOORDONNÉES:")
+    for coord_name, coord in ds.coords.items():
+        print(f"  {coord_name}: {coord.shape} {coord.dtype}")
+        if coord.size <= max_values:
+            if coord.size <= 20:
+                print(f"    Valeurs: {coord.values}")
+            else:
+                print(f"    Premières valeurs: {coord.values[:5]}...")
+                print(f"    Dernières valeurs: ...{coord.values[-5:]}")
+    
+    print("\nVARIABLES:")
+    if variables is not None:
+        display_variables = variables
+    else:
+        display_variables = list(ds.data_vars)
+    for var_name, var in ds.data_vars.items():
+        if var_name not in display_variables:
+            continue
+        print(f"  {var_name}: {var.dims} {var.shape} {var.dtype}")
+
+        try:
+            # Afficher quelques statistiques
+            if np.issubdtype(var.dtype, np.number):
+                valid_data = var
+                if valid_data.size > 0:
+                    print(f"    Min: {float(valid_data.min()):.3f}")
+                    print(f"    Max: {float(valid_data.max()):.3f}")
+                    print(f"    Mean: {float(valid_data.mean()):.3f}")
+        except Exception as e:
+            print(f"    (Erreur calcul stats: {e})")

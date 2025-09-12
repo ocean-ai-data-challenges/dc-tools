@@ -126,9 +126,10 @@ class BaseDataset(ABC):
 
             self._paths = [entry.path for entry in self._metadata]
             self.build_catalog()  # Construire le catalogue à partir des métadonnées
-            self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
+            # self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
             self.catalog_type = "from_data"
         
+        self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
         # save catalog to json
         if self.catalog_type == "from_data":
             self.get_catalog().to_json(catalog_path)
@@ -354,10 +355,9 @@ class BaseDataset(ABC):
     def get_eval_variables(self):
         return self.std_eval_variables
 
+
 class RemoteDataset(BaseDataset):
     """Generic dataset for remote sources."""
-    #def __init__(self, config: DatasetConfig):
-    #    super().__init__(config)
 
     def download(self, index: int, local_path: str):
         """
@@ -392,7 +392,7 @@ def get_dataset_from_config(
     use_catalog: bool = True,
     file_cache: FileCacheManager=None,
     dask_cluster: Optional[Any] = None,
-    time_interval: Optional[Tuple[str, str]] = None,
+    filter_values: Optional[dict] = None,
 ) -> RemoteDataset:
     """Get dataset from config."""
     # Load config
@@ -435,7 +435,7 @@ def get_dataset_from_config(
                 keep_variables=keep_variables,
                 file_cache=file_cache,
                 dask_cluster=dask_cluster,
-                time_interval=time_interval,
+                filter_values=filter_values,
                 full_day_data=full_day_data,
             )
             # Load dataset metadata from catalog
@@ -460,7 +460,7 @@ def get_dataset_from_config(
                 keep_variables=keep_variables,
                 file_cache=file_cache,
                 dask_cluster=dask_cluster,
-                time_interval=time_interval,
+                filter_values=filter_values,
                 full_day_data=full_day_data,
             )
             argo_config = DatasetConfig(
@@ -491,7 +491,7 @@ def get_dataset_from_config(
                     keep_variables=keep_variables,
                     file_cache=file_cache,
                     dask_cluster=dask_cluster,
-                    time_interval=time_interval,
+                    filter_values=filter_values,
                     full_day_data=full_day_data,
                 )
             elif dataset_name == "glonet":
@@ -506,7 +506,7 @@ def get_dataset_from_config(
                     keep_variables=keep_variables,
                     file_cache=file_cache,
                     dask_cluster=dask_cluster,
-                    time_interval=time_interval,
+                    filter_values=filter_values,
                     full_day_data=full_day_data,
                 )
             s3_config = DatasetConfig(

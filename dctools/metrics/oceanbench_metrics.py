@@ -20,6 +20,7 @@ from oceanbench.core.derived_quantities import add_geostrophic_currents
 import xarray as xr
 
 from oceanbench.core.class4_metrics.class4_evaluator import Class4Evaluator
+from oceanbench.core.distributed import DatasetProcessor
 from dctools.data.coordinates import (
     CoordinateSystem,
     EVAL_VARIABLES_GLONET,
@@ -82,7 +83,9 @@ class OceanbenchMetrics(DCMetric):
     """Central class for calling Oceanbench functions."""
 
     def __init__(
-        self,is_class4: Optional[bool] = None,
+        self,
+        dataset_processor: DatasetProcessor,
+        is_class4: Optional[bool] = None,
         class4_kwargs: Optional[dict] = None,
         **kwargs: Optional[Dict[str, Any]],
     ) -> None:
@@ -92,21 +95,8 @@ class OceanbenchMetrics(DCMetric):
         """
         super().__init__(**kwargs)
         self.is_class4 = is_class4
+        self.dataset_processor = dataset_processor
         self.class4_kwargs = class4_kwargs or {}
-
-        if is_class4:
-            class4_args = dict(self.class4_kwargs)
-            self.class4_evaluator = Class4Evaluator(
-                metrics=class4_args["list_scores"],
-                interpolation_method=class4_args["interpolation_method"],
-                delta_t=class4_args["time_tolerance"],
-                bin_specs=class4_args.get("binning", None),
-                spatial_mask_fn=class4_args.get("spatial_mask_fn", None),
-                cache_dir=class4_args.get("cache_dir", None),
-                apply_qc=class4_args.get("apply_qc", False),
-                # distributed=class4_args.get("distributed", False),
-                qc_mapping=class4_args.get("qc_mapping", None),
-            )
 
         self.metrics_set: dict[str, Callable] = {
             "rmsd": {
@@ -138,6 +128,22 @@ class OceanbenchMetrics(DCMetric):
             # --- Ajout pour les métriques classe 4 ---
             "class4": None
         }
+
+
+        if is_class4:
+            class4_args = dict(self.class4_kwargs)
+            self.class4_evaluator = Class4Evaluator(
+                metrics=class4_args["list_scores"],
+                interpolation_method=class4_args["interpolation_method"],
+                delta_t=class4_args["time_tolerance"],
+                bin_specs=class4_args.get("binning", None),
+                spatial_mask_fn=class4_args.get("spatial_mask_fn", None),
+                cache_dir=class4_args.get("cache_dir", None),
+                apply_qc=class4_args.get("apply_qc", False),
+                # distributed=class4_args.get("distributed", False),
+                qc_mapping=class4_args.get("qc_mapping", None),
+            )
+
 
     #@profile
     def compute_metric(
@@ -230,7 +236,9 @@ class OceanbenchMetrics(DCMetric):
                         kwargs["zone"] = zone
 
                     kwargs.update(add_kwargs)
+                kwargs.update({"dataset_processor": self.dataset_processor})
                 result = metric_func(**kwargs)
+
                 return result
             except Exception as exc:
                 logger.error(f"Failed to compute metric {self.metric_name}: {traceback.format_exc()}")

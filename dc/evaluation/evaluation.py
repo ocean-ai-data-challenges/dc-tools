@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-"""Evaluator class using Glorys forecasts as reference."""
+"""Evaluator class."""
 
 from argparse import Namespace
 import json
@@ -13,6 +13,7 @@ from dask.distributed import Client
 from datetime import timedelta
 import geopandas as gpd
 from loguru import logger
+from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
 from shapely import geometry
 
@@ -22,6 +23,7 @@ from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 
 from dctools.metrics.evaluator import Evaluator
 from dctools.metrics.metrics import MetricComputer
+# from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.init_dask import setup_dask
 from dctools.data.coordinates import (
     RANGES_GLONET,
@@ -40,16 +42,34 @@ class DC2Evaluation:
         """Init class.
 
         Args:
-            aruguments (str): Namespace with config.
+            arguments (str): Namespace with config.
         """
         self.args = arguments
-        self.dataset_references = {
+
+        '''self.dataset_references = {
             "glonet": [
                 "glorys", "argo_profiles", "argo_velocities",
                 "jason1", "jason2", "jason3",
                 "saral", "swot", "SSS_fields", "SST_fields",
             ]
+        }'''
+        self.dataset_references = {
+            "glonet": [
+                "jason3", "glorys", "argo_profiles", "argo_velocities",
+                "saral", "swot", "SSS_fields", "SST_fields",
+            ]
         }
+        self.all_datasets = list(set(
+            list(self.dataset_references.keys()) + 
+            [item for sublist in self.dataset_references.values() for item in sublist]
+        ))
+        memory_limit_per_worker = self.args.memory_limit_per_worker
+        n_parallel_workers = self.args.n_parallel_workers
+        self.dataset_processor = DatasetProcessor(
+            distributed=True, n_workers=n_parallel_workers,
+            threads_per_worker=1,
+            memory_limit=memory_limit_per_worker
+        )
 
     def filter_data(
         self, manager: MultiSourceDatasetManager,
@@ -61,11 +81,9 @@ class DC2Evaluation:
             end=pd.to_datetime(self.args.end_time),
         )
         # Appliquer les filtres spatiaux
-        #manager.filter_all_by_region(
-        #    region=filter_region
-        #)
-        # Appliquer les filtres sur les variables
-        #manager.filter_all_by_variable(variables=self.args.target_vars)
+        '''manager.filter_all_by_region(
+            region=filter_region
+        )'''
         return manager
 
     def setup_transforms(
@@ -78,10 +96,11 @@ class DC2Evaluation:
         for alias in aliases:
             if alias == "glorys":
                 transforms_dict["glorys"] = dataset_manager.get_transform(
-                    "standardize_interpolate",
+                    "standardize_glorys",
                     dataset_alias="glorys",
                     interp_ranges=RANGES_GLONET,
                     weights_path=self.args.regridder_weights,
+                    depth_coord_vals=GLONET_DEPTH_VALS,
                 )
             else:
                 transforms_dict[alias] = dataset_manager.get_transform(
@@ -108,27 +127,37 @@ class DC2Evaluation:
     def setup_dataset_manager(self) -> None:
 
         manager = MultiSourceDatasetManager(
-            pd.Timedelta(hours=self.args.delta_time),
-            self.args.max_cache_files,
+            dataset_processor=self.dataset_processor,
+            time_tolerance=pd.Timedelta(hours=self.args.delta_time),
+            max_cache_files=self.args.max_cache_files,
         )
         datasets = {}
         for source in sorted(self.args.sources, key=lambda x: x["dataset"], reverse=True):
             source_name = source['dataset']
-
-            if source_name != "glorys" and source_name != "glonet" and source_name != "jason1" and source_name != "jason2" and source_name != "SST_fields" and source_name != "SSS_fields" and source_name != "jason3" and source_name != "swot" and source_name != "saral" and source_name != "argo_profiles" and source_name != "argo_velocities" and source_name != "glorys":
+            if source_name not in self.all_datasets: # or source_name == "SST_fields":
                 continue
-
-            #if source_name != "glonet" and source_name != "" and source_name != "jason3" and source_name != "glorys" and source_name != "saral" and source_name != "argo_profiles" and source_name != "glorys":
-            #    continue
+            #"glorys", "argo_profiles", "argo_velocities",
+            #"jason1", "jason2", "jason3",
+            #"saral", "swot", "SSS_fields", "SST_fields",
+            if source_name != "glonet" and source_name != "saral" and source_name != "swot" and source_name != "jason3":
+                continue
+            
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory
             kwargs["root_catalog_folder"] = self.args.catalog_dir
             kwargs["max_samples"] = self.args.max_samples
             kwargs["file_cache"] = manager.file_cache
-            kwargs["time_interval"] = (self.args.start_time, self.args.end_time)
+            kwargs["filter_values"] = {
+                "start_time": self.args.start_time,
+                "end_time": self.args.end_time,
+                "min_lon": self.args.min_lon,
+                "max_lon": self.args.max_lon,
+                "min_lat": self.args.min_lat,
+                "max_lat": self.args.max_lat,
+            }
 
-            logger.debug(f"\n\nSetup dataset {source_name}\n\n")
+            logger.debug(f"\n\nSetup dataset {source_name}\n")
             datasets[source_name] = get_dataset_from_config(
                 **kwargs
             )
@@ -150,10 +179,9 @@ class DC2Evaluation:
 
     def run_eval(self) -> None:
         """Proceed to evaluation."""
+
         dataset_manager = self.setup_dataset_manager()
         aliases = dataset_manager.datasets.keys()
-        dask_cluster = setup_dask(self.args)
-        dask_client = Client(dask_cluster)
 
         dataloaders = {}
         metrics_names = {}
@@ -163,8 +191,9 @@ class DC2Evaluation:
         models_results = {}
         transforms_dict = self.setup_transforms(dataset_manager, aliases)
 
+        json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
         for alias in self.dataset_references.keys():   # dataset_manager.datasets.keys():
-            json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
+            logger.info(f"\n\n=========  SETUP DATASETS FOR CANDIDATE : {alias}  =========")
             dataset_manager.build_forecast_index(
                 alias,
                 init_date=self.args.start_time,
@@ -172,7 +201,9 @@ class DC2Evaluation:
                 n_days_forecast=int(self.args.n_days_forecast),
                 n_days_interval=int(self.args.n_days_interval),
             )
-            list_references = self.dataset_references[alias]
+            list_references = [
+                ref for ref in self.dataset_references[alias] if ref in dataset_manager.datasets
+            ]
             pred_source_dict = next((s for s in self.args.sources if s.get("dataset") == alias), {})
             metrics_names[alias] = pred_source_dict.get("metrics", ["rmsd"])
 
@@ -181,6 +212,11 @@ class DC2Evaluation:
             metrics[alias] = {}
             pred_transform = transforms_dict.get(alias)
             for ref_alias in  list_references:
+                # Vérifier que le dataset de référence existe
+                if ref_alias not in dataset_manager.datasets:
+                    logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
+                    continue
+                    
                 ref_source_dict = next((s for s in self.args.sources if s.get("dataset") == ref_alias), {})
                 ref_transforms[ref_alias] = transforms_dict.get(ref_alias)
                 metrics_names[ref_alias] = ref_source_dict.get("metrics", ["rmsd"])
@@ -193,7 +229,11 @@ class DC2Evaluation:
                 }
                 if not ref_is_observation:
                     metrics[alias][ref_alias] = [
-                        MetricComputer(metric_name=metric, **metrics_kwargs[alias][ref_alias])
+                        MetricComputer(
+                            dataset_processor=self.dataset_processor,
+                            metric_name=metric,
+                            **metrics_kwargs[alias][ref_alias],
+                        )
                         for metric in common_metrics
                     ]
                 else:
@@ -209,6 +249,7 @@ class DC2Evaluation:
                     }
                     metrics[alias][ref_alias] = [
                         MetricComputer(
+                            dataset_processor=self.dataset_processor,
                             metric_name=metric,
                             is_class4=True,
                             class4_kwargs=class4_kwargs,
@@ -233,12 +274,11 @@ class DC2Evaluation:
             # self.check_dataloader(dataloaders[alias])
 
             evaluators[alias] = Evaluator(
-                dask_client=dask_client,
                 metrics=metrics[alias],
                 dataloader=dataloaders[alias],
                 ref_aliases=list_references,
             )
-
+            logger.info(f"\n\n\n=========  START EVALUATION FOR CANDIDATE : {alias}  =========")
             models_results[alias] = evaluators[alias].evaluate()
 
 
@@ -294,7 +334,6 @@ class DC2Evaluation:
         except Exception as exc:
             logger.error(f"Failed to write JSON results: {exc}")
             raise
+        finally:
+            self.dataset_processor.close()
 
-
-        dask_client.close()
-        dask_cluster.close()

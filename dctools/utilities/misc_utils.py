@@ -265,7 +265,7 @@ def to_float32(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def find_unpicklable_objects(self, obj, path=""):
+def find_unpicklable_objects(obj, path=""):
     """
     Trouve récursivement les objets non sérialisables.
     """
@@ -283,7 +283,7 @@ def find_unpicklable_objects(self, obj, path=""):
                 try:
                     pickle.dumps(value)
                 except:
-                    problematic.extend(self.find_unpicklable_objects(value, f"{path}.{key}"))
+                    problematic.extend(find_unpicklable_objects(value, f"{path}.{key}"))
             return problematic
             
         # Si c'est une liste/tuple
@@ -293,7 +293,7 @@ def find_unpicklable_objects(self, obj, path=""):
                 try:
                     pickle.dumps(item)
                 except:
-                    problematic.extend(self.find_unpicklable_objects(item, f"{path}[{i}]"))
+                    problematic.extend(find_unpicklable_objects(item, f"{path}[{i}]"))
             return problematic
             
         # Si c'est un objet avec __dict__
@@ -303,14 +303,14 @@ def find_unpicklable_objects(self, obj, path=""):
                 try:
                     pickle.dumps(attr_value)
                 except:
-                    problematic.extend(self.find_unpicklable_objects(attr_value, f"{path}.{attr_name}"))
+                    problematic.extend(find_unpicklable_objects(attr_value, f"{path}.{attr_name}"))
             return problematic
             
         # Objet problématique trouvé
         return [(path, type(obj), str(e))]
 
 
-def debug_serialization(self, your_object):
+def debug_serialization(your_object):
     """Debug la sérialisation d'un objet."""
 
     print(f"🔍 Testing serialization of {type(your_object)}")
@@ -325,7 +325,7 @@ def debug_serialization(self, your_object):
             
             # Analyse détaillée pour pickle
             if serializer_name == "pickle":
-                problematic = self.find_unpicklable_objects(your_object)
+                problematic = find_unpicklable_objects(your_object)
                 for path, obj_type, error in problematic:
                     print(f"        {path}: {obj_type} - {error}")
                 
@@ -334,3 +334,19 @@ def log_memory(stage):
     process = psutil.Process(os.getpid())
     mem_mb = process.memory_info().rss / 1e6
     print(f"[{stage}] Memory usage: {mem_mb:.2f} MB")
+
+
+def is_dask_worker():
+    """Vérifie via les variables d'environnement."""
+    return any([
+        'DASK_WORKER_NAME' in os.environ,
+        'DASK_SCHEDULER_ADDRESS' in os.environ,
+        os.environ.get('DASK_WORKER', False)
+    ])
+
+def ensure_timestamp(date_input):
+    """Convertit en Timestamp seulement si ce n'est pas déjà un Timestamp."""
+    if isinstance(date_input, pd.Timestamp):
+        return date_input
+    else:
+        return pd.to_datetime(date_input)

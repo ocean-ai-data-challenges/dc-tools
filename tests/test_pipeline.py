@@ -22,7 +22,7 @@ from dctools.utilities.init_dask import setup_dask
 from dctools.utilities.file_utils import load_config_file
 
 
-
+# TODO Update all tests
 @pytest.fixture(scope="function")
 def test_config():
     pytest_configure()

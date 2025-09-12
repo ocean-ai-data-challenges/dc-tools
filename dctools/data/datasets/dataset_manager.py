@@ -5,15 +5,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from datetime import datetime
 import geopandas as gpd
 from loguru import logger
+from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
 from shapely.geometry import box
 from torchvision import transforms
 import xarray as xr
 
 from dctools.data.coordinates import (
-    LIST_VARS_GLONET,
-    GLONET_DEPTH_VALS,
-    RANGES_GLONET,
     CoordinateSystem,
 )
 from dctools.data.datasets.dataset import BaseDataset
@@ -21,14 +19,21 @@ from dctools.data.datasets.forecast import build_forecast_index_from_catalog
 from dctools.data.transforms import CustomTransforms, WrapLongitudeTransform
 from dctools.data.datasets.dc_catalog import DatasetCatalog
 from dctools.data.datasets.dataloader import EvaluationDataloader
+# from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.file_utils import FileCacheManager
 
 class MultiSourceDatasetManager:
 
-    def __init__(self, time_tolerance, max_cache_files):
+    def __init__(
+        self,
+        dataset_processor: DatasetProcessor,
+        time_tolerance,
+        max_cache_files,
+    ):
         """
         Initialise le gestionnaire multi-sources.
         """
+        self.dataset_processor = dataset_processor
         self.datasets = {}
         self.forecast_indexes = {}
         self.time_tolerance = time_tolerance
@@ -101,6 +106,14 @@ class MultiSourceDatasetManager:
             end (datetime): Date de fin.
         """
         self.datasets[alias].filter_catalog_by_date(start, end)
+        if self.datasets[alias].get_catalog() is not None :
+            logger.debug(f"Filtered GeoDataFrame length: {len(self.datasets[alias].get_catalog().gdf)}")
+        # check if catalog is not empty after filtering
+        if self.datasets[alias].get_catalog() is None or len(self.datasets[alias].get_catalog().gdf) == 0:
+            logger.warning(f"Dataset '{alias}' is empty after filtering.")
+            # remove dataset from manager
+            return alias
+        return None
 
     def filter_by_region(self, alias: str, region: gpd.GeoSeries):
         """
@@ -110,6 +123,13 @@ class MultiSourceDatasetManager:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
         self.datasets[alias].filter_catalog_by_region(region)
+        if self.datasets[alias].get_catalog() is not None :
+            logger.debug(f"Filtered GeoDataFrame length: {len(self.datasets[alias].get_catalog().gdf)}")
+        if self.datasets[alias].get_catalog() is None or len(self.datasets[alias].get_catalog().gdf) == 0:
+            logger.warning(f"Dataset '{alias}' is empty after filtering.")
+            # remove dataset from manager
+            return alias
+        return None
 
     def filter_by_variable(self, alias: str, variables: List[str]):
         """
@@ -119,6 +139,13 @@ class MultiSourceDatasetManager:
             variables (List[str]): Liste des variables à filtrer.
         """
         self.datasets[alias].filter_catalog_by_variable(variables)
+        if self.datasets[alias].get_catalog() is not None :
+            logger.debug(f"Filtered GeoDataFrame length: {len(self.datasets[alias].get_catalog().gdf)}")
+        if len(self.datasets[alias].get_catalog().gdf) == 0:
+            logger.warning(f"Dataset '{alias}' is empty after filtering.")
+            # remove dataset from manager
+            return alias
+        return None
 
     def filter_all_by_date(
             self,
@@ -132,10 +159,16 @@ class MultiSourceDatasetManager:
             start (datetime): Date(s) de début.
             end (datetime): Date(s) de fin.
         """
+        aliases_to_remove = []
         for alias, _ in self.datasets.items():
             # TODO: Fix logger output when using lists as start and end
             logger.info(f"Filtrage du dataset '{alias}' par date : {start} -> {end}")
-            self.filter_by_date(alias, start, end)
+            res = self.filter_by_date(alias, start, end)
+            aliases_to_remove.append(res)
+        for alias in aliases_to_remove:
+            if alias is not None :
+                del self.datasets[alias]
+
 
     def filter_all_by_region(self, region: gpd.GeoSeries):
         """
@@ -144,9 +177,14 @@ class MultiSourceDatasetManager:
         Args:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
+        aliases_to_remove = []
         for alias, _ in self.datasets.items():
             logger.info(f"Filtrage du dataset '{alias}' par bbox : {region}")
-            self.filter_by_region(alias, region)
+            res = self.filter_by_region(alias, region)
+            aliases_to_remove.append(res)
+        for alias in aliases_to_remove:
+            if alias is not None :
+                del self.datasets[alias]
 
     def filter_all_by_variable(self, variables: List[str]):
         """
@@ -155,9 +193,14 @@ class MultiSourceDatasetManager:
         Args:
             variables (List[str]): Liste des variables à filtrer.
         """
+        aliases_to_remove = []
         for alias, _ in self.datasets.items():
             # logger.debug(f"Filtrage du dataset '{alias}' par variables : {variables}")
-            self.filter_by_variable(alias, variables)
+            res = self.filter_by_variable(alias, variables)
+            aliases_to_remove.append(res)
+        for alias in aliases_to_remove:
+            if alias is not None :
+                del self.datasets[alias]
 
 
     def add_to_file_cache(self, filepath: str):
@@ -281,6 +324,9 @@ class MultiSourceDatasetManager:
         pred_dataset = self.datasets[pred_alias]
         ref_datasets = {}
         for ref_alias in ref_aliases:
+            if ref_alias not in self.datasets:
+                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
+                continue
             ref_datasets[ref_alias] = self.datasets[ref_alias]
 
         pred_manager = pred_dataset.get_connection_manager()
@@ -288,6 +334,9 @@ class MultiSourceDatasetManager:
         ref_catalogs = {}
         ref_connection_params= {}
         for ref_alias in ref_aliases:
+            if ref_alias not in self.datasets:
+                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
+                continue
             ref_managers[ref_alias] = ref_datasets[ref_alias].get_connection_manager()
             ref_catalogs[ref_alias] = ref_datasets[ref_alias].get_catalog()
             ref_connection_params[ref_alias] = ref_datasets[ref_alias].get_connection_config()
@@ -329,9 +378,6 @@ class MultiSourceDatasetManager:
         """
         Factory function to create a transform based on the given name and parameters.
         """
-        # logger.debug(f"Creating transform {transform_name} with kwargs: {kwargs}")
-
-        # catalog = self.get_catalog(dataset_alias)
         global_metadata = self.datasets[dataset_alias].get_global_metadata()
         coord_sys = global_metadata.get("coord_system", None)
         if global_metadata is None or coord_sys is None:
@@ -348,45 +394,21 @@ class MultiSourceDatasetManager:
 
         # Configurer les transformations
         match transform_name:
-            case "standardize_lons_interpolate":
+            case "standardize_glorys":
                 regridder_weights = kwargs.get("regridder_weights", None)
                 interp_ranges = kwargs.get("interp_ranges", None)
+                depth_coord_vals = kwargs.get("depth_coord_vals", None)
                 transform_std = CustomTransforms(
                     transform_name="standardize_dataset",
-                    list_vars=keep_vars,
-                    coords_rename_dict=coords_rename_dict,
-                    vars_rename_dict=vars_rename_dict,
-                )
-                transform_lon_vars = WrapLongitudeTransform()
-
-                transform_interp = CustomTransforms(
-                    transform_name="interpolate",
-                    interp_ranges=interp_ranges,
-                    weights_path=regridder_weights,
-                )
-                transform = transforms.Compose(
-                    [
-                        transform_lon_vars,
-                        transform_std,
-                        transform_interp,
-                    ]
-                )
-                self.standardize_names(
-                    dataset_alias,
-                    coords_rename_dict,
-                    vars_rename_dict,
-                )
-            case "standardize_interpolate":
-                regridder_weights = kwargs.get("regridder_weights", None)
-                interp_ranges = kwargs.get("interp_ranges", None)
-                transform_std = CustomTransforms(
-                    transform_name="standardize_dataset",
+                    dataset_processor=self.dataset_processor,
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                     vars_rename_dict=vars_rename_dict,
                 )
                 transform_interp = CustomTransforms(
-                    transform_name="interpolate",
+                    transform_name="glorys_to_glonet",
+                    dataset_processor=self.dataset_processor,
+                    depth_coord_vals=depth_coord_vals,
                     interp_ranges=interp_ranges,
                     weights_path=regridder_weights,
                 )
@@ -404,38 +426,28 @@ class MultiSourceDatasetManager:
             case "standardize":
                 transform_std = CustomTransforms(
                     transform_name="standardize_dataset",
+                    dataset_processor=self.dataset_processor,
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                     vars_rename_dict=vars_rename_dict,
                 )
-                '''transform_time = CustomTransforms(
-                    transform_name="to_timestamp",
-                    time_names=["date_start", "date_end"],
-                )'''
                 transform = transform_std
                 self.standardize_names(
                     dataset_alias,
                     coords_rename_dict,
                     vars_rename_dict,
                 )
-            case "glorys_to_glonet":
-                regridder_weights = kwargs.get("regridder_weights", None)
-                assert(regridder_weights is not None), "Regridder weights path must be provided for GLONET transformation"
-                transform = CustomTransforms(
-                    transform_name="glorys_to_glonet",
-                    weights_path=regridder_weights,
-                    depth_coord_vals=GLONET_DEPTH_VALS,
-                    interp_ranges=RANGES_GLONET,
-                )
             case "standardize_add_coords":
                 transform_standardize = CustomTransforms(
                     transform_name="standardize_dataset",
+                    dataset_processor=self.dataset_processor,
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                     vars_rename_dict=vars_rename_dict,
                 )
                 transform_add_coords = CustomTransforms(
                     transform_name="add_spatial_coords",
+                    dataset_processor=self.dataset_processor,
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                 )
