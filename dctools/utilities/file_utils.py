@@ -3,14 +3,42 @@
 
 """Functions for file handling."""
 
+from collections import OrderedDict
 import os
 import subprocess
-from typing import List
+from typing import Callable, List
 
 from loguru import logger
 from pathlib import Path
 import yaml
 
+
+def remove_file(filepath: str) -> bool:
+    """
+    Supprime un fichier local.
+
+    Args:
+        filepath (str): Chemin du fichier à supprimer.
+
+    Returns:
+        bool: True si le fichier a été supprimé, False sinon.
+    """
+    try:
+        if not isinstance(filepath, str) or not filepath:
+            logger.warning(f"remove_file: invalid path: {filepath}")
+            return False
+        if not os.path.exists(filepath):
+            logger.info(f"remove_file: file not exist: {filepath}")
+            return False
+        if not os.path.isfile(filepath):
+            logger.warning(f"remove_file: not a file: {filepath}")
+            return False
+        os.remove(filepath)
+        logger.info(f"remove_file: deleted file: {filepath}")
+        return True
+    except Exception as exc:
+        logger.error(f"remove_file: error when removing file {filepath}: {exc}")
+        return False
 
 def empty_folder(folder_path: str):
     """Remove all files in given folder.
@@ -127,3 +155,26 @@ def check_valid_files(list_files: List[str]) -> List[str]:
 def load_config_file(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+class FileCacheManager:
+    def __init__(self, max_files: int):
+        self.max_files = max_files
+        self.cache = OrderedDict()
+
+    def add(self, filepath: str):
+        if filepath in self.cache:
+            self.cache.move_to_end(filepath)
+        else:
+            self.cache[filepath] = True
+            if len(self.cache) > self.max_files:
+                old_path, _ = self.cache.popitem(last=False)
+                remove_file(old_path)
+
+    def __contains__(self, filepath: str):
+        return filepath in self.cache
+
+    def clear(self):
+        for filepath in list(self.cache.keys()):
+            remove_file(filepath)
+        self.cache.clear()

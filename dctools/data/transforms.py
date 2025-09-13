@@ -1,27 +1,154 @@
 
-
-from typing import Any, Dict, List, Optional
+from copy import deepcopy
+import profile
+import traceback
+from typing import Any, Dict, List, Optional, Tuple
 
 import ast
 # import kornia
 from loguru import logger
+from memory_profiler import profile
 import numpy as np
+from oceanbench.core.distributed import DatasetProcessor
+import pandas as pd
 from torchvision import transforms
 import xarray as xr
 from pyproj import Transformer
 
 from dctools.data.coordinates import (
-    CoordinateSystem,
     LIST_VARS_GLONET,
 )
+# from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.xarray_utils import (
     rename_coordinates,
     rename_coords_and_vars,
     subset_variables,
-    interpolate_dataset,
     assign_coordinate,
     reset_time_coordinates,
 )
+from dctools.processing.interpolation import (
+    interpolate_dataset,
+)
+
+
+def detect_and_normalize_longitude_system(
+    ds: xr.Dataset,
+    lon_name: str = "lon"
+) -> xr.Dataset:
+    """
+    Détecte et normalise les systèmes de coordonnées longitude pour assurer la compatibilité.
+    
+    Args:
+        ds: Dataset d'observations
+        lon_name: Nom de la coordonnée longitude
+        
+    Returns:
+        xr.Dataset: Dataset normalisé (identique à l'entrée sauf longitudes transformées)
+    """    
+    # Vérifier que la coordonnée longitude existe
+    if lon_name not in ds.coords and lon_name not in ds.data_vars:
+        logger.warning(f"Longitude coordinate '{lon_name}' not found in dataset")
+        return ds
+    
+    # Analyser les plages de longitude
+    lon_vals = ds[lon_name].values
+    lon_min, lon_max = float(np.nanmin(lon_vals)), float(np.nanmax(lon_vals))
+
+    logger.debug(f"Longitude range: [{lon_min:.3f}, {lon_max:.3f}]")
+
+    # Détecter le système de coordonnées
+    lon_system = _detect_longitude_system(lon_min, lon_max)
+    
+    logger.debug(f"Detected longitude system: {lon_system}")
+    
+    # Si déjà dans le bon système, retourner le dataset original
+    if lon_system == "[-180, 180]":
+        logger.debug("Longitude already in [-180, 180] system")
+        return ds
+    
+    # Normaliser si nécessaire
+    if lon_system != "[-180, 180]":
+        logger.info(f"Converting longitude from {lon_system} to [-180, 180]")
+        ds_normalized = _convert_longitude_to_180(ds, lon_name)
+        
+        # Vérification finale
+        lon_final = ds_normalized[lon_name].values
+        logger.debug(f"Final longitude range: [{float(np.nanmin(lon_final)):.3f}, {float(np.nanmax(lon_final)):.3f}]")
+        
+        return ds_normalized
+    else:
+        logger.warning(f"Unknown longitude system: {lon_system}, returning original dataset")
+        return ds
+
+
+def _detect_longitude_system(lon_min: float, lon_max: float) -> str:
+    """Détecte le système de coordonnées longitude basé sur les valeurs min/max."""
+    
+    # Système [0, 360]
+    if lon_min >= -5 and lon_max >= 355:  # Tolérance pour les arrondis
+        return "[0, 360]"
+    
+    # Système [-180, 180]
+    elif lon_min >= -185 and lon_max <= 185:  # Tolérance pour les arrondis
+        return "[-180, 180]"
+    
+    # Système mixte ou autre
+    elif lon_min < -5 and lon_max > 185:
+        return "mixed"
+    
+    else:
+        return "unknown"
+
+
+def _convert_longitude_to_180(ds: xr.Dataset, lon_name: str) -> xr.Dataset:
+    """
+    Convertit les longitudes de [0, 360] vers [-180, 180].
+    Retourne un dataset complet avec toutes les coordonnées, variables et attributs préservés.
+    
+    Args:
+        ds: Dataset à convertir
+        lon_name: Nom de la coordonnée longitude
+        
+    Returns:
+        xr.Dataset: Dataset avec longitudes normalisées
+    """
+    # Créer une copie du dataset pour éviter de modifier l'original
+    ds_work = ds.copy(deep=True)
+    
+    # Obtenir les longitudes
+    lon_data = ds_work[lon_name]
+    
+    # Conversion : lon > 180 devient lon - 360
+    lon_converted = xr.where(lon_data > 180, lon_data - 360, lon_data)
+    
+    # Préserver les attributs de la coordonnée longitude
+    lon_attrs = lon_data.attrs.copy()
+    
+    # Remplacer la coordonnée longitude dans le dataset
+    if lon_name in ds_work.coords:
+        # Si c'est une coordonnée
+        ds_work = ds_work.assign_coords({lon_name: lon_converted})
+        # Réassigner les attributs
+        ds_work[lon_name].attrs.update(lon_attrs)
+        
+    elif lon_name in ds_work.data_vars:
+        # Si c'est une variable de données
+        ds_work[lon_name] = lon_converted
+        # Réassigner les attributs
+        ds_work[lon_name].attrs.update(lon_attrs)
+    
+    # Trier par longitude si c'est une dimension pour maintenir l'ordre croissant
+    if lon_name in ds_work.dims:
+        try:
+            ds_work = ds_work.sortby(lon_name)
+            logger.debug("Dataset sorted by longitude")
+        except Exception as e:
+            logger.warning(f"Could not sort by longitude: {e}")
+    
+    # Préserver les attributs globaux du dataset
+    ds_work.attrs.update(ds.attrs)
+    
+    return ds_work
 
 
 class TransformWrapper:
@@ -38,6 +165,20 @@ class TransformWrapper:
         return self.transf(sample), time_axis
 
 
+class StdLongitudeTransform:
+    """A custom transform dependent on time axis."""
+    def __init__(
+        self
+    ):
+        pass
+
+    def __call__(self, data):
+        data = detect_and_normalize_longitude_system(
+            data
+        )
+        return data
+
+
 class RenameCoordsVarsTransform:
     """A custom transform dependent on time axis."""
     def __init__(
@@ -49,10 +190,10 @@ class RenameCoordsVarsTransform:
         self.vars_rename_dict = vars_rename_dict
 
     def __call__(self, data):
-        rename_ds = rename_coords_and_vars(
+        data = rename_coords_and_vars(
             data, self.coords_rename_dict, self.vars_rename_dict
         )
-        return rename_ds
+        return data
 
 class SelectVariablesTransform:
     def __init__(self, variables: List[str]):
@@ -64,13 +205,24 @@ class SelectVariablesTransform:
 
 
 class InterpolationTransform:
-    def __init__(self, ranges: Dict[str, np.arange], weights_filepath: str):
+    def __init__(
+        self,
+        dataset_processor: DatasetProcessor,
+        ranges: Dict[str, np.arange], weights_filepath: str
+    ):
         self.weights_filepath = weights_filepath
         self.ranges = ranges
+        self.dataset_processor = dataset_processor
 
     def __call__(self, data):
-        interp_dataset = interpolate_dataset(data, self.ranges, self.weights_filepath)
-        return interp_dataset
+        data = interpolate_dataset(
+            data,
+            self.ranges,
+            self.dataset_processor,
+            self.weights_filepath,
+            interpolation_lib='pyinterp',
+        )
+        return data
 
 
 class ResetTimeCoordsTransform:
@@ -80,6 +232,57 @@ class ResetTimeCoordsTransform:
     def __call__(self, data):
         reset_dataset = reset_time_coordinates(data)
         return reset_dataset
+
+class ToTimestampTransform:
+    def __init__(self, time_names: List[str]):
+        self.time_names = time_names
+
+    def __call__(self, data):
+        """
+        Convert the time coordinate to a timestamp.
+        """
+        for time_name in self.time_names:
+            time_values = data[time_name].values
+
+            # Vérifier si les valeurs sont déjà des pandas.Timestamp
+            are_timestamps = isinstance(time_values[0], pd.Timestamp)
+
+            if not are_timestamps:
+                # Convertir toutes les valeurs en pandas.Timestamp
+                data[time_name] = pd.to_datetime(data[time_name].values)
+        return data
+
+
+class WrapLongitudeTransform:
+    """
+    Transforme les longitudes d'un dataset xarray de [0, 360] vers [-180, 180].
+    """
+    def __init__(self, lon_name: str = "lon"):
+        self.lon_name = lon_name
+
+    def __call__(self, ds):
+
+        if self.lon_name not in ds.coords and self.lon_name not in ds.dims:
+            # Rien à faire si pas de longitude
+            return ds
+
+        # Récupère la DataArray des longitudes
+        lon = ds[self.lon_name]
+        # Applique la conversion
+        lon_wrapped = ((lon + 180) % 360) - 180
+
+        # Trie les longitudes et réindexe le dataset pour garder l'ordre croissant
+        order = np.argsort(lon_wrapped)
+        lon_wrapped_sorted = lon_wrapped[order]
+
+        # Remplace la coordonnée longitude
+        ds = ds.assign_coords({self.lon_name: lon_wrapped_sorted})
+
+        # Réindexe le dataset si la longitude est une dimension
+        if self.lon_name in ds.dims:
+            ds = ds.sortby(self.lon_name)
+
+        return ds
 
 
 class AssignCoordsTransform:
@@ -146,8 +349,14 @@ class SubsetCoordTransform:
 
 
 class CustomTransforms:
-    def __init__(self, transform_name: str, **kwargs):
+    def __init__(
+        self, 
+        transform_name: str,
+        dataset_processor: DatasetProcessor,
+        **kwargs,
+    ):
         self.transform_name = transform_name
+        self.dataset_processor = dataset_processor
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -173,6 +382,14 @@ class CustomTransforms:
                 return self.transform_standardize_dataset(
                     dataset
                 )
+            case "add_spatial_coords":
+                return self.transform_add_spatial_coords(
+                    dataset
+                )
+            case "to_timestamp":
+                return self.to_timestamp(
+                    dataset
+                )
             case "to_epsg3413":
                 return self.transform_to_epsg3413(
                     dataset
@@ -180,6 +397,7 @@ class CustomTransforms:
             case _:
                 return dataset
 
+    #@profile
     def transform_rename_subset_vars(
         self,
         dataset: xr.Dataset,
@@ -196,6 +414,7 @@ class CustomTransforms:
         transf_dataset = transform(dataset)
         return transf_dataset
 
+    #@profile
     def transform_standardize_dataset(
         self,
         dataset: xr.Dataset,
@@ -219,45 +438,50 @@ class CustomTransforms:
                 coords_rename_dict=coords_rename_dict,
                 vars_rename_dict=vars_rename_dict,
             ),
+            StdLongitudeTransform(),
         ])
 
         transf_dataset = transform(dataset)
-        new_vars = list(transf_dataset.data_vars)
+        # new_vars = list(transf_dataset.data_vars)
 
         return transf_dataset
 
+    #@profile
     def transform_interpolate(
         self, dataset: xr.Dataset,
     ) -> xr.Dataset:
         assert(hasattr(self, "interp_ranges"))
         assert(hasattr(self, "weights_path"))
 
-        transform=transforms.Compose([
-            InterpolationTransform(self.interp_ranges, self.weights_path)
-        ])
+        transform = InterpolationTransform(
+            self.dataset_processor,
+            self.interp_ranges, self.weights_path
+        )
         interp_dataset = transform(dataset)
         return interp_dataset
 
+    #@profile
     def transform_glorys_to_glonet(
         self, dataset: xr.Dataset
-    ):
+    ) -> xr.Dataset:
         assert(hasattr(self, "depth_coord_vals"))
         assert(hasattr(self, "weights_path"))
         assert(hasattr(self, "interp_ranges"))
-        dict_rename = self.dict_rename if hasattr(self, "dict_rename") else None
         depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
-        list_vars = self.list_vars if hasattr(self, "list_vars") else LIST_VARS_GLONET
 
         transform=transforms.Compose([
             SubsetCoordTransform(depth_coord_name, self.depth_coord_vals),
-            InterpolationTransform(self.interp_ranges, self.weights_path),
+            InterpolationTransform(self.dataset_processor,
+                                   self.interp_ranges, self.weights_path,
+            ),
         ])
         transf_dataset = transform(dataset)
         return transf_dataset
 
+    #@profile
     def transform_subset_dataset(
         self, dataset: xr.Dataset,
-    ):
+    ) -> xr.Dataset:
         assert(hasattr(self, "list_vars") and hasattr(self, "depth_coord_vals"))
         depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
         transform=transforms.Compose([
@@ -267,6 +491,18 @@ class CustomTransforms:
         transf_dataset = transform(dataset)
         return transf_dataset
     
+    #@profile
+    def to_timestamp(
+        self,
+        ds: xr.Dataset,
+    ) -> xr.Dataset:
+        """
+        Convert the time coordinate to a timestamp.
+        """
+        assert(hasattr(self, "time_names"))
+        transform = ToTimestampTransform(self.time_names)
+        return transform(ds)
+
     def transform_to_epsg3413(
       self,
       dataset: xr.Dataset,      

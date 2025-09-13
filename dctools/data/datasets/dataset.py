@@ -11,9 +11,8 @@ from typing import (
 import ast
 from datetime import datetime
 import geopandas as gpd
-
 from loguru import logger
-
+from oceanbench.core.distributed import DatasetProcessor
 from pathlib import Path
 import xarray as xr
 
@@ -39,6 +38,7 @@ from dctools.data.connection.connection_manager import (
     GlonetManager,
     ArgoManager,
 )
+from dctools.utilities.file_utils import FileCacheManager
 
 
 class DatasetConfig:
@@ -64,6 +64,8 @@ class DatasetConfig:
         catalog_options: Optional[Dict[str, Any]] = None,
         keep_variables: Optional[str] = None,
         eval_variables: Optional[str] = None,
+        observation_dataset: Optional[bool] = False,
+        use_catalog: Optional[bool] = True,
     ):
         """
         Configuration pour un dataset.
@@ -79,7 +81,9 @@ class DatasetConfig:
         self.catalog_options = catalog_options or {}
         self.keep_variables = keep_variables
         self.eval_variables = eval_variables
+        self.observation_dataset = observation_dataset
         # self.connection_manager = self._create_connection_manager()
+        self.use_catalog = use_catalog
 
 
 class BaseDataset(ABC):
@@ -99,21 +103,43 @@ class BaseDataset(ABC):
         self.catalog_type = ""
         self.keep_variables = config.keep_variables
         self.eval_variables = config.eval_variables
+        self.std_eval_variables = config.eval_variables
+
         # Vérifier si un fichier de catalogue JSON est spécifié dans catalog_options
         catalog_path = config.catalog_options.get("catalog_path") if config.catalog_options else None
-        if catalog_path and Path(catalog_path).exists():
-            self.catalog = DatasetCatalog.from_json(catalog_path)
+        if config.use_catalog and catalog_path and Path(catalog_path).exists():
+            self.catalog = DatasetCatalog.from_json(catalog_path, config.alias)
             self._paths = self.catalog.list_paths()
             self.catalog_type = "from_catalog_file"
+            self._global_metadata = self.catalog.get_global_metadata()
         else:
             logger.info("No catalog JSON file found. Generating metadata from the dataset.")
-        
             self._metadata = self.connection_manager.list_files_with_metadata()  # Récupérer les métadonnées
+            self._global_metadata = self.get_global_metadata()
+            if config.observation_dataset:
+                self.observation_dataset = config.observation_dataset
+            else:
+                self.observation_dataset = self.get_coord_system().is_observation_dataset()
+            self._global_metadata["is_observation"] = self.observation_dataset
+            self.connection_manager.set_global_metadata(self._global_metadata)  # Mettre à jour les métadonnées globales
 
             self._paths = [entry.path for entry in self._metadata]
             self.build_catalog()  # Construire le catalogue à partir des métadonnées
-            self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
+            # self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
             self.catalog_type = "from_data"
+        
+        self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
+        # save catalog to json
+        if self.catalog_type == "from_data":
+            self.get_catalog().to_json(catalog_path)
+
+        # global_metadata = self.get_global_metadata()
+        if self._global_metadata is not None:
+            vars_rename_dict= self._global_metadata.get("variables_rename_dict")
+            if vars_rename_dict:
+                self.std_eval_variables = [
+                    vars_rename_dict[var] if var in vars_rename_dict else None for var in self.eval_variables
+                ]
 
     def list_paths(self) -> List[str]:
         """
@@ -135,6 +161,9 @@ class BaseDataset(ABC):
             return self._global_metadata
         else:
             return self.connection_manager.get_global_metadata()
+
+    def get_connection_config(self):
+        return self.connection_manager.params
 
     def standardize_names(
         self,
@@ -191,6 +220,18 @@ class BaseDataset(ABC):
         """
         return self._paths[index]
 
+    def get_coord_system(self):
+        """
+        Retourne le système de coordonnées du dataset.
+
+        Returns:
+            Dict[str, Any]: Système de coordonnées.
+        """
+        if hasattr(self, "_global_metadata"):
+            return self._global_metadata.get("coord_system", {})
+        else:
+            return self.connection_manager.get_global_metadata().get("coord_system", {})
+
     def download(self, index: int, local_path: str):
         """
         Télécharge un fichier à partir de son index.
@@ -214,7 +255,6 @@ class BaseDataset(ABC):
         for idx in range(len(self._paths)):
             yield self.load_data(idx)
 
-
     def build_catalog(self) -> None:
         """
         Construit un catalogue pour ce dataset.
@@ -224,14 +264,14 @@ class BaseDataset(ABC):
         if self.catalog_type == "from_catalog_file":
             logger.info("Le catalogue existe déjà (chargé à partir d'un fichier)")
             return
-        self.catalog = DatasetCatalog(entries=self._metadata)
-
+        self.catalog = DatasetCatalog(
+            self.alias, global_metadata=self._global_metadata, entries=self._metadata
+        )
 
     '''def filter_attrs(
         self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
     ) -> None:
         self.catalog.filter_attrs(filters)'''
-
 
     def filter_catalog_by_date(
             self,
@@ -311,11 +351,12 @@ class BaseDataset(ABC):
             logger.error(f"Erreur lors de l'exportation de BaseDataset en JSON : {repr(exc)}")
             raise
 
+    def get_eval_variables(self):
+        return self.std_eval_variables
+
 
 class RemoteDataset(BaseDataset):
     """Generic dataset for remote sources."""
-    #def __init__(self, config: DatasetConfig):
-    #    super().__init__(config)
 
     def download(self, index: int, local_path: str):
         """
@@ -346,8 +387,11 @@ def get_dataset_from_config(
     source: dict,
     root_data_folder: str,
     root_catalog_folder: str,
+    dataset_processor: DatasetProcessor,
     max_samples: Optional[int] = 0,
     use_catalog: bool = True,
+    file_cache: FileCacheManager=None,
+    filter_values: Optional[dict] = None,
 ) -> RemoteDataset:
     """Get dataset from config."""
     # Load config
@@ -356,6 +400,8 @@ def get_dataset_from_config(
     keep_variables = source.get('keep_variables', None)
     eval_variables = source.get('eval_variables', None)
     file_pattern = source.get('file_pattern', None)
+    observation_dataset = source.get('observation_dataset', None)
+    full_day_data = source.get('full_day_data', False)
     # connection_type = source['connection_type']
 
     data_root = os.path.join(
@@ -373,69 +419,66 @@ def get_dataset_from_config(
     if not os.path.exists(root_catalog_folder):
         os.mkdir(root_catalog_folder)
 
-    '''logger.debug(f"connection_type: {source["connection_type"]}")
-    logger.debug(f"config_name: {source["config"]}")
-    logger.debug(f"dataset_name: {dataset_name}")'''
+    init_type = "from_data"
+    if use_catalog and catalog_path and Path(catalog_path).exists():
+        init_type = "from_json"
 
     match config_name:
         case "cmems":
             cmems_connection_config = CMEMSConnectionConfig(
+                dataset_processor=dataset_processor,
+                init_type=init_type,
                 local_root=data_root,
                 dataset_id=source['cmems_product_name'],
                 max_samples=max_samples,
                 file_pattern=file_pattern,
                 keep_variables=keep_variables,
+                file_cache=file_cache,
+                filter_values=filter_values,
+                full_day_data=full_day_data,
             )
-            if os.path.exists(catalog_path) and use_catalog:
-                # Load dataset metadata from catalog
-                cmems_config = DatasetConfig(
-                    alias=dataset_name,
-                    connection_config=cmems_connection_config,
-                    catalog_options={"catalog_path": catalog_path},
-                    keep_variables=keep_variables,
-                    eval_variables=eval_variables,
-                )
-            else:
-                # create dataset
-                cmems_config = DatasetConfig(
-                    alias=dataset_name,
-                    connection_config=cmems_connection_config,
-                    keep_variables=keep_variables,
-                    eval_variables=eval_variables,
-                )
+            # Load dataset metadata from catalog
+            cmems_config = DatasetConfig(
+                alias=dataset_name,
+                connection_config=cmems_connection_config,
+                catalog_options={"catalog_path": catalog_path},
+                keep_variables=keep_variables,
+                eval_variables=eval_variables,
+                observation_dataset=observation_dataset,
+                use_catalog=use_catalog,
+            )
             # Création du dataset
             dataset = RemoteDataset(cmems_config)
 
         case "argopy":
             argo_connection_config = ARGOConnectionConfig(
+                dataset_processor=dataset_processor,
+                init_type=init_type,
                 local_root=data_root,
                 max_samples=max_samples,
                 file_pattern=file_pattern,
                 keep_variables=keep_variables,
+                file_cache=file_cache,
+                filter_values=filter_values,
+                full_day_data=full_day_data,
             )
-            if os.path.exists(catalog_path) and use_catalog:
-                # Load dataset metadata from catalog
-                argo_config = DatasetConfig(
-                    alias=dataset_name,
-                    connection_config=argo_connection_config,
-                    catalog_options={"catalog_path": catalog_path},
-                    keep_variables=keep_variables,
-                    eval_variables=eval_variables,
-                )
-            else:
-                # create dataset
-                argo_config = DatasetConfig(
-                    alias=dataset_name,
-                    connection_config=argo_connection_config,
-                    keep_variables=keep_variables,
-                    eval_variables=eval_variables,
-                )
+            argo_config = DatasetConfig(
+                alias=dataset_name,
+                connection_config=argo_connection_config,
+                catalog_options={"catalog_path": catalog_path},
+                keep_variables=keep_variables,
+                eval_variables=eval_variables,
+                observation_dataset=observation_dataset,
+                use_catalog=use_catalog,
+            )
             # Création du dataset
             dataset = RemoteDataset(argo_config)
         case "s3":
             # logger.debug(f"Creating S3 dataset with config: {source}")
             if source["connection_type"] == "wasabi":
                 s3_connection_config = WasabiS3ConnectionConfig(
+                    dataset_processor=dataset_processor,
+                    init_type=init_type,
                     local_root=data_root,
                     bucket=source['s3_bucket'],
                     bucket_folder=source['s3_folder'],
@@ -446,9 +489,14 @@ def get_dataset_from_config(
                     file_pattern=file_pattern,
                     groups=source['groups'] if 'groups' in source else None,
                     keep_variables=keep_variables,
+                    file_cache=file_cache,
+                    filter_values=filter_values,
+                    full_day_data=full_day_data,
                 )
             elif dataset_name == "glonet":
                 s3_connection_config = GlonetConnectionConfig(
+                    dataset_processor=dataset_processor,
+                    init_type=init_type,
                     local_root=data_root,
                     endpoint_url=source['url'],
                     glonet_s3_bucket=source['s3_bucket'],
@@ -456,24 +504,19 @@ def get_dataset_from_config(
                     max_samples=max_samples,
                     file_pattern=file_pattern,
                     keep_variables=keep_variables,
+                    file_cache=file_cache,
+                    filter_values=filter_values,
+                    full_day_data=full_day_data,
                 )
-            if os.path.exists(catalog_path) and use_catalog:
-                # Load dataset metadata from catalog
-                s3_config = DatasetConfig(
-                    alias=dataset_name,
-                    connection_config=s3_connection_config,
-                    catalog_options={"catalog_path": catalog_path},
-                    keep_variables=keep_variables,
-                    eval_variables=eval_variables,
-                )
-            else:
-                # create dataset
-                s3_config = DatasetConfig(
-                    alias=dataset_name,
-                    connection_config=s3_connection_config,
-                    keep_variables=keep_variables,
-                    eval_variables=eval_variables,
-                )
+            s3_config = DatasetConfig(
+                alias=dataset_name,
+                connection_config=s3_connection_config,
+                catalog_options={"catalog_path": catalog_path},
+                keep_variables=keep_variables,
+                eval_variables=eval_variables,
+                observation_dataset=observation_dataset,
+                use_catalog=use_catalog,
+            )
             # Création du dataset
             dataset = RemoteDataset(s3_config)
         case "_":

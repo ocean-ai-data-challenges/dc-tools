@@ -17,7 +17,8 @@ requires-python = ">=3.11.0,<3.14.0"
 dependencies = [
     "argopy>=1.1.0",
     "cartopy>=0.24.1",
-    "copernicusmarine>=2.0.0",
+    "copernicusmarine>=2.2.2",
+    "dask>=2025.7.0",
     "dask[distributed]>=2025.01.0",
     "ftputil (>=5.1.0,<6.0.0)",
     "geopy (>=2.4.1,<3.0.0)",
@@ -25,11 +26,13 @@ dependencies = [
     "h5py>=3.13.0",
     "json-handler>=2.0.1",
     "loguru>=0.7.3",
-    "netcdf4 (>=1.7.2,<2.0.0)",
+    "memory-profiler>=0.61.0",
+    "netcdf4 (>=1.5.8,<=1.6.5)", # (>=1.7.2,<2.0.0)",
     "nbformat>=5.10.4",
     "numpy (>=1.25,<2.0.0)",
     "python-json-logger>=3.3.0",
     "pyarrow",
+    "pyinterp>=2025.3.0",
     "rich>=13.9.4",
     "s3fs>=2024.10.0",
     "shapely>=1.8.4",
@@ -39,9 +42,8 @@ dependencies = [
     "torchgeo>=0.6.2",
     "xarray>=2024",
     "xbatcher>=0.4.0",
-    #"xesmf (>=0.8.8,<0.9.0)",
+    "xskillscore>=0.0.27",
     "zarr (>=2.14.2,<3.0.0)",
-    #"zarr==2.18.5",
     "scipy (>=1.13.1,<2.0.0)"
 ]
 
@@ -60,20 +62,18 @@ pytest = "^7.3.1"
 pytest-cov = "^6.0.0"
 ruff = "^0.9.10"
 mypy = "*"
-#mypy-boto3-s3 =  "^1.37.0"
 wget = "^3.2"
 patool = "^3.1.3"
-#boto3 = "^1.37.36"
 
 [tool.poetry.group.custom]
 optional = false
 
 [tool.poetry.group.custom.dependencies]
-oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
-# oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench", develop = true }
-xrpatcher = { git = "ssh://git@github.com:jejjohnson/xrpatcher.git", branch = "main" }
+#oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
+oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench" }
+xrpatcher = { git = "ssh://git@github.com/jejjohnson/xrpatcher.git", branch = "main" }
 xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
-# argopy = { git = "git+https://github.com/euroargodev/argopy.git", branch = "master" }
+
 
 [build-system]
 build-backend = "poetry.core.masonry.api"
@@ -83,7 +83,6 @@ requires = ["poetry-core", "setuptools", "wheel", "cmake"]
 line-length = 100
 indent-width = 4
 exclude = [
-    "dctools/third_party", # Omitting all mercator_oceanbench tests until their library is finished
     ".eggs",
     ".git",
     ".ipynb_checkpoints",

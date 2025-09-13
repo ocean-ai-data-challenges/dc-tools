@@ -22,7 +22,7 @@ from dctools.utilities.init_dask import setup_dask
 from dctools.utilities.file_utils import load_config_file
 
 
-
+# TODO Update all tests
 @pytest.fixture(scope="function")
 def test_config():
     pytest_configure()
@@ -203,7 +203,7 @@ def test_evaluation(
         ]
         metrics_kwargs = {}
         metrics_kwargs[alias] = {"add_noise": False,
-            "eval_variables": dataloaders[alias].eval_variables,
+            "eval_variables": setup_dataset_manager.datasets[alias].eval_variables,
         }
         metrics[alias] = [
             MetricComputer(metric_name=metric, **metrics_kwargs[alias])
