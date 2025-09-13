@@ -139,13 +139,15 @@ class DC2Evaluation:
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            if source_name != "glonet" and source_name != "saral" and source_name != "swot" and source_name != "jason3":
+            #if source_name != "glonet" and source_name != "argo_profiles": # and source_name != "swot" and source_name != "jason3":
+            #    continue
+            if source_name == "SSS_fields":
                 continue
-            
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory
             kwargs["root_catalog_folder"] = self.args.catalog_dir
+            kwargs["dataset_processor"] = self.dataset_processor
             kwargs["max_samples"] = self.args.max_samples
             kwargs["file_cache"] = manager.file_cache
             kwargs["filter_values"] = {
@@ -172,7 +174,7 @@ class DC2Evaluation:
         )
 
         # Appliquer les filtres spatio-temporels
-        manager = self.filter_data(manager, filter_region) ##  TODO : check filtering validity
+        # manager = self.filter_data(manager, filter_region) ##  TODO : check filtering validity
 
         return manager
 

@@ -18,14 +18,14 @@ max_cache_files: 1000  # max files to store (older files are deleted)
 ############################# PARALLELIZATION ###################################
 
 batch_size: 32
-n_parallel_workers: 8
+n_parallel_workers: 10
 memory_limit_per_worker: "6GB"
 ############################# DATA FILTERS ###################################
 
 ## start time
-start_time: "2024-01-04"
+start_time: "2023-01-01"
 ## end time
-end_time: "2024-01-11"
+end_time: "2025-01-01"
 #end_time: "2024-02-13"
 
 

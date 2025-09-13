@@ -6,12 +6,12 @@ from typing import Optional, Tuple
 
 import fsspec
 from loguru import logger
+from oceanbench.core.distributed import DatasetProcessor
 
 from dctools.utilities.file_utils import FileCacheManager
 from dctools.utilities.misc_utils import get_home_path
 
 class BaseConnectionConfig(ABC):
-    # fs: fsspec.AbstractFileSystem = None
     def __init__(self, protocol: str, **kwargs):
         self.protocol = protocol
         self.params = SimpleNamespace(**kwargs)
@@ -29,6 +29,7 @@ class BaseConnectionConfig(ABC):
 class LocalConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        dataset_processor: DatasetProcessor,
         init_type: str,
         local_root: str,
         max_samples: Optional[int] = None,
@@ -36,7 +37,6 @@ class LocalConnectionConfig(BaseConnectionConfig):
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
-        dask_cluster: Optional[object] = None,
         filter_values: Optional[dict] = None,
         full_day_data:  Optional[bool] = False,
     ):
@@ -55,7 +55,7 @@ class LocalConnectionConfig(BaseConnectionConfig):
             groups=groups,
             keep_variables=keep_variables,
             file_cache=file_cache,
-            dask_cluster=dask_cluster,
+            dataset_processor=dataset_processor,
             filter_values=filter_values,
             full_day_data=full_day_data,
         )
@@ -64,6 +64,7 @@ class LocalConnectionConfig(BaseConnectionConfig):
 class CMEMSConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        dataset_processor: DatasetProcessor,
         init_type: str,
         local_root: str,
         dataset_id: str,
@@ -73,7 +74,6 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
-        dask_cluster: Optional[object] = None,
         filter_values: Optional[dict] = None,
         full_day_data:  Optional[bool] = False,
     ):
@@ -108,7 +108,7 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
             groups=groups,
             keep_variables=keep_variables,
             file_cache=file_cache,
-            dask_cluster=dask_cluster,
+            dataset_processor=dataset_processor,
             filter_values=filter_values,
             full_day_data=full_day_data,
         )
@@ -116,7 +116,8 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
 
 class FTPConnectionConfig(BaseConnectionConfig):
     def __init__(
-        self, 
+        self,
+        dataset_processor: DatasetProcessor,
         init_type: str,
         local_root: str, host: str,
         ftp_folder: str,
@@ -126,7 +127,6 @@ class FTPConnectionConfig(BaseConnectionConfig):
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
-        dask_cluster: Optional[object] = None,
         filter_values: Optional[dict] = None,
         full_day_data:  Optional[bool] = False,
     ):
@@ -142,7 +142,7 @@ class FTPConnectionConfig(BaseConnectionConfig):
             groups=groups,
             keep_variables=keep_variables,
             file_cache=file_cache,
-            dask_cluster=dask_cluster,
+            dataset_processor=dataset_processor,
             filter_values=filter_values,
             full_day_data=full_day_data,
         )
@@ -151,6 +151,7 @@ class FTPConnectionConfig(BaseConnectionConfig):
 class S3ConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        dataset_processor: DatasetProcessor,
         init_type: str,
         local_root: str,
         bucket: str,
@@ -163,7 +164,6 @@ class S3ConnectionConfig(BaseConnectionConfig):
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
-        dask_cluster: Optional[object] = None,
         filter_values: Optional[dict] = None,
         full_day_data:  Optional[bool] = False,
         protocol: str = "s3",
@@ -189,7 +189,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
             groups=groups,
             keep_variables=keep_variables,
             file_cache=file_cache,
-            dask_cluster=dask_cluster,
+            dataset_processor=dataset_processor,
             filter_values=filter_values,
             full_day_data=full_day_data,
         )
@@ -198,6 +198,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
 class WasabiS3ConnectionConfig(S3ConnectionConfig):
     def __init__(
         self,
+        dataset_processor: DatasetProcessor,
         init_type: str,
         local_root: str,
         bucket: str,
@@ -210,7 +211,6 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
-        dask_cluster: Optional[object] = None,
         filter_values: Optional[dict] = None,
         full_day_data:  Optional[bool] = False,
     ):
@@ -226,7 +226,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
             groups=groups,
             keep_variables=keep_variables,
             file_cache=file_cache,
-            dask_cluster=dask_cluster,
+            dataset_processor=dataset_processor,
             filter_values=filter_values,
             full_day_data=full_day_data,
             protocol="wasabi",
@@ -235,6 +235,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
 class GlonetConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        dataset_processor: DatasetProcessor,
         init_type: str,
         local_root: str,
         endpoint_url: str,
@@ -245,7 +246,6 @@ class GlonetConnectionConfig(BaseConnectionConfig):
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
-        dask_cluster: Optional[object] = None,
         filter_values: Optional[dict] = None,
         full_day_data:  Optional[bool] = False,
     ):
@@ -268,7 +268,7 @@ class GlonetConnectionConfig(BaseConnectionConfig):
             groups=groups,
             keep_variables=keep_variables,
             file_cache=file_cache,
-            dask_cluster=dask_cluster,
+            dataset_processor=dataset_processor,
             filter_values=filter_values,
             full_day_data=full_day_data,
         )
@@ -277,6 +277,7 @@ class GlonetConnectionConfig(BaseConnectionConfig):
 class ARGOConnectionConfig(BaseConnectionConfig):
     def __init__(
         self,
+        dataset_processor: DatasetProcessor,
         init_type: str,
         local_root: str,
         max_samples: Optional[int] = None,
@@ -284,7 +285,6 @@ class ARGOConnectionConfig(BaseConnectionConfig):
         groups: Optional[list[str]] = None,
         keep_variables: Optional[list[str]] = None,
         file_cache: Optional[FileCacheManager] = None,
-        dask_cluster: Optional[object] = None,
         filter_values: Optional[dict] = None,
         full_day_data:  Optional[bool] = False,
     ):
@@ -300,7 +300,7 @@ class ARGOConnectionConfig(BaseConnectionConfig):
             groups=groups,
             keep_variables=keep_variables,
             file_cache=file_cache,
-            dask_cluster=dask_cluster,
+            dataset_processor=dataset_processor,
             filter_values=filter_values,
             full_day_data=full_day_data,
         )

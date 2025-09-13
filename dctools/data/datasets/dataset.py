@@ -11,9 +11,8 @@ from typing import (
 import ast
 from datetime import datetime
 import geopandas as gpd
-
 from loguru import logger
-
+from oceanbench.core.distributed import DatasetProcessor
 from pathlib import Path
 import xarray as xr
 
@@ -388,10 +387,10 @@ def get_dataset_from_config(
     source: dict,
     root_data_folder: str,
     root_catalog_folder: str,
+    dataset_processor: DatasetProcessor,
     max_samples: Optional[int] = 0,
     use_catalog: bool = True,
     file_cache: FileCacheManager=None,
-    dask_cluster: Optional[Any] = None,
     filter_values: Optional[dict] = None,
 ) -> RemoteDataset:
     """Get dataset from config."""
@@ -427,6 +426,7 @@ def get_dataset_from_config(
     match config_name:
         case "cmems":
             cmems_connection_config = CMEMSConnectionConfig(
+                dataset_processor=dataset_processor,
                 init_type=init_type,
                 local_root=data_root,
                 dataset_id=source['cmems_product_name'],
@@ -434,7 +434,6 @@ def get_dataset_from_config(
                 file_pattern=file_pattern,
                 keep_variables=keep_variables,
                 file_cache=file_cache,
-                dask_cluster=dask_cluster,
                 filter_values=filter_values,
                 full_day_data=full_day_data,
             )
@@ -453,13 +452,13 @@ def get_dataset_from_config(
 
         case "argopy":
             argo_connection_config = ARGOConnectionConfig(
+                dataset_processor=dataset_processor,
                 init_type=init_type,
                 local_root=data_root,
                 max_samples=max_samples,
                 file_pattern=file_pattern,
                 keep_variables=keep_variables,
                 file_cache=file_cache,
-                dask_cluster=dask_cluster,
                 filter_values=filter_values,
                 full_day_data=full_day_data,
             )
@@ -478,6 +477,7 @@ def get_dataset_from_config(
             # logger.debug(f"Creating S3 dataset with config: {source}")
             if source["connection_type"] == "wasabi":
                 s3_connection_config = WasabiS3ConnectionConfig(
+                    dataset_processor=dataset_processor,
                     init_type=init_type,
                     local_root=data_root,
                     bucket=source['s3_bucket'],
@@ -490,12 +490,12 @@ def get_dataset_from_config(
                     groups=source['groups'] if 'groups' in source else None,
                     keep_variables=keep_variables,
                     file_cache=file_cache,
-                    dask_cluster=dask_cluster,
                     filter_values=filter_values,
                     full_day_data=full_day_data,
                 )
             elif dataset_name == "glonet":
                 s3_connection_config = GlonetConnectionConfig(
+                    dataset_processor=dataset_processor,
                     init_type=init_type,
                     local_root=data_root,
                     endpoint_url=source['url'],
@@ -505,7 +505,6 @@ def get_dataset_from_config(
                     file_pattern=file_pattern,
                     keep_variables=keep_variables,
                     file_cache=file_cache,
-                    dask_cluster=dask_cluster,
                     filter_values=filter_values,
                     full_day_data=full_day_data,
                 )

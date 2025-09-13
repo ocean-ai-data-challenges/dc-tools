@@ -2,7 +2,7 @@
 from copy import deepcopy
 import profile
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import ast
 # import kornia
@@ -31,6 +31,126 @@ from dctools.processing.interpolation import (
 )
 
 
+def detect_and_normalize_longitude_system(
+    ds: xr.Dataset,
+    lon_name: str = "lon"
+) -> xr.Dataset:
+    """
+    Détecte et normalise les systèmes de coordonnées longitude pour assurer la compatibilité.
+    
+    Args:
+        ds: Dataset d'observations
+        lon_name: Nom de la coordonnée longitude
+        
+    Returns:
+        xr.Dataset: Dataset normalisé (identique à l'entrée sauf longitudes transformées)
+    """    
+    # Vérifier que la coordonnée longitude existe
+    if lon_name not in ds.coords and lon_name not in ds.data_vars:
+        logger.warning(f"Longitude coordinate '{lon_name}' not found in dataset")
+        return ds
+    
+    # Analyser les plages de longitude
+    lon_vals = ds[lon_name].values
+    lon_min, lon_max = float(np.nanmin(lon_vals)), float(np.nanmax(lon_vals))
+
+    logger.debug(f"Longitude range: [{lon_min:.3f}, {lon_max:.3f}]")
+
+    # Détecter le système de coordonnées
+    lon_system = _detect_longitude_system(lon_min, lon_max)
+    
+    logger.debug(f"Detected longitude system: {lon_system}")
+    
+    # Si déjà dans le bon système, retourner le dataset original
+    if lon_system == "[-180, 180]":
+        logger.debug("Longitude already in [-180, 180] system")
+        return ds
+    
+    # Normaliser si nécessaire
+    if lon_system != "[-180, 180]":
+        logger.info(f"Converting longitude from {lon_system} to [-180, 180]")
+        ds_normalized = _convert_longitude_to_180(ds, lon_name)
+        
+        # Vérification finale
+        lon_final = ds_normalized[lon_name].values
+        logger.debug(f"Final longitude range: [{float(np.nanmin(lon_final)):.3f}, {float(np.nanmax(lon_final)):.3f}]")
+        
+        return ds_normalized
+    else:
+        logger.warning(f"Unknown longitude system: {lon_system}, returning original dataset")
+        return ds
+
+
+def _detect_longitude_system(lon_min: float, lon_max: float) -> str:
+    """Détecte le système de coordonnées longitude basé sur les valeurs min/max."""
+    
+    # Système [0, 360]
+    if lon_min >= -5 and lon_max >= 355:  # Tolérance pour les arrondis
+        return "[0, 360]"
+    
+    # Système [-180, 180]
+    elif lon_min >= -185 and lon_max <= 185:  # Tolérance pour les arrondis
+        return "[-180, 180]"
+    
+    # Système mixte ou autre
+    elif lon_min < -5 and lon_max > 185:
+        return "mixed"
+    
+    else:
+        return "unknown"
+
+
+def _convert_longitude_to_180(ds: xr.Dataset, lon_name: str) -> xr.Dataset:
+    """
+    Convertit les longitudes de [0, 360] vers [-180, 180].
+    Retourne un dataset complet avec toutes les coordonnées, variables et attributs préservés.
+    
+    Args:
+        ds: Dataset à convertir
+        lon_name: Nom de la coordonnée longitude
+        
+    Returns:
+        xr.Dataset: Dataset avec longitudes normalisées
+    """
+    # Créer une copie du dataset pour éviter de modifier l'original
+    ds_work = ds.copy(deep=True)
+    
+    # Obtenir les longitudes
+    lon_data = ds_work[lon_name]
+    
+    # Conversion : lon > 180 devient lon - 360
+    lon_converted = xr.where(lon_data > 180, lon_data - 360, lon_data)
+    
+    # Préserver les attributs de la coordonnée longitude
+    lon_attrs = lon_data.attrs.copy()
+    
+    # Remplacer la coordonnée longitude dans le dataset
+    if lon_name in ds_work.coords:
+        # Si c'est une coordonnée
+        ds_work = ds_work.assign_coords({lon_name: lon_converted})
+        # Réassigner les attributs
+        ds_work[lon_name].attrs.update(lon_attrs)
+        
+    elif lon_name in ds_work.data_vars:
+        # Si c'est une variable de données
+        ds_work[lon_name] = lon_converted
+        # Réassigner les attributs
+        ds_work[lon_name].attrs.update(lon_attrs)
+    
+    # Trier par longitude si c'est une dimension pour maintenir l'ordre croissant
+    if lon_name in ds_work.dims:
+        try:
+            ds_work = ds_work.sortby(lon_name)
+            logger.debug("Dataset sorted by longitude")
+        except Exception as e:
+            logger.warning(f"Could not sort by longitude: {e}")
+    
+    # Préserver les attributs globaux du dataset
+    ds_work.attrs.update(ds.attrs)
+    
+    return ds_work
+
+
 class TransformWrapper:
     """Wraps a transform that operates on only the sample."""
     def __init__(self, transf):
@@ -43,6 +163,20 @@ class TransformWrapper:
         """
         sample, time_axis = data
         return self.transf(sample), time_axis
+
+
+class StdLongitudeTransform:
+    """A custom transform dependent on time axis."""
+    def __init__(
+        self
+    ):
+        pass
+
+    def __call__(self, data):
+        data = detect_and_normalize_longitude_system(
+            data
+        )
+        return data
 
 
 class RenameCoordsVarsTransform:
@@ -304,6 +438,7 @@ class CustomTransforms:
                 coords_rename_dict=coords_rename_dict,
                 vars_rename_dict=vars_rename_dict,
             ),
+            StdLongitudeTransform(),
         ])
 
         transf_dataset = transform(dataset)
