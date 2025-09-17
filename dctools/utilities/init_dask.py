@@ -116,6 +116,10 @@ def configure_dask_logging():
         'distributed.worker.memory.spill': 0.9,
         'distributed.worker.memory.pause': 0.95,
         'distributed.worker.memory.terminate': False,
-        'logging.distributed': 'error',
-        'logging.distributed.worker': 'error'
+        'logging': {
+            'distributed': {
+                '': 'error',            # root "distributed" logger
+                'worker': 'error'       # sub-logger: distributed.worker
+            }
+        }
     })

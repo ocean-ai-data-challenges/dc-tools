@@ -46,13 +46,6 @@ class DC2Evaluation:
         """
         self.args = arguments
 
-        '''self.dataset_references = {
-            "glonet": [
-                "glorys", "argo_profiles", "argo_velocities",
-                "jason1", "jason2", "jason3",
-                "saral", "swot", "SSS_fields", "SST_fields",
-            ]
-        }'''
         self.dataset_references = {
             "glonet": [
                 "jason3", "glorys", "argo_profiles", "argo_velocities",
