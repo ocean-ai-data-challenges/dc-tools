@@ -136,7 +136,15 @@ VARIABLES_ALIASES = {
     "depth": {
         "standard_names": ["depth"],
         "aliases": ["depth", "z", "lev", "level", "bottom", "deptht", "isodepth", "data_01__depth_or_elevation", "data_01__altitude"]
-    }
+    },
+    "x": {
+        "standard_names": ["x"],
+        "aliases": ["x", "xc", "x_center", "easting", "projection_x_coordinate", "grid_xt", "i"] 
+    },
+    "y": {
+        "standard_names": ["y"],
+        "aliases": ["y", "yc", "y_center", "northing", "projection_y_coordinate", "grid_yt", "j"] 
+    },
 }
 
 GEO_STD_COORDS = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
@@ -174,7 +182,8 @@ RANGES_GLONET = {
     #"time": GLONET_TIME_VALS,
 }
 
-'''GLONET_ENCODING = {"depth": {"dtype": "float32"},
+"""
+GLONET_ENCODING = {"depth": {"dtype": "float32"},
                    "lat": {"dtype": "float64"},
                    "lon": {"dtype": "float64"},
                    "time": {"dtype": "str"},
@@ -182,7 +191,8 @@ RANGES_GLONET = {
                    "thetao": {"dtype": "float32"},
                    "uo": {"dtype": "float32"},
                    "vo": {"dtype": "float32"},
-                   "zos": {"dtype": "float32"},'''
+                   "zos": {"dtype": "float32"},
+"""
 
 
 class CoordinateSystem:
@@ -527,6 +537,7 @@ def is_ungridded_observation_dataset(ds: xr.Dataset) -> bool:
     bool
         True if likely ungridded observations, False otherwise.
     """
+    # TODO: Add support for x/y coords
 
     # 2. Check for 1D lat/lon coordinates
     lat = ds.coords.get("lat", None)
