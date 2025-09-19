@@ -137,6 +137,7 @@ VARIABLES_ALIASES = {
         "standard_names": ["depth"],
         "aliases": ["depth", "z", "lev", "level", "bottom", "deptht", "isodepth", "data_01__depth_or_elevation", "data_01__altitude"]
     },
+    # Polar coordinates (EPSG:3413)
     "x": {
         "standard_names": ["x"],
         "aliases": ["x", "xc", "x_center", "easting", "projection_x_coordinate", "grid_xt", "i"] 
@@ -145,6 +146,12 @@ VARIABLES_ALIASES = {
         "standard_names": ["y"],
         "aliases": ["y", "yc", "y_center", "northing", "projection_y_coordinate", "grid_yt", "j"] 
     },
+    "leadmap": {# MODIS ArcLeads
+        "standard_names": ["leadmap"],
+        "aliases": ["leadmap"]
+    },
+    # IABP
+    # TODO: Add IABP variables
 }
 
 GEO_STD_COORDS = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
