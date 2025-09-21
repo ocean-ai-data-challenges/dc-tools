@@ -3229,7 +3229,7 @@ optional = false
 python-versions = ">=3.11.0,<3.14.0"
 groups = ["custom"]
 files = []
-develop = false
+develop = true
 
 [package.dependencies]
 aiohttp = ">=3.0.0"
@@ -6088,4 +6088,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11.0,<3.14.0"
-content-hash = "488be1c018e9d3935c9d4fad5d73a6d2aff353de4528152a36cc03f3fdb6329f"
+content-hash = "d0e457b6540c01a6e18340594ee676d96c58693638de3ff13e57454a8400285b"

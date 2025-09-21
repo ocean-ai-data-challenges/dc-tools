@@ -42,7 +42,7 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
         xr.Dataset: Dataset renommé.
     """
     # Renommer les coordonnées (sans toucher aux dimensions)
-    coords_to_rename = {k: v for k, v in rename_dict.items() if k in ds.coords and k != v}
+    coords_to_rename = {k: v for k, v in rename_dict.items() if k in ds.coords and k != v and v not in ds.coords}
     if coords_to_rename:
         ds = ds.rename(coords_to_rename)
 
@@ -65,6 +65,34 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
             ds = ds.drop_vars(old)
     return ds
 
+def quantize_on_dimension(ds: xr.Dataset, dim: str, target_values: list, tol: float = 1e-2) -> xr.Dataset:
+    """
+    Sélectionne les tranches du dataset ds dont la coordonnée dim est proche d'une des target_values (tolérance tol).
+    Args:
+        ds: Dataset xarray
+        dim: Nom de la dimension à quantifier (ex: "depth")
+        target_values: Liste de valeurs cibles
+        tol: Tolérance (float)
+    Returns:
+        Dataset filtré
+    """
+    if dim not in ds.coords:
+        raise ValueError(f"La coordonnée '{dim}' n'existe pas dans le dataset.")
+    
+    # Récupérer les valeurs de la coordonnée
+    coord_vals = ds.coords[dim].values
+    # Trouver les indices proches des valeurs cibles
+    selected_indices = []
+    for v in target_values:
+        idx = np.where(np.abs(coord_vals - v) <= tol)[0]
+        selected_indices.extend(idx)
+    # Enlever les doublons et trier
+    selected_indices = sorted(set(selected_indices))
+    if not selected_indices:
+        raise ValueError("Aucune valeur de la coordonnée n'est proche des valeurs cibles.")
+    # Sélectionner les tranches correspondantes
+    ds_quantized = ds.isel({dim: selected_indices})
+    return ds_quantized
 
 def rename_variables(ds: xr.Dataset, rename_dict: Optional[dict] = None):
     """Rename variables according to a given dictionary."""
@@ -116,8 +144,9 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
         if not var_std_name:
             var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
 
+    real_vars = [var for var in list_vars if var in ds.data_vars]
     # Crée un sous-dataset avec uniquement les variables listées
-    subset = ds[list_vars]
+    subset = ds[real_vars]
 
     # Détecter les coordonnées présentes dans le sous-dataset
     coords_to_set = [c for c in subset.data_vars if c in ds.coords]
@@ -448,7 +477,7 @@ def subsample_dataset(
                 
         except Exception as e:
             logger.error(f"Failed to subsample dimension '{dim_name}': {e}")
-            # En cas d'erreur, essayer avec drop=True pour ignorer les valeurs manquantes
+            # En cas d'erreur, drop=True pour ignorer les valeurs manquantes
             try:
                 if not isinstance(values, slice):
                     sel_kwargs['drop'] = True
@@ -694,9 +723,9 @@ def preview_display_dataset(ds, variables=None, max_values=500000):
     """Affiche un dataset en gérant la mémoire."""
     print("DATASET SUMMARY")
     print("="*50)
-    print(f"Nombre de dimensions: {len(ds.dims)}")
-    print(f"Nombre de coordonnées: {len(ds.coords)}")
-    print(f"Nombre de variables: {len(ds.data_vars)}")
+    print(f"Dimensions: {ds.dims}")
+    print(f"Coordonnées: {ds.coords}")
+    print(f"Variables: {ds.data_vars}")
     print(f"Taille totale: {ds.nbytes / 1e6:.2f} MB")
     
     print("\nDIMENSIONS:")
@@ -733,3 +762,158 @@ def preview_display_dataset(ds, variables=None, max_values=500000):
                     print(f"    Mean: {float(valid_data.mean()):.3f}")
         except Exception as e:
             print(f"    (Erreur calcul stats: {e})")
+
+
+
+def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
+    """
+    Return a dataset that keeps only the variables (data_vars and/or coords)
+    listed in `keep_vars`. Unknown names in keep_vars are ignored (but printed).
+    The returned dataset preserves:
+      - the selected data variables,
+      - any coordinates explicitly requested,
+      - any coordinates required by the kept data variables,
+      - global attributes.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset.
+    keep_vars : list[str]
+        Names of variables/coords to keep.
+
+    Returns
+    -------
+    xr.Dataset
+    """
+    # Normalise et retire doublons (on garde l'ordre d'apparition)
+    keep_vars = [str(v) for v in keep_vars]
+    seen = set()
+    keep_vars = [v for v in keep_vars if not (v in seen or seen.add(v))]
+
+    # Ensemble des variables présentes (inclut data_vars + coords)
+    present = set(ds.variables.keys())
+
+    # Sépare ce qui est présent / absent
+    keep_present = [v for v in keep_vars if v in present]
+    not_found = [v for v in keep_vars if v not in present]
+    if not_found:
+        print(f"Warning: these names were not found in dataset and will be ignored: {not_found}")
+
+    # Data variables à garder (intersection avec ds.data_vars)
+    data_vars_to_keep = [v for v in keep_present if v in ds.data_vars]
+
+    # Construire le nouveau dataset à partir des data_vars choisies
+    if data_vars_to_keep:
+        new_ds = ds[data_vars_to_keep].copy()   # xarray conserve les coords nécessaires
+    else:
+        # Aucun data_var demandé -> dataset vide
+        new_ds = xr.Dataset()
+
+    # Ré-attacher explicitement les coords demandés (même si non référencés par data_vars)
+    for name in keep_present:
+        if name in ds.coords and name not in new_ds.coords:
+            new_ds = new_ds.assign_coords({name: ds.coords[name]})
+
+    # Conserver les attributs globaux
+    new_ds.attrs = ds.attrs.copy()
+
+    return new_ds
+
+def filter_dataset_by_depth(ds: xr.Dataset, depth_vals, depth_tol=1) -> xr.Dataset:
+    """
+    Filter a dataset (Argo-like) by keeping only values close to depth_vals within depth_tol.
+    Works whether 'depth' is a dimension or a variable aligned with 'n_points'.
+    """
+    if "depth" in ds.dims:  
+        # Cas 1 : depth est une dimension
+        depth_array = ds["depth"].values
+    elif "depth" in ds.variables:  
+        # Cas 2 : depth est une variable type coordonnée
+        depth_array = ds["depth"].values
+    else:
+        raise ValueError("No 'depth' dimension or variable found in dataset")
+
+    # Conversion stricte en float (remplace chaînes/objets invalides par NaN)
+    depth_array = pd.to_numeric(depth_array.ravel(), errors="coerce").astype(float)
+
+    # Construction du masque
+    mask = np.zeros_like(depth_array, dtype=bool)
+    for d in depth_vals:
+        try:
+            d_float = float(d)
+            mask |= np.isclose(depth_array, d_float, atol=depth_tol, rtol=0.0)
+        except Exception:
+            continue
+
+    # Appliquer le masque
+    if "depth" in ds.dims:
+        return ds.sel(depth=depth_array[mask])
+    else:  # aligné sur n_points
+        return ds.isel(N_POINTS=mask)
+
+
+def interp_single_argo_profile(ds: xr.Dataset, target_depths, method="linear") -> xr.Dataset:
+    """
+    Interpolate ARGO dataset onto target depth levels, preserving structure.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input ARGO dataset. Can be single profile (N_POINTS) or multiple profiles (N_PROF, N_POINTS).
+        Must contain a coordinate 'depth'.
+    target_depths : array-like
+        Target depth values (same units as ds.depth).
+    method : str
+        Interpolation method ('linear', 'nearest', ...).
+
+    Returns
+    -------
+    xr.Dataset
+        Same as input but with 'depth' resampled on target_depths.
+    """
+    target_depths = np.sort(np.asarray(target_depths))
+
+    # Cas 1 : un seul profil (N_POINTS seulement)
+    if "N_PROF" not in ds.dims:
+        # variables dépendant de N_POINTS
+        depth_vars = [v for v in ds.data_vars if "N_POINTS" in ds[v].dims]
+
+        out_vars = {}
+        for v in depth_vars:
+            da = ds[v].swap_dims({"N_POINTS": "depth"}).sortby("depth")
+            out_vars[v] = da.interp(depth=target_depths, method=method)
+
+        # on garde les variables indépendantes
+        for v in ds.data_vars:
+            if v not in depth_vars:
+                out_vars[v] = ds[v]
+
+        # reconstruit le Dataset
+        out = xr.Dataset(out_vars, coords={"depth": target_depths})
+        for coord in ["LATITUDE", "LONGITUDE", "TIME"]:
+            if coord in ds:
+                out[coord] = ds[coord]
+
+        return out
+
+    # Cas 2 : plusieurs profils (N_PROF, N_POINTS)
+    else:
+        def _interp_prof(prof):
+            depth_vars = [v for v in prof.data_vars if "N_POINTS" in prof[v].dims]
+            out_vars = {}
+            for v in depth_vars:
+                da = prof[v].swap_dims({"N_POINTS": "depth"}).sortby("depth")
+                out_vars[v] = da.interp(depth=target_depths, method=method)
+            # reconstruction du Dataset
+            return xr.Dataset(out_vars, coords={"depth": target_depths})
+
+        # on applique profil par profil
+        out = ds.groupby("N_PROF").map(_interp_prof)
+
+        # on garde les coordonnées au niveau N_PROF
+        for coord in ["LATITUDE", "LONGITUDE", "TIME"]:
+            if coord in ds:
+                out[coord] = ds[coord]
+
+        return out

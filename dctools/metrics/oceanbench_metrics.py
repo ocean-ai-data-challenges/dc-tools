@@ -6,12 +6,8 @@
 from abc import ABC, abstractmethod
 import traceback
 from typing import Any, Callable, Dict, List, Optional
-from typing_extensions import Unpack
 
 from loguru import logger
-#import numpy.typing as npt
-from memory_profiler import profile
-from numpy import ndarray
 import oceanbench.metrics as oceanbench_metrics
 from oceanbench.core.rmsd import rmsd, Variable
 from oceanbench.core.lagrangian_trajectory import ZoneCoordinates, deviation_of_lagrangian_trajectories
@@ -20,7 +16,6 @@ from oceanbench.core.derived_quantities import add_geostrophic_currents
 import xarray as xr
 
 from oceanbench.core.class4_metrics.class4_evaluator import Class4Evaluator
-from oceanbench.core.distributed import DatasetProcessor
 from dctools.data.coordinates import (
     CoordinateSystem,
     EVAL_VARIABLES_GLONET,
@@ -42,6 +37,21 @@ OCEANBENCH_VARIABLES = {
     "mld": Variable.MIXED_LAYER_THICKNESS,
     "mdt": Variable.MEAN_DYNAMIC_TOPOGRAPHY,
 }
+
+
+def get_variable_alias(variable: str) -> Variable | None:
+    """Get the alias for a given variable.
+
+    Args:
+        variable (Variable): The variable to get the alias for.
+
+    Returns:
+        Optional[str]: The alias of the variable, or None if not found.
+    """
+    for alias, var in OCEANBENCH_VARIABLES.items():
+        if alias == variable or var == variable:
+            return var
+    return None
 
 
 class DCMetric(ABC):
@@ -84,7 +94,9 @@ class OceanbenchMetrics(DCMetric):
 
     def __init__(
         self,
-        dataset_processor: DatasetProcessor,
+        eval_variables: Optional[List[str]] = None,
+        oceanbench_eval_variables: Optional[List[str]] = None,
+        #dataset_processor: DatasetProcessor,
         is_class4: Optional[bool] = None,
         class4_kwargs: Optional[dict] = None,
         **kwargs: Optional[Dict[str, Any]],
@@ -94,8 +106,9 @@ class OceanbenchMetrics(DCMetric):
         Args:
         """
         super().__init__(**kwargs)
+        self.eval_variables = eval_variables
+        self.oceanbench_eval_variables = oceanbench_eval_variables
         self.is_class4 = is_class4
-        self.dataset_processor = dataset_processor
         self.class4_kwargs = class4_kwargs or {}
 
         self.metrics_set: dict[str, Callable] = {
@@ -140,7 +153,6 @@ class OceanbenchMetrics(DCMetric):
                 spatial_mask_fn=class4_args.get("spatial_mask_fn", None),
                 cache_dir=class4_args.get("cache_dir", None),
                 apply_qc=class4_args.get("apply_qc", False),
-                # distributed=class4_args.get("distributed", False),
                 qc_mapping=class4_args.get("qc_mapping", None),
             )
 
@@ -170,16 +182,11 @@ class OceanbenchMetrics(DCMetric):
 
         if self.is_class4:
             try:
-                eval_variables = [var for var in eval_variables if var in ref_dataset.data_vars]
-                oceanbench_eval_variables =[
-                    self.get_variable_alias(var) for var in eval_variables
-                ] if eval_variables else None
-                # Ajout des arguments obligatoires
-                # Appel
+
                 res = self.class4_evaluator.run(
                     model_ds=eval_dataset,
                     obs_ds=ref_dataset,
-                    variables=eval_variables,
+                    variables=self.eval_variables,
                     ref_coords=ref_coords,
                 )
                 return res
@@ -215,13 +222,10 @@ class OceanbenchMetrics(DCMetric):
                     kwargs = {
                         "challenger_datasets": [eval_dataset],
                     }
-                oceanbench_eval_variables = [
-                    self.get_variable_alias(var) for var in eval_variables
-                ] if eval_variables else None
 
                 if eval_variables and ref_dataset:
                     if self.metric_name != "lagrangian":
-                        kwargs["variables"] = oceanbench_eval_variables
+                        kwargs["variables"] = self.oceanbench_eval_variables
 
                 # Vérifier la présence de depth comme dimension
                 has_depth_dim = "depth" in eval_dataset.dims
@@ -231,12 +235,11 @@ class OceanbenchMetrics(DCMetric):
                 add_kwargs = {}
                 if add_kwargs_list:
                     if "vars" in add_kwargs_list:
-                        add_kwargs["variables"] = oceanbench_eval_variables
+                        add_kwargs["variables"] = self.oceanbench_eval_variables
                     if "zone" in add_kwargs_list:
                         kwargs["zone"] = zone
 
                     kwargs.update(add_kwargs)
-                kwargs.update({"dataset_processor": self.dataset_processor})
                 result = metric_func(**kwargs)
 
                 return result
@@ -244,16 +247,3 @@ class OceanbenchMetrics(DCMetric):
                 logger.error(f"Failed to compute metric {self.metric_name}: {traceback.format_exc()}")
                 raise
 
-    def get_variable_alias(self, variable: str) -> Variable | None:
-        """Get the alias for a given variable.
-
-        Args:
-            variable (Variable): The variable to get the alias for.
-
-        Returns:
-            Optional[str]: The alias of the variable, or None if not found.
-        """
-        for alias, var in OCEANBENCH_VARIABLES.items():
-            if alias == variable or var == variable:
-                return var
-        return None

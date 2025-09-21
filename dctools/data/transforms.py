@@ -30,23 +30,15 @@ from dctools.processing.interpolation import (
     interpolate_dataset,
 )
 
-
 def detect_and_normalize_longitude_system(
     ds: xr.Dataset,
     lon_name: str = "lon"
 ) -> xr.Dataset:
     """
     Détecte et normalise les systèmes de coordonnées longitude pour assurer la compatibilité.
-    
-    Args:
-        ds: Dataset d'observations
-        lon_name: Nom de la coordonnée longitude
-        
-    Returns:
-        xr.Dataset: Dataset normalisé (identique à l'entrée sauf longitudes transformées)
-    """    
+    """
     # Vérifier que la coordonnée longitude existe
-    if lon_name not in ds.coords and lon_name not in ds.data_vars:
+    if lon_name not in ds.dims and lon_name not in ds.coords and lon_name not in ds.data_vars:
         logger.warning(f"Longitude coordinate '{lon_name}' not found in dataset")
         return ds
     
@@ -54,27 +46,16 @@ def detect_and_normalize_longitude_system(
     lon_vals = ds[lon_name].values
     lon_min, lon_max = float(np.nanmin(lon_vals)), float(np.nanmax(lon_vals))
 
-    logger.debug(f"Longitude range: [{lon_min:.3f}, {lon_max:.3f}]")
-
     # Détecter le système de coordonnées
     lon_system = _detect_longitude_system(lon_min, lon_max)
     
-    logger.debug(f"Detected longitude system: {lon_system}")
-    
     # Si déjà dans le bon système, retourner le dataset original
     if lon_system == "[-180, 180]":
-        logger.debug("Longitude already in [-180, 180] system")
         return ds
     
     # Normaliser si nécessaire
     if lon_system != "[-180, 180]":
-        logger.info(f"Converting longitude from {lon_system} to [-180, 180]")
         ds_normalized = _convert_longitude_to_180(ds, lon_name)
-        
-        # Vérification finale
-        lon_final = ds_normalized[lon_name].values
-        logger.debug(f"Final longitude range: [{float(np.nanmin(lon_final)):.3f}, {float(np.nanmax(lon_final)):.3f}]")
-        
         return ds_normalized
     else:
         logger.warning(f"Unknown longitude system: {lon_system}, returning original dataset")

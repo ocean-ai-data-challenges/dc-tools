@@ -1,5 +1,6 @@
 
-from typing import Any, Callable
+import traceback
+from typing import Any, Callable, List
 
 from memory_profiler import profile
 import numpy as np
@@ -7,7 +8,6 @@ import xarray as xr
 
 from loguru import logger
 
-from oceanbench.core.distributed import DatasetProcessor
 from dctools.data.coordinates import CoordinateSystem
 from dctools.metrics.oceanbench_metrics import OceanbenchMetrics
 from dctools.utilities.misc_utils import add_noise_with_snr  #, to_float32
@@ -16,17 +16,22 @@ from dctools.utilities.misc_utils import add_noise_with_snr  #, to_float32
 class MetricComputer(OceanbenchMetrics):
     def __init__(
             self,
-            dataset_processor: DatasetProcessor,
+            eval_variables: List[str] = None,
+            oceanbench_eval_variables: List[str] = None,
+            #dataset_processor: DatasetProcessor,
             is_class4: bool = False,
             class4_kwargs: dict = None,
             **kwargs,
         ):
         super().__init__(
-            dataset_processor, is_class4=is_class4, class4_kwargs=class4_kwargs, **kwargs
+            #dataset_processor,
+            is_class4=is_class4, class4_kwargs=class4_kwargs, **kwargs
         )
         self.is_class4 = is_class4
         self.class4_kwargs = class4_kwargs or {}
-        self.eval_variables = kwargs.get("eval_variables", None)
+        self.eval_variables = eval_variables
+        self.oceanbench_eval_variables = oceanbench_eval_variables
+        # self.eval_variables = kwargs.get("eval_variables", None)
         self.add_noise = kwargs.get("add_noise", False)
 
     #@profile
@@ -34,7 +39,7 @@ class MetricComputer(OceanbenchMetrics):
         self, pred_data: xr.Dataset, ref_data: xr.Dataset,
         pred_coords: CoordinateSystem, ref_coords: CoordinateSystem,
     ):
-        try:
+        '''try:
             if "sla" in ref_data.data_vars:
                 # Renommer 'sla' en 'ssh' si nécessaire
                 ref_data = ref_data.rename(name_dict={'sla': 'ssh'})    # TODO : compute sla from ssh
@@ -43,17 +48,17 @@ class MetricComputer(OceanbenchMetrics):
                 # TODO : compute SST from "temperature" (surface value)
                 pred_data = pred_data.rename(name_dict={'sla': 'ssh'})    # TODO : compute sla from ssh
         except ValueError as exc:
-            logger.warning("Cannot rename SLA")
+            logger.warning("Cannot rename SLA")'''
 
         try:
             # Restriction des variables à celles présentes dans les deux datasets
-            pred_vars = set(pred_data.data_vars)
+            '''pred_vars = set(pred_data.data_vars)
             ref_vars = set(ref_data.data_vars)
             common_vars = [v for v in self.eval_variables if v in pred_vars and v in ref_vars]
             if not common_vars:
                 logger.warning("No common variables found between pred_data and ref_data for evaluation.")
                 return {}
-            self.eval_variables = common_vars
+            self.eval_variables = common_vars'''
             if self.is_class4:
                 # Appel harmonisé pour la classe 4
                 result = self.compute_metric(
@@ -82,4 +87,5 @@ class MetricComputer(OceanbenchMetrics):
             logger.error(
                 f"Error while computing metrics: {repr(exc)}"
             )
+            traceback.print_exc()
             return None

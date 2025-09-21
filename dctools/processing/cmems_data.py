@@ -36,10 +36,10 @@ def create_glorys_ndays_forecast(
         `glorys_data` (xr.Dataset): Glorys forecast dataset
     """
 
-    """dim_lat = len(RANGES_GLONET['lat'])
-    dim_lon = len(RANGES_GLONET['lon'])
-    dim_depth = len(RANGES_GLONET['depth'])
-    dim_time = len(RANGES_GLONET['time'])
+    """dim_lat = len(TARGET_DIM_RANGES['lat'])
+    dim_lon = len(TARGET_DIM_RANGES['lon'])
+    dim_depth = len(TARGET_DIM_RANGES['depth'])
+    dim_time = len(TARGET_DIM_RANGES['time'])
     times = [dat.strftime('%Y-%m-%d') for dat in pd.date_range(start=start_date,freq='1D',periods=dim_time)]
     glorys_data = xr.Dataset(
         data_vars=dict(
@@ -51,10 +51,10 @@ def create_glorys_ndays_forecast(
 
         ),
         coords=dict(
-            lon=("lon", RANGES_GLONET['lon']),
-            lat=("lat", RANGES_GLONET['lat']),
-            depth=("depth", RANGES_GLONET['depth']),
-            time=times, #RANGES_GLONET['time'], "attrs", get_glonet_time_attrs(start_date)),
+            lon=("lon", TARGET_DIM_RANGES['lon']),
+            lat=("lat", TARGET_DIM_RANGES['lat']),
+            depth=("depth", TARGET_DIM_RANGES['depth']),
+            time=times, #TARGET_DIM_RANGES['time'], "attrs", get_glonet_time_attrs(start_date)),
         ),
     )"""
     logger.info(f"Concatenate {len(list_nc_files)} Glorys forecast files.")
