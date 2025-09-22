@@ -395,7 +395,7 @@ class DatasetCatalog:
                 self.gdf.loc[invalid_geoms, 'geometry'] = self.gdf.loc[invalid_geoms, 'geometry'].buffer(0)
             
             # Vérifier que la région est valide
-            if not region.is_valid:
+            if not region.is_valid.all():
                 logger.warning("Region geometry is invalid, attempting to fix it")
                 region = region.buffer(0)
             
@@ -490,7 +490,7 @@ class DatasetCatalog:
             if invalid_count > 0:
                 logger.warning(f"WARNING: {invalid_count} invalid geometries in data")
         
-        if not region.is_valid:
+        if not region.is_valid.all():
             logger.warning("WARNING: Region geometry is invalid")
         
         # Test d'intersection sur un échantillon
