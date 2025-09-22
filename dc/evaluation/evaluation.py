@@ -127,12 +127,13 @@ class DC2Evaluation:
             if batch[0]["ref_data"]:
                 assert isinstance(batch[0]["ref_data"], str)
 
-    def setup_dataset_manager(self) -> None:
+    def setup_dataset_manager(self, list_all_references: list[str]) -> None:
 
         manager = MultiSourceDatasetManager(
             dataset_processor=self.dataset_processor,
             target_dimensions=TARGET_DIM_RANGES,
             time_tolerance=pd.Timedelta(hours=self.args.delta_time),
+            list_references=list_all_references,
             max_cache_files=self.args.max_cache_files,
         )
         datasets = {}
@@ -143,8 +144,8 @@ class DC2Evaluation:
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            #if source_name != "glonet" and source_name != "glorys" : #"swot" and source_name != "jason3": # and source_name != "saral" and source_name != "glorys":
-            #    continue
+            if source_name != "glonet" and source_name != "glorys":  # and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
+                continue
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory
@@ -184,7 +185,7 @@ class DC2Evaluation:
     def run_eval(self) -> None:
         """Proceed to evaluation."""
 
-        dataset_manager = self.setup_dataset_manager()
+        dataset_manager = self.setup_dataset_manager( self.all_datasets)
         aliases = dataset_manager.datasets.keys()
 
         dataloaders = {}
@@ -291,6 +292,7 @@ class DC2Evaluation:
             # self.check_dataloader(dataloaders[alias])
 
             evaluators[alias] = Evaluator(
+                dataset_manager=dataset_manager,
                 metrics=metrics[alias],
                 dataloader=dataloaders[alias],
                 ref_aliases=list_references,

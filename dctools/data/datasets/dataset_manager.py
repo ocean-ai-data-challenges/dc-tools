@@ -29,6 +29,7 @@ class MultiSourceDatasetManager:
         dataset_processor: DatasetProcessor,
         target_dimensions: Dict[str, Tuple[float, float]],
         time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
+        list_references: list[str] = [],
         max_cache_files: int = 100,
     ):
         """
@@ -39,6 +40,7 @@ class MultiSourceDatasetManager:
         self.datasets = {}
         self.forecast_indexes = {}
         self.time_tolerance = time_tolerance
+        self.list_references = list_references
         self.file_cache = FileCacheManager(max_cache_files)
 
     def get_keep_variables_dict(self):
@@ -306,6 +308,23 @@ class MultiSourceDatasetManager:
         )
 
         self.forecast_indexes[alias] = forecast_index
+    
+    def get_config(self):
+        ref_managers = {}
+        ref_catalogs = {}
+        ref_connection_params= {}
+        ref_aliases = [alias for alias in self.list_references if alias in self.datasets]
+        ref_datasets = {}
+        for alias in ref_aliases:
+            ref_datasets[alias] = self.datasets[alias]
+        for ref_alias in ref_aliases:
+            if ref_alias not in self.datasets:
+                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
+                continue
+            ref_managers[ref_alias] = ref_datasets[ref_alias].get_connection_manager()
+            ref_catalogs[ref_alias] = ref_datasets[ref_alias].get_catalog()
+            ref_connection_params[ref_alias] = ref_datasets[ref_alias].get_connection_config()
+        return ref_managers, ref_catalogs, ref_connection_params
 
     def get_dataloader(
         self,
@@ -344,16 +363,8 @@ class MultiSourceDatasetManager:
             ref_datasets[ref_alias] = self.datasets[ref_alias]
 
         pred_manager = pred_dataset.get_connection_manager()
-        ref_managers = {}
-        ref_catalogs = {}
-        ref_connection_params= {}
-        for ref_alias in ref_aliases:
-            if ref_alias not in self.datasets:
-                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
-                continue
-            ref_managers[ref_alias] = ref_datasets[ref_alias].get_connection_manager()
-            ref_catalogs[ref_alias] = ref_datasets[ref_alias].get_catalog()
-            ref_connection_params[ref_alias] = ref_datasets[ref_alias].get_connection_config()
+
+        ref_managers, ref_catalogs, ref_connection_params = self.get_config()
 
         pred_catalog = pred_dataset.get_catalog()
         pred_connection_params = pred_dataset.get_connection_config()

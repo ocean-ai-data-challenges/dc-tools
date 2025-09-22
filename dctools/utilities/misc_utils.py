@@ -453,3 +453,36 @@ def show_worker_info():
         # Pas dans un contexte de worker Dask
         print(f"Not running in worker context: {e}")
         return f"Not in worker (PID: {os.getpid()})"
+
+
+def find_unpicklable_objects(obj, path="root", max_depth=5, visited=None):
+    """
+    Explore récursivement un objet et affiche les sous-objets non picklables avec leur chemin.
+    """
+    if visited is None:
+        visited = set()
+    obj_id = id(obj)
+    if obj_id in visited or max_depth < 0:
+        return
+    visited.add(obj_id)
+    try:
+        pickle.dumps(obj)
+    except Exception as e:
+        print(f"Unpicklable at {path}: {type(obj)} - {e}")
+        # Explorer les attributs __dict__ si possible
+        if hasattr(obj, "__dict__"):
+            for k, v in obj.__dict__.items():
+                find_unpicklable_objects(v, f"{path}.{k}", max_depth-1, visited)
+        # Explorer les items si dict
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                find_unpicklable_objects(v, f"{path}[{repr(k)}]", max_depth-1, visited)
+        # Explorer les éléments si list/tuple/set
+        elif isinstance(obj, (list, tuple, set)):
+            for i, v in enumerate(obj):
+                find_unpicklable_objects(v, f"{path}[{i}]", max_depth-1, visited)
+        # Explorer les slots
+        elif hasattr(obj, "__slots__"):
+            for k in obj.__slots__:
+                v = getattr(obj, k, None)
+                find_unpicklable_objects(v, f"{path}.{k}", max_depth-1, visited)

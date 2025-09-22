@@ -20,11 +20,12 @@ from dctools.data.connection.config import (
 from dctools.data.connection.connection_manager import (
     ArgoManager, GlonetManager,
     LocalConnectionManager, S3WasabiManager,
-    S3Manager, FTPManager, CMEMSManager,
+    S3Manager, FTPManager, CMEMSManager, clean_for_serialization,
 )
 from dctools.data.datasets.dataloader import EvaluationDataloader
+from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.metrics import MetricComputer
-from dctools.utilities.misc_utils import make_fully_serializable
+from dctools.utilities.misc_utils import deep_copy_object, make_fully_serializable
 
 
 CONNECTION_REGISTRY = {
@@ -72,17 +73,41 @@ def compute_metric(
             ref_transform = ref_transforms[ref_alias]
         pred_source = entry["pred_data"]
         ref_source = entry["ref_data"]
+    
+        pred_protocol = pred_source_config.protocol
+        ref_protocol = ref_source_config.protocol
+
+
+        if ref_protocol == 'cmems':
+            if hasattr(ref_source_config, 'fs') and hasattr(ref_source_config.fs, '_session'):
+                try:
+                    if hasattr(ref_source_config.fs._session, 'close'):
+                        ref_source_config.fs._session.close()
+                except:
+                    pass
+                ref_source_config.fs = None
 
         pred_source_config.dataset_processor = None,
         ref_source_config.dataset_processor = None,
 
-        # Recrée l’objet de lecture dans le worker
-        pred_protocol = pred_source_config.protocol
-        ref_protocol = ref_source_config.protocol
+        # Recrée l'objet de lecture dans le worker
         pred_config_cls = CONNECTION_CONFIG_REGISTRY[pred_protocol]
         pred_connection_cls = CONNECTION_REGISTRY[pred_protocol]
         delattr(pred_source_config, "protocol")
         pred_config = pred_config_cls(**vars(pred_source_config))
+
+        # remove fsspec handler 'fs' from Config, otherwise: serialization
+        if pred_protocol == 'cmems': 
+            if hasattr(
+                pred_config.params, 'fs') and hasattr(pred_config.params.fs, '_session'
+            ):
+                try:
+                    if hasattr(pred_config.params.fs._session, 'close'):
+                        pred_config.params.fs._session.close()
+                except:
+                    pass
+                pred_config.params.fs = None
+
 
         pred_connection_manager = pred_connection_cls(pred_config)
         open_pred_func = pred_connection_manager.open
@@ -91,14 +116,28 @@ def compute_metric(
         ref_connection_cls = CONNECTION_REGISTRY[ref_protocol]
         delattr(ref_source_config, "protocol")
         ref_config = ref_config_cls(**vars(ref_source_config))
+
+        if ref_protocol == 'cmems':
+            if hasattr(ref_config.params, 'fs'):
+                try:
+                    if hasattr(ref_config.params.fs, '_session'):
+                        if hasattr(ref_config.params.fs._session, 'close'):
+                            ref_config.params.fs._session.close()
+                except:
+                    pass
+                delattr(ref_config.params, "fs")
+
+
         if ref_protocol == "argo":
             ref_connection_manager = ref_connection_cls(ref_config, argo_index=argo_index)
         else:
             ref_connection_manager = ref_connection_cls(ref_config)
         open_ref_func = ref_connection_manager.open
 
+
         if isinstance(pred_source, str):
             if pred_protocol == "cmems":
+                # cmems not compatible with Dask workers (pickling errors)
                 with dask.config.set(scheduler='synchronous'):
                     pred_data = open_pred_func(pred_source)
             else:
@@ -139,7 +178,6 @@ def compute_metric(
             if ref_protocol == "cmems":
                 with dask.config.set(scheduler='synchronous'):
                     ref_data = ref_transform(ref_data)
-                ref_data = ref_transform(ref_data)
             else:
                 ref_data = ref_transform(ref_data)
 
@@ -163,7 +201,7 @@ def compute_metric(
                 )
 
                 res_dict = {}
-                
+
                 if len(return_res) == 0:
                     return {
                         "model": model,
@@ -197,10 +235,14 @@ def compute_metric(
             res["valid_time"] = valid_time
 
         # Libérer les objets volumineux
-        if ref_data is not None:
+        '''if ref_data is not None:
             if hasattr(ref_data, "close"):
                 ref_data.close()
-            del ref_data
+            if isinstance(ref_data, list):
+                for item in ref_data:
+                    if hasattr(item, "close"):
+                        item.close()
+            # del ref_data'''
 
         gc.collect()
         return res
@@ -218,6 +260,7 @@ def compute_metric(
 class Evaluator:
     def __init__(
         self,
+        dataset_manager: MultiSourceDatasetManager,
         metrics: Dict[str, List[MetricComputer]],
         dataloader: Dict[str, EvaluationDataloader],
         ref_aliases: List[str],
@@ -231,11 +274,14 @@ class Evaluator:
             metrics (Dict[str, List[MetricComputer]]): Dictionnaire {ref_alias: [MetricComputer, ...]}.
             dataloader (Dict[str, EvaluationDataloader]): Dictionnaire {ref_alias: EvaluationDataloader}.
         """
+        self.dataset_manager = dataset_manager
         self.dataset_processor = dataset_processor
         self.metrics = metrics
         self.dataloader = dataloader
         self.results = []
         self.ref_aliases = ref_aliases
+
+        self.ref_managers, self.ref_catalogs, self.ref_connection_params = dataset_manager.get_config()
 
     def evaluate(self) -> List[Dict[str, Any]]:
         """
@@ -257,19 +303,42 @@ class Evaluator:
             logger.error(f"Evaluation failed: {traceback.format_exc()}")
             raise
 
-    def clean_namespace(self, namespace: Namespace) -> Namespace:
+    '''def clean_namespace(self, namespace: Namespace) -> Namespace:
         try:
             # Crée une copie pour éviter les effets de bord
             ns = Namespace(**vars(namespace))
             # remove these from config to avoid serialization issues with Dask
+
             for key in ['dask_cluster', 'fs', 'dataset_processor']:
                 if hasattr(ns, key):
                     delattr(ns, key)
+
+                if key == 'fs':
+                    if hasattr(ns.fs.params.fs, '_session'):
+                        try:
+                            if hasattr(ns.fs.params.fs._session, 'close'):
+                                ns.fs.params.fs._session.close()
+                        except:
+                            pass
+                        ns.fs.params.fs = None
             return ns
         except Exception as exc:
             logger.error(f"Error cleaning namespace: {exc}")
             # Retourne la version originale si erreur
-            return namespace
+            return namespace'''
+
+    def clean_namespace(self, namespace: Namespace) -> Namespace:
+        ns = Namespace(**vars(namespace))
+        # Supprime les attributs non picklables
+        for key in ['dask_cluster', 'fs', 'dataset_processor', 'client', 'session']:
+            if hasattr(ns, key):
+                delattr(ns, key)
+        # Nettoie aussi les objets dans ns.params si présent
+        if hasattr(ns, "params"):
+            for key in ['fs', 'client', 'session', 'dataset_processor']:
+                if hasattr(ns.params, key):
+                    delattr(ns.params, key)
+        return ns
 
     def _evaluate_batch(
         self, batch: List[Dict[str, Any]],
@@ -277,13 +346,29 @@ class Evaluator:
     ) -> List[Dict[str, Any]]:
         delayed_tasks = []
 
-        pred_source_config = self.clean_namespace(dataloader.pred_connection_params)
+        #cmems_logout
+
+        pred_connection_params = deep_copy_object(
+            dataloader.pred_connection_params, skip_list=['dataset_processor', 'fs']
+        )
+        pred_connection_params = clean_for_serialization(pred_connection_params)
+        pred_connection_params = self.clean_namespace(pred_connection_params) #dataloader.pred_connection_params)
+
+        pred_transform=dataloader.pred_transform
         ref_transforms = None
         if dataloader.ref_transforms is not None:
             ref_transforms = dataloader.ref_transforms
-        
+        if hasattr(pred_transform, 'dataset_processor'):
+            delattr(pred_transform, 'dataset_processor')
+
         ref_alias = batch[0].get("ref_alias")
-        ref_source_config = self.clean_namespace(dataloader.ref_connection_params.get(ref_alias, None))
+
+        ref_connection_params = deep_copy_object(
+            dataloader.ref_connection_params.get(ref_alias, None), skip_list=['dataset_processor', 'fs']
+        )
+        ref_connection_params = clean_for_serialization(ref_connection_params)
+        ref_connection_params = self.clean_namespace(ref_connection_params) #dataloader.ref_connection_params.get(ref_alias, None))
+
 
         argo_index = None
         if hasattr(dataloader.ref_managers[ref_alias], 'argo_index'):
@@ -300,11 +385,11 @@ class Evaluator:
             for entry in batch:
                 delayed_tasks.append(dask.delayed(compute_metric)(
                     entry,
-                    pred_source_config,
-                    ref_source_config,
+                    pred_connection_params,
+                    ref_connection_params,
                     dataloader.pred_alias,
                     self.metrics[ref_alias],
-                    pred_transform=dataloader.pred_transform,
+                    pred_transform=pred_transform,
                     ref_transforms=ref_transforms,
                     argo_index=scattered_argo_index,
                 ))

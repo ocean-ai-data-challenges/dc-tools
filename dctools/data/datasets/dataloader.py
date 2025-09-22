@@ -772,7 +772,7 @@ class ObservationDataViewer:
         elif "time" in first_ds.dims or "time" in first_ds.coords:
             try:
                 if self.alias is not None:
-                    all_datasets = [dataset_manager.open(row["path"], self.alias) for _, row in filtered_df.iterrows()][:2]
+                    all_datasets = [dataset_manager.open(row["path"], self.alias) for _, row in filtered_df.iterrows()][:5]
                 else:
                     all_datasets = [dataset_manager.open(row["path"]) for _, row in filtered_df.iterrows()]
                 for idx, ds in enumerate(all_datasets):

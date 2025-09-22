@@ -1,8 +1,10 @@
 
 from abc import ABC, abstractmethod
 import logging
+import pickle
 import re
 import traceback
+from types import SimpleNamespace
 from typing import (
     Any, Dict, List, Optional, Type, Union
 )
@@ -161,23 +163,40 @@ def clean_for_serialization(obj):
     #    obj._argo_index = None
     #if hasattr(obj, '_argopy_fetcher'):
     #    obj._argopy_fetcher = None
-        
-    # Nettoyer fsspec
-    if hasattr(obj.params, 'fs') and hasattr(obj.params.fs, '_session'):
-        try:
-            if hasattr(obj.params.fs._session, 'close'):
-                obj.params.fs._session.close()
-        except:
-            pass
-        obj.params.fs = None
+    if isinstance(obj, SimpleNamespace):
+        # Nettoyer fsspec
+        if hasattr(obj, 'fs') and hasattr(obj.fs, '_session'):
+            try:
+                if hasattr(obj.fs._session, 'close'):
+                    obj.fs._session.close()
+            except:
+                pass
+            obj.fs = None
 
-    # Nettoyer dataset_processor
-    if hasattr(obj.params, 'dataset_processor'):
-        #try:
-        #    obj.params.dataset_processor.close()
-        #except:
-        #    pass
-        obj.params.dataset_processor = None
+        # Nettoyer dataset_processor
+        if hasattr(obj, 'dataset_processor'):
+            #try:
+            #    obj.params.dataset_processor.close()
+            #except:
+            #    pass
+            obj.dataset_processor = None
+    else:
+        # Nettoyer fsspec
+        if hasattr(obj.params, 'fs') and hasattr(obj.params.fs, '_session'):
+            try:
+                if hasattr(obj.params.fs._session, 'close'):
+                    obj.params.fs._session.close()
+            except:
+                pass
+            obj.params.fs = None
+
+        # Nettoyer dataset_processor
+        if hasattr(obj.params, 'dataset_processor'):
+            #try:
+            #    obj.params.dataset_processor.close()
+            #except:
+            #    pass
+            obj.params.dataset_processor = None
     return obj
 
 class BaseConnectionManager(ABC):
@@ -260,7 +279,7 @@ class BaseConnectionManager(ABC):
             return self.open_local(local_path)
         except Exception as exc:
             logger.warning(f"Failed to open file: {path}. Error: {repr(exc)}")
-            raise
+            return None
 
     def open_local(
         self,
@@ -509,7 +528,7 @@ class BaseConnectionManager(ABC):
             if class_name == "CMEMSManager":
                 manager = manager_class(
                     connection_params, call_list_files=False,
-                    do_logging=False,
+                    do_logging=True,
                 )
             else:
                 manager = manager_class(
@@ -709,60 +728,6 @@ class CMEMSManager(BaseConnectionManager):
             self._list_files = self.list_files()
 
 
-    def get_credentials(self):
-        """Get CMEMS credentials.
-
-        Return:
-            (dict): CMEMS credentials
-        """
-        with open(self.params.cmems_credentials_path, "rb") as f:
-            lines = f.readlines()
-        credentials = {}
-        for line in lines:
-            key, value = line.strip().split("=")
-            credentials[key] = value
-        return credentials
-
-    def get_username(self):
-        """Get CMEMS username.
-
-        Return:
-            (str): CMEMS username
-        """
-        return self.get_credentials()["cmems_username"]
-
-    def get_password(self):
-        """Get CMEMS password.
-
-        Return:
-            (str): CMEMS password
-        """
-        return self.get_credentials()["cmems_password"]
-
-    def get_api_key(self):
-        """Get CMEMS API key.
-
-        Return:
-            (str): CMEMS API key
-        """
-        return self.get_credentials()["cmems_api_key"]
-
-    def get_url(self):
-        """Get CMEMS URL.
-
-        Return:
-            (str): CMEMS URL
-        """
-        return self.get_credentials()["cmems_url"]
-
-    def get_credentials_dict(self):
-        """Get CMEMS credentials as a dictionary.
-
-        Return:
-            (dict): CMEMS credentials
-        """
-        return self.get_credentials()
-
     def cmems_login(self) -> str:
         """Login to Copernicus Marine."""
         logger.info("Logging to Copernicus Marine.")
@@ -772,16 +737,6 @@ class CMEMSManager(BaseConnectionManager):
                 copernicusmarine.login(credentials_file=self.params.cmems_credentials_path)
         except Exception as exc:
             logger.error(f"login to CMEMS failed: {repr(exc)}")
-
-    def cmems_logout(self) -> None:
-        """Logout from Copernicus Marine."""
-        logger.info("Logging out from Copernicus Marine.")
-        try:
-            copernicusmarine.logout()
-        except Exception as exc:
-            logger.error(f"logout from CMEMS failed: {repr(exc)}")
-        return None
-
 
     def remote_file_exists(self, dt: datetime.datetime) -> bool:
         """
@@ -880,16 +835,15 @@ class CMEMSManager(BaseConnectionManager):
                 #maximum_longitude=self.params.filter_values.get("max_lon"),
                 #minimum_latitude=self.params.filter_values.get("min_lat"),
                 #maximum_latitude=self.params.filter_values.get("max_lat"),
-                # variables=[]
+                # variables=[],
+                #file_format='zarr',
                 credentials_file=self.params.cmems_credentials_path,
             ) 
-            return ds
-            # TODO : get back the remote opening after solving (?) the pickling error
-            # with botocore features
 
+            return ds
         except Exception as e:
             logger.warning(f"Failed to open CMEMS dataset for date : {dt}")
-            # traceback.print_exc()
+            traceback.print_exc()
             return None
 
     @classmethod
@@ -1054,7 +1008,7 @@ class S3WasabiManager(S3Manager):
             extension = Path(path).suffix
             return (path.startswith("s3://")) and (extension == ".zarr" or extension == ".nc")
         except Exception as exc:
-            logger.warning(f"Error in supports check for S3WasabiManager: {repr(exc)}")
+            logger.warning(f"Error in supports check for S3WasabiManager path: {path}")
             traceback.print_exc()
             return False
 

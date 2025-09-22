@@ -1,8 +1,8 @@
 # This file lists variables used in configuring dc2 evaluation 
 ################################# WASABI ###############################
 ##  WASABI credentials
-define: &WASABI_KEY 
-define: &WASABI_SECRET_KEY 
+define: &WASABI_KEY "EG5GYSEYI5C20O6IHNEJ"
+define: &WASABI_SECRET_KEY "UsYKO5KBda34z2SomwjdI4aKKWSG3jzZ4KP45oOr"
 
 ############################# GENERAL DC PARAMETERS ###################################
 
@@ -17,8 +17,8 @@ max_cache_files: 1000  # max files to store (older files are deleted)
 
 ############################# PARALLELIZATION ###################################
 
-batch_size: 16
-n_parallel_workers: 8
+batch_size: 64
+n_parallel_workers: 5
 nthreads_per_worker: 4
 memory_limit_per_worker: "6GB"
 ############################# DATA FILTERS ###################################
@@ -28,7 +28,7 @@ start_time: "2024-01-04"
 #start_time: "2023-12-25"
 #start_time: "2022-12-15"
 ## end time
-end_time: "2024-01-15"
+end_time: "2024-01-12"
 #end_time: "2024-03-15"
 #end_time: "2025-01-15"
 

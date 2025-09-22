@@ -1,15 +1,14 @@
 
 from pathlib import Path
+import traceback
 from typing import Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
 import xarray as xr
 
-import pyinterp
-
-import pyinterp.backends.xarray
 from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
+from scipy.interpolate import RegularGridInterpolator
 
 from dctools.data.coordinates import (
     GEO_STD_COORDS
@@ -118,7 +117,6 @@ def interpolate_scipy(
         raise ValueError(f"Unknown mode {output_mode}")
 
     return ds_out
-
 
 
 def apply_over_time_depth(
@@ -341,28 +339,28 @@ def interpolate_dataset(
 
 def scipy_bilinear(data2d: np.ndarray, lat_src, lon_src, target_lat, target_lon, batch_size=100):
     """Memory-efficient bilinear interpolation using scipy, processed by rows."""
-    from scipy.interpolate import RegularGridInterpolator
-    import numpy as np
 
     # Ensure numpy arrays
-    data_np = np.asarray(data2d, dtype=np.float64)
-    lat_src = np.asarray(lat_src, dtype=np.float64)
-    lon_src = np.asarray(lon_src, dtype=np.float64)
-    target_lat = np.asarray(target_lat, dtype=np.float64)
-    target_lon = np.asarray(target_lon, dtype=np.float64)
-
+    try:
+        data2d = np.asarray(data2d, dtype=np.float64)
+        lat_src = np.asarray(lat_src, dtype=np.float64)
+        lon_src = np.asarray(lon_src, dtype=np.float64)
+        target_lat = np.asarray(target_lat, dtype=np.float64)
+        target_lon = np.asarray(target_lon, dtype=np.float64)
+    except Exception as e:
+        traceback.print_exc()
     # Fix shape if needed
-    if data_np.shape == (len(lon_src), len(lat_src)):
-        data_np = data_np.T
-    elif data_np.shape != (len(lat_src), len(lon_src)):
-        if data_np.ndim == 1 and data_np.size == len(lat_src) * len(lon_src):
-            data_np = data_np.reshape(len(lat_src), len(lon_src))
+    if data2d.shape == (len(lon_src), len(lat_src)):
+        data2d = data2d.T
+    elif data2d.shape != (len(lat_src), len(lon_src)):
+        if data2d.ndim == 1 and data2d.size == len(lat_src) * len(lon_src):
+            data2d = data2d.reshape(len(lat_src), len(lon_src))
         else:
-            raise ValueError(f"Cannot match data shape {data_np.shape}")
+            raise ValueError(f"Cannot match data shape {data2d.shape}")
 
     # Interpolator
     interpolator = RegularGridInterpolator(
-        (lat_src, lon_src), data_np,
+        (lat_src, lon_src), data2d,
         method="linear", bounds_error=False, fill_value=np.nan
     )
 
