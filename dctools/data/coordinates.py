@@ -171,6 +171,11 @@ VARIABLES_ALIASES = {
         "standard_names": ["surface_temperature"],
         "aliases": ["Ts"]
     },
+    # AMSR2 variables
+    "siconc": {
+        "standard_names": ["sea_ice_area_fraction"],
+        "aliases": ["siconc", "sea_icea_area_fraction"]
+    },
 }
 
 GEO_STD_COORDS = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
