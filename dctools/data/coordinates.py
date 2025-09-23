@@ -21,7 +21,7 @@ COORD_ALIASES = {
     "x": {"x", "xc", "x_center", "easting", "projection_x_coordinate", "grid_xt", "i"},
     "y": {"y", "yc", "y_center", "northing", "projection_y_coordinate", "grid_yt", "j"},
     "depth": {
-        "depth", "z", "lev", "level", "bottom",
+        "depth", "lev", "level", "bottom", # "z" # z also used by `siconc`
         "deptht", "isodepth",
         # "pres", "pres_adjusted",   # for argo data (pressure = depth)
     },
@@ -135,7 +135,8 @@ VARIABLES_ALIASES = {
     },
     "depth": {
         "standard_names": ["depth"],
-        "aliases": ["depth", "z", "lev", "level", "bottom", "deptht", "isodepth", "data_01__depth_or_elevation", "data_01__altitude"]
+        "aliases": ["depth", "lev", "level", "bottom", "deptht", "isodepth", "data_01__depth_or_elevation", "data_01__altitude"]
+        # NOTE: Removed "z" from aliases as it is already used by `siconc`
     },
     # Polar coordinates (EPSG:3413)
     "x": {
