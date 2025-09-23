@@ -3,7 +3,6 @@
 ##  WASABI credentials
 define: &WASABI_KEY 
 define: &WASABI_SECRET_KEY 
-
 ############################# GENERAL DC PARAMETERS ###################################
 
 n_days_forecast: 2

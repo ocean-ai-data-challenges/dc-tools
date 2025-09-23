@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
 import xarray as xr
+import xesmf as xe
 
 from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
@@ -14,7 +15,7 @@ from dctools.data.coordinates import (
     GEO_STD_COORDS
 )
 # from dctools.processing.distributed import ParallelExecutor
-from dctools.utilities.xarray_utils import rename_coords_and_vars
+from dctools.utilities.xarray_utils import rename_coords_and_vars, create_empty_dataset
 
 
 
@@ -429,7 +430,7 @@ def rename_back(orig_ds, renamed_ds, coord_mapping):
     return ds_final
 
 
-'''def interpolate_xesmf(  # TODO : check and uncomment
+def interpolate_xesmf(  # TODO : check and uncomment
         ds: xr.Dataset, ranges: Dict[str, np.ndarray],
         weights_filepath: Optional[str] = None,
     ) -> xr.Dataset:
@@ -500,4 +501,4 @@ def rename_back(orig_ds, renamed_ds, coord_mapping):
         if not var_std_name:
             var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
 
-    return ds_out'''
+    return ds_out
