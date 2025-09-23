@@ -359,12 +359,14 @@ class DatasetCatalog:
         
         self.gdf = self.gdf.loc[mask]
 
-    def filter_by_region(self, region: geometry.Polygon) -> None:
+    def filter_by_region(self, region: gpd.GeoSeries) -> None:
         """
         Filtre les entrées du GeoDataFrame qui intersectent avec la région donnée.
 
-        Args:
-            region (geometry.Polygon): Un polygone ou une collection de polygones.
+        Parameters
+        ----------
+        region : gpd.GeoSeries
+            A GeoSeries containing a polygon or a collection of polygons.
         """
         if self.gdf.empty:
             logger.warning("GeoDataFrame is empty, nothing to filter")
