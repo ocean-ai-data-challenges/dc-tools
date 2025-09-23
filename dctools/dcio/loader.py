@@ -120,7 +120,7 @@ def open_and_concat_groups(
     return ds_merged
 
 
-class FileLoader:
+'''class FileLoader:
     """Loading NetCDF or Zarr files."""
 
     @staticmethod
@@ -180,8 +180,82 @@ class FileLoader:
                     return ds
         except Exception as exc:
             logger.error(f"Failed to open dataset {path}: {traceback.format_exc()}")
-            raise
+            raise'''
 
+class FileLoader:
+    @staticmethod
+    def open_dataset_auto(
+        path: str,
+        manager: Any,
+        groups: Optional[list[str]] = None,
+        engine: Optional[str] = "netcdf4",
+        dask_safe: bool = True,
+    ) -> xr.Dataset:
+        """
+        Open a dataset automatically, handling both NetCDF and Zarr formats.
+        Optimized for Dask worker compatibility.
+
+        Args:
+            path (str): Path to the dataset (local or remote).
+            manager (Any): Connection manager providing the filesystem.
+            groups (Optional[list[str]]): NetCDF groups to open.
+            engine (Optional[str]): Engine to use for opening files.
+            dask_safe (bool): Whether to use Dask-safe configurations.
+
+        Returns:
+            xr.Dataset: Opened dataset.
+        """
+        try:
+            # Configuration de base pour Dask
+            base_kwargs = {
+                "chunks": 'auto',
+            }
+            
+            if dask_safe:
+                base_kwargs.update({
+                    "lock": False,  # Désactive le verrouillage pour les workers
+                    "cache": False,  # Évite les conflits de cache
+                })
+            
+            # Convertir en string si c'est un objet file-like
+            path_str = str(path)
+            
+            # Vérifier si c'est un fichier Zarr ou NetCDF
+            if path_str.endswith(".zarr"):
+                logger.debug(f"Opening Zarr dataset: {path_str}")
+                zarr_kwargs = {"chunks": "auto"}
+                if hasattr(manager, 'params') and hasattr(manager.params, 'fs'):
+                    return xr.open_zarr(manager.params.fs.get_mapper(path), **zarr_kwargs)
+                else:
+                    return xr.open_zarr(path, **zarr_kwargs)
+            else:
+                # Gérer les objets file-like avec le bon engine
+                if hasattr(path, 'read'):  # C'est un objet file-like
+                    logger.debug(f"Opening NetCDF from file-like object with h5netcdf engine")
+                    # Utiliser h5netcdf pour les objets file-like
+                    base_kwargs["engine"] = "h5netcdf"
+                    return xr.open_dataset(path, **base_kwargs)
+                else:
+                    # C'est un chemin string, utiliser l'engine spécifié
+                    base_kwargs["engine"] = engine
+                    
+                    # Lister les groupes pour les fichiers locaux
+                    group_paths = list_all_group_paths(path_str)
+                    if group_paths:
+                        ds = open_and_concat_groups(
+                            path,
+                            group_paths=group_paths,
+                            dask_safe=dask_safe,
+                            **base_kwargs,
+                        )
+                        return ds
+                    else:
+                        ds = xr.open_dataset(path, **base_kwargs)
+                        return ds
+                        
+        except Exception as exc:
+            logger.error(f"Failed to open dataset {path}: {traceback.format_exc()}")
+            raise
 
     @staticmethod
     def load_dataset(

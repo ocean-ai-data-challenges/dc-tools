@@ -27,17 +27,33 @@ class MultiSourceDatasetManager:
     def __init__(
         self,
         dataset_processor: DatasetProcessor,
-        time_tolerance,
-        max_cache_files,
+        target_dimensions: Dict[str, Tuple[float, float]],
+        time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
+        list_references: list[str] = [],
+        max_cache_files: int = 100,
     ):
         """
         Initialise le gestionnaire multi-sources.
         """
         self.dataset_processor = dataset_processor
+        self.target_dimensions = target_dimensions
         self.datasets = {}
         self.forecast_indexes = {}
         self.time_tolerance = time_tolerance
+        self.list_references = list_references
         self.file_cache = FileCacheManager(max_cache_files)
+
+    def get_keep_variables_dict(self):
+        keep_vars = {}
+        for dataset_alias in self.datasets.keys():
+            keep_vars[dataset_alias] = self.datasets[dataset_alias].keep_variables
+        return keep_vars
+
+    def get_metadata_dict(self):
+        metadata = {}
+        for dataset_alias in self.datasets.keys():
+            metadata[dataset_alias] = self.datasets[dataset_alias].get_global_metadata()
+        return metadata
 
     def add_dataset(self, alias: str, dataset: BaseDataset):
         """
@@ -292,6 +308,23 @@ class MultiSourceDatasetManager:
         )
 
         self.forecast_indexes[alias] = forecast_index
+    
+    def get_config(self):
+        ref_managers = {}
+        ref_catalogs = {}
+        ref_connection_params= {}
+        ref_aliases = [alias for alias in self.list_references if alias in self.datasets]
+        ref_datasets = {}
+        for alias in ref_aliases:
+            ref_datasets[alias] = self.datasets[alias]
+        for ref_alias in ref_aliases:
+            if ref_alias not in self.datasets:
+                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
+                continue
+            ref_managers[ref_alias] = ref_datasets[ref_alias].get_connection_manager()
+            ref_catalogs[ref_alias] = ref_datasets[ref_alias].get_catalog()
+            ref_connection_params[ref_alias] = ref_datasets[ref_alias].get_connection_config()
+        return ref_managers, ref_catalogs, ref_connection_params
 
     def get_dataloader(
         self,
@@ -330,16 +363,8 @@ class MultiSourceDatasetManager:
             ref_datasets[ref_alias] = self.datasets[ref_alias]
 
         pred_manager = pred_dataset.get_connection_manager()
-        ref_managers = {}
-        ref_catalogs = {}
-        ref_connection_params= {}
-        for ref_alias in ref_aliases:
-            if ref_alias not in self.datasets:
-                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
-                continue
-            ref_managers[ref_alias] = ref_datasets[ref_alias].get_connection_manager()
-            ref_catalogs[ref_alias] = ref_datasets[ref_alias].get_catalog()
-            ref_connection_params[ref_alias] = ref_datasets[ref_alias].get_connection_config()
+
+        ref_managers, ref_catalogs, ref_connection_params = self.get_config()
 
         pred_catalog = pred_dataset.get_catalog()
         pred_connection_params = pred_dataset.get_connection_config()
@@ -349,24 +374,31 @@ class MultiSourceDatasetManager:
         if forecast_mode:
             # catalog_df = pred_catalog.get_dataframe()
             forecast_index = self.forecast_indexes[pred_alias]
+        dataloader_params = {}
+        keep_vars = self.get_keep_variables_dict()
 
-        return EvaluationDataloader(
-            pred_connection_params=pred_connection_params,
-            ref_connection_params=ref_connection_params,
-            pred_catalog=pred_catalog,
-            ref_catalogs=ref_catalogs,
-            pred_manager=pred_manager,
-            ref_managers=ref_managers,
-            pred_alias=pred_alias,
-            ref_aliases=ref_aliases,
-            batch_size=batch_size,
-            pred_transform=pred_transform,
-            ref_transforms=ref_transforms,
-            forecast_mode=forecast_mode,
-            forecast_index=forecast_index,
-            n_days_forecast=n_days_forecast,
-            time_tolerance=self.time_tolerance,
-        )
+        dataloader_params = {
+            "dataset_processor": self.dataset_processor,
+            "pred_connection_params": pred_connection_params,
+            "ref_connection_params": ref_connection_params,
+            "pred_catalog": pred_catalog,
+            "ref_catalogs": ref_catalogs,
+            "pred_manager": pred_manager,
+            "ref_managers": ref_managers,
+            "pred_alias": pred_alias,
+            "ref_aliases": ref_aliases,
+            "batch_size": batch_size,
+            "pred_transform": pred_transform,
+            "ref_transforms": ref_transforms,
+            "forecast_mode": forecast_mode,
+            "forecast_index": forecast_index,
+            "n_days_forecast": n_days_forecast,
+            "time_tolerance": self.time_tolerance,
+            "target_dimensions" : self.target_dimensions,
+            "keep_variables" : keep_vars,
+            "metadata" : self.get_metadata_dict(),
+        }
+        return EvaluationDataloader(dataloader_params)
 
 
     def get_transform(
@@ -389,7 +421,7 @@ class MultiSourceDatasetManager:
             coord_dict = coord_sys.coordinates
         coords_rename_dict = {v: k for k, v in coord_dict.items()}
         vars_rename_dict= global_metadata.get("variables_rename_dict")
-        keep_vars = global_metadata.get("keep_variables")
+        keep_vars = self.datasets[dataset_alias].keep_variables  # global_metadata.get("keep_variables")
 
 
         # Configurer les transformations
@@ -400,14 +432,14 @@ class MultiSourceDatasetManager:
                 depth_coord_vals = kwargs.get("depth_coord_vals", None)
                 transform_std = CustomTransforms(
                     transform_name="standardize_dataset",
-                    dataset_processor=self.dataset_processor,
+                    dataset_processor=None,  # self.dataset_processor, évite des erreurs de sérialisation : le dataset_processor sera affecté depuis les workers
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                     vars_rename_dict=vars_rename_dict,
                 )
                 transform_interp = CustomTransforms(
                     transform_name="glorys_to_glonet",
-                    dataset_processor=self.dataset_processor,
+                    dataset_processor=None,  # self.dataset_processor,
                     depth_coord_vals=depth_coord_vals,
                     interp_ranges=interp_ranges,
                     weights_path=regridder_weights,
@@ -426,7 +458,7 @@ class MultiSourceDatasetManager:
             case "standardize":
                 transform_std = CustomTransforms(
                     transform_name="standardize_dataset",
-                    dataset_processor=self.dataset_processor,
+                    dataset_processor=None,  # self.dataset_processor,
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                     vars_rename_dict=vars_rename_dict,
@@ -440,14 +472,14 @@ class MultiSourceDatasetManager:
             case "standardize_add_coords":
                 transform_standardize = CustomTransforms(
                     transform_name="standardize_dataset",
-                    dataset_processor=self.dataset_processor,
+                    dataset_processor=None,  # self.dataset_processor,
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                     vars_rename_dict=vars_rename_dict,
                 )
                 transform_add_coords = CustomTransforms(
                     transform_name="add_spatial_coords",
-                    dataset_processor=self.dataset_processor,
+                    dataset_processor=None,  # self.dataset_processor,
                     list_vars=keep_vars,
                     coords_rename_dict=coords_rename_dict,
                 )

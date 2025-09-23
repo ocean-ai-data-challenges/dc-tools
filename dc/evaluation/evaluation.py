@@ -17,17 +17,19 @@ from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
 from shapely import geometry
 
+from dctools.data.coordinates import get_standardized_var_name
 from dctools.data.datasets.dataset import get_dataset_from_config
 from dctools.data.datasets.dataloader import EvaluationDataloader
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 
 from dctools.metrics.evaluator import Evaluator
 from dctools.metrics.metrics import MetricComputer
+from dctools.metrics.oceanbench_metrics import get_variable_alias
 # from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.init_dask import setup_dask
 from dctools.data.coordinates import (
-    RANGES_GLONET,
-    GLONET_DEPTH_VALS,
+    TARGET_DIM_RANGES,
+    TARGET_DEPTH_VALS,
 )
 from dctools.utilities.misc_utils import (
     make_serializable,
@@ -58,9 +60,10 @@ class DC2Evaluation:
         ))
         memory_limit_per_worker = self.args.memory_limit_per_worker
         n_parallel_workers = self.args.n_parallel_workers
+        nthreads_per_worker = self.args.nthreads_per_worker
         self.dataset_processor = DatasetProcessor(
             distributed=True, n_workers=n_parallel_workers,
-            threads_per_worker=1,
+            threads_per_worker=nthreads_per_worker,
             memory_limit=memory_limit_per_worker
         )
 
@@ -91,9 +94,9 @@ class DC2Evaluation:
                 transforms_dict["glorys"] = dataset_manager.get_transform(
                     "standardize_glorys",
                     dataset_alias="glorys",
-                    interp_ranges=RANGES_GLONET,
+                    interp_ranges=TARGET_DIM_RANGES,
                     weights_path=self.args.regridder_weights,
-                    depth_coord_vals=GLONET_DEPTH_VALS,
+                    depth_coord_vals=TARGET_DEPTH_VALS,
                 )
             else:
                 transforms_dict[alias] = dataset_manager.get_transform(
@@ -117,24 +120,24 @@ class DC2Evaluation:
             if batch[0]["ref_data"]:
                 assert isinstance(batch[0]["ref_data"], str)
 
-    def setup_dataset_manager(self) -> None:
+    def setup_dataset_manager(self, list_all_references: list[str]) -> None:
 
         manager = MultiSourceDatasetManager(
             dataset_processor=self.dataset_processor,
+            target_dimensions=TARGET_DIM_RANGES,
             time_tolerance=pd.Timedelta(hours=self.args.delta_time),
+            list_references=list_all_references,
             max_cache_files=self.args.max_cache_files,
         )
         datasets = {}
         for source in sorted(self.args.sources, key=lambda x: x["dataset"], reverse=True):
             source_name = source['dataset']
-            if source_name not in self.all_datasets: # or source_name == "SST_fields":
+            if source_name not in self.all_datasets:
                 continue
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            #if source_name != "glonet" and source_name != "argo_profiles": # and source_name != "swot" and source_name != "jason3":
-            #    continue
-            if source_name == "SSS_fields":
+            if source_name != "glonet" and source_name != "glorys":  # and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
                 continue
             kwargs = {}
             kwargs["source"] = source
@@ -175,7 +178,7 @@ class DC2Evaluation:
     def run_eval(self) -> None:
         """Proceed to evaluation."""
 
-        dataset_manager = self.setup_dataset_manager()
+        dataset_manager = self.setup_dataset_manager( self.all_datasets)
         aliases = dataset_manager.datasets.keys()
 
         dataloaders = {}
@@ -184,11 +187,10 @@ class DC2Evaluation:
         metrics_kwargs = {}
         evaluators = {}
         models_results = {}
-        transforms_dict = self.setup_transforms(dataset_manager, aliases)
+        transforms_dict = self.setup_transforms(dataset_manager, aliases, )
 
         json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
-        for alias in self.dataset_references.keys():   # dataset_manager.datasets.keys():
-            logger.info(f"\n\n=========  SETUP DATASETS FOR CANDIDATE : {alias}  =========")
+        for alias in self.dataset_references.keys():
             dataset_manager.build_forecast_index(
                 alias,
                 init_date=self.args.start_time,
@@ -217,15 +219,28 @@ class DC2Evaluation:
                 metrics_names[ref_alias] = ref_source_dict.get("metrics", ["rmsd"])
                 ref_is_observation = dataset_manager.datasets[ref_alias].get_global_metadata()["is_observation"]
                 pred_eval_vars = dataset_manager.datasets[alias].get_eval_variables()
+                ref_eval_vars = dataset_manager.datasets[ref_alias].get_eval_variables()
+
+                # variables communes
+                common_vars = [get_standardized_var_name(var) for var in pred_eval_vars if var in ref_eval_vars]
+                if not common_vars:
+                    logger.warning("No common variables found between pred_data and ref_data for evaluation.")
+                    continue
+                
+                oceanbench_eval_variables = [
+                    get_variable_alias(var) for var in common_vars
+                ] if common_vars else None
+
                 common_metrics = [metric for metric in metrics_names[alias] if metric in metrics_names[ref_alias]]
                 metrics_kwargs[alias][ref_alias] = {
                     "add_noise": False,
-                    "eval_variables": pred_eval_vars,
+                    #"eval_variables": pred_eval_vars,
                 }
                 if not ref_is_observation:
                     metrics[alias][ref_alias] = [
                         MetricComputer(
-                            dataset_processor=self.dataset_processor,
+                            common_vars,
+                            oceanbench_eval_variables,
                             metric_name=metric,
                             **metrics_kwargs[alias][ref_alias],
                         )
@@ -244,7 +259,8 @@ class DC2Evaluation:
                     }
                     metrics[alias][ref_alias] = [
                         MetricComputer(
-                            dataset_processor=self.dataset_processor,
+                            common_vars,
+                            oceanbench_eval_variables,
                             metric_name=metric,
                             is_class4=True,
                             class4_kwargs=class4_kwargs,
@@ -269,9 +285,11 @@ class DC2Evaluation:
             # self.check_dataloader(dataloaders[alias])
 
             evaluators[alias] = Evaluator(
+                dataset_manager=dataset_manager,
                 metrics=metrics[alias],
                 dataloader=dataloaders[alias],
                 ref_aliases=list_references,
+                dataset_processor=self.dataset_processor,
             )
             logger.info(f"\n\n\n=========  START EVALUATION FOR CANDIDATE : {alias}  =========")
             models_results[alias] = evaluators[alias].evaluate()

@@ -3,30 +3,33 @@
 ##  WASABI credentials
 define: &WASABI_KEY 
 define: &WASABI_SECRET_KEY 
-
 ############################# GENERAL DC PARAMETERS ###################################
 
 n_days_forecast: 2
 n_days_interval: 7
 
 delta_time: 12   # delta time (hours) when matching observation data
-max_samples: 
+max_samples: 5
 max_cache_files: 1000  # max files to store (older files are deleted)
 
 
 
 ############################# PARALLELIZATION ###################################
 
-batch_size: 32
-n_parallel_workers: 10
+batch_size: 64
+n_parallel_workers: 5
+nthreads_per_worker: 4
 memory_limit_per_worker: "6GB"
 ############################# DATA FILTERS ###################################
 
 ## start time
-start_time: "2023-01-01"
+start_time: "2024-01-04"
+#start_time: "2023-12-25"
+#start_time: "2022-12-15"
 ## end time
-end_time: "2025-01-01"
-#end_time: "2024-02-13"
+end_time: "2024-01-12"
+#end_time: "2024-03-15"
+#end_time: "2025-01-15"
 
 
 # Target region coordinates
@@ -120,14 +123,16 @@ sources:  # lists all datasets used in the DC
     url: 
     file_pattern: "**/*.nc"
     keep_variables:
+      - "LATITUDE"
+      - "LONGITUDE"
+      - "TIME"
       - "PSAL"
-      - "PSAL_QC"
-      - "PRES"
-      - "PRES"
-      - "PRES_QC"
+      #- "PSAL_QC"
+      #- "PRES"
+      #- "PRES_QC"
       - "TEMP"
-      - "TEMP_QC"
-      - "TIME_QC"
+      #- "TEMP_QC"
+      #- "TIME_QC"
     
     eval_variables:
       - "PSAL"  # Utiliser les variables ajustées

@@ -8,7 +8,7 @@ import os
 import pickle
 import psutil
 from types import SimpleNamespace
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set, Union
 
 import copy
 from cartopy import crs as ccrs
@@ -23,6 +23,9 @@ import pandas as pd
 from shapely.geometry import mapping, Polygon, base as shapely_base
 import weakref
 import xarray as xr
+
+from dask.distributed import get_worker
+import os
 
 
 def get_dates_from_startdate(start_date: str, ndays: int) -> List[str]:
@@ -315,26 +318,6 @@ def find_unpicklable_objects(obj, path=""):
         return [(path, type(obj), str(e))]
 
 
-def debug_serialization(your_object):
-    """Debug la sérialisation d'un objet."""
-
-    print(f"🔍 Testing serialization of {type(your_object)}")
-    
-    # Test avec different serializers
-    for serializer_name, serializer in [("pickle", pickle), ("dill", dill)]:
-        try:
-            serializer.dumps(your_object)
-            print(f"{serializer_name}: OK")
-        except Exception as e:
-            print(f"{serializer_name}: {e}")
-            
-            # Analyse détaillée pour pickle
-            if serializer_name == "pickle":
-                problematic = find_unpicklable_objects(your_object)
-                for path, obj_type, error in problematic:
-                    print(f"        {path}: {obj_type} - {error}")
-                
-
 def log_memory(stage):
     process = psutil.Process(os.getpid())
     mem_mb = process.memory_info().rss / 1e6
@@ -357,218 +340,57 @@ def ensure_timestamp(date_input):
         return pd.to_datetime(date_input)
 
 
-
-def deep_copy_object(obj: Any, visited: Set[int] = None, max_depth: int = 50, current_depth: int = 0) -> Any:
-    """
-    Copie récursive générique d'un objet avec gestion des références circulaires
-    et des objets non-sérialisables.
+def deep_copy_object(obj: Any, skip_list: Optional[List[Union[str, type]]] = None) -> Any:
+    """Version simplifiée qui gère mieux les types spéciaux."""
+    if skip_list is None:
+        skip_list = []
     
-    Args:
-        obj: Objet à copier
-        visited: Set des IDs d'objets déjà visités (évite les références circulaires)
-        max_depth: Profondeur maximale de récursion
-        current_depth: Profondeur actuelle
-        
-    Returns:
-        Copie de l'objet ou l'objet original si non-copiable
-    """
-    if visited is None:
-        visited = set()
+    # Types primitifs
+    if obj is None or isinstance(obj, (str, int, float, bool, bytes, type)):
+        return obj
     
-    # Protection contre la récursion infinie
-    if current_depth > max_depth:
-        logger.warning(f"Max depth {max_depth} reached, returning original object")
-        return obj
-
-    # Types primitis et immuables : retour direct (jamais de gestion de circularité)
-    if obj is None or isinstance(obj, (str, int, float, bool, bytes, type(None), type, tuple)):
-        return obj
-
-    # Types non-copiables - retour direct
-    if isinstance(obj, (weakref.ReferenceType, weakref.CallableProxyType, weakref.ProxyType)):
-        logger.debug(f"Skipping non-copyable type: {type(obj)}")
-        return obj
-
-    # Types distribués non-copiables
-    obj_type_name = type(obj).__name__
-    if any(name in obj_type_name for name in ['PooledRPCCall', 'Future', 'Worker', 'Client', 'Cluster']):
-        logger.debug(f"Skipping distributed type: {obj_type_name}")
-        return obj
-
-    # Gestion des références circulaires (seulement pour les objets mutables complexes)
-    obj_id = id(obj)
-    if obj_id in visited:
-        logger.debug(f"Circular reference detected for {type(obj)}, returning original")
-        return obj
-
-    # Ajouter à visited seulement pour les objets mutables qui peuvent avoir des cycles
-    # Ne pas ajouter les types primitifs, enums, ou objets built-in partagés
-    should_track = not isinstance(obj, (
-        str, int, float, bool, bytes, type(None), type, tuple,  # Primitifs
-        # Ajout d'autres types qui ne doivent pas être trackés
-    )) and not hasattr(obj, '__module__') or (
-        hasattr(obj, '__module__') and obj.__module__ not in ('builtins', 'enum')
-    )
-    
-    if should_track:
-        visited.add(obj_id)
-    
-    try:
-        # Types collection standards
-        if isinstance(obj, list):
-            copied_items = [deep_copy_object(item, visited, max_depth, current_depth + 1) for item in obj]
-            return copied_items
-        
-        if isinstance(obj, tuple):
-            copied_items = [deep_copy_object(item, visited, max_depth, current_depth + 1) for item in obj]
-            return tuple(copied_items)
-        
-        if isinstance(obj, dict):
-            copied_dict = {}
-            for key, value in obj.items():
-                copied_key = deep_copy_object(key, visited, max_depth, current_depth + 1)
-                copied_value = deep_copy_object(value, visited, max_depth, current_depth + 1)
-                copied_dict[copied_key] = copied_value
-            return copied_dict
-        
-        if isinstance(obj, set):
-            copied_items = {deep_copy_object(item, visited, max_depth, current_depth + 1) for item in obj}
-            return copied_items
-
-        # Types spéciaux connus
-        if isinstance(obj, SimpleNamespace):
-            copied_vars = deep_copy_object(vars(obj), visited, max_depth, current_depth + 1)
-            return SimpleNamespace(**copied_vars)
-
-        # Test de sérialisabilité avec pickle
-        try:
-            # Si l'objet est sérialisable avec pickle, utiliser copy.deepcopy
-            pickle.dumps(obj)
-            return copy.deepcopy(obj)
-        except:
-            # Si pickle échoue, essayer dill
-            try:
-                dill.dumps(obj)
-                return dill.loads(dill.dumps(obj))
-            except:
-                pass
-
-        # Copie manuelle pour objets complexes
-        return _manual_deep_copy(obj, visited, max_depth, current_depth)
-        
-    except Exception as e:
-        logger.warning(f"Failed to copy object of type {type(obj)}: {e}")
-        return obj  # Retourner l'objet original en cas d'échec
-    
-    finally:
-        # Nettoyer visited seulement si on est au niveau racine
-        if current_depth == 0:
-            visited.clear()
-
-
-def _manual_deep_copy(obj: Any, visited: Set[int], max_depth: int, current_depth: int) -> Any:
-    """
-    Copie manuelle d'un objet complexe en analysant ses attributs.
-    """
+    # Vérifier skip_list
     obj_type = type(obj)
-    obj_type_name = obj_type.__name__
-
-    # Types non-copiables spéciaux
-    if obj_type in (weakref.ReferenceType, weakref.CallableProxyType, weakref.ProxyType):
-        logger.debug(f"Cannot copy weakref type {obj_type}, returning original")
+    if obj_type in skip_list or obj_type.__name__ in skip_list:
         return obj
-
-    # Types distribués et système non-copiables
-    non_copyable_patterns = [
-        'PooledRPCCall', 'Future', 'Worker', 'Client', 'Cluster', 
-        'Thread', 'Lock', 'Event', 'Queue', 'Pool'
-    ]
-    if any(pattern in obj_type_name for pattern in non_copyable_patterns):
-        logger.debug(f"Cannot copy system/distributed type {obj_type_name}, returning original")
-        return obj
-
-    # Enum types - retourner tel quel
-    if hasattr(obj, '__module__') and 'enum' in str(type(obj).__bases__):
-        logger.debug(f"Enum type detected: {obj_type_name}, returning original")
-        return obj
-
-    # Types qui nécessitent des constructeurs spéciaux
-    if hasattr(obj_type, '__getnewargs__') or hasattr(obj_type, '__getnewargs_ex__'):
-        try:
-            return copy.deepcopy(obj)
-        except Exception as e:
-            logger.debug(f"Deepcopy failed for {obj_type}: {e}, returning original")
-            return obj
     
-    try:
-        # Essayer de créer une nouvelle instance
-        try:
-            if hasattr(obj, '__getnewargs__'):
-                args = obj.__getnewargs__()
-                new_obj = obj_type.__new__(obj_type, *args)
-            elif hasattr(obj, '__getnewargs_ex__'):
-                args, kwargs = obj.__getnewargs_ex__()
-                new_obj = obj_type.__new__(obj_type, *args, **kwargs)
-            else:
-                new_obj = obj_type.__new__(obj_type)
-        except TypeError as e:
-            if "__new__" in str(e) and "argument" in str(e):
-                # __new__ nécessite des arguments, essayer le constructeur par défaut
-                try:
-                    new_obj = obj_type()
-                except:
-                    logger.debug(f"Cannot create new instance of {obj_type}, returning original")
-                    return obj
-            else:
-                raise
-
-        # Copier les attributs via __dict__ si disponible
-        if hasattr(obj, '__dict__'):
-            for attr_name, attr_value in obj.__dict__.items():
-                try:
-                    if not attr_name.startswith('_'):  # Éviter les attributs privés par défaut
-                        copied_value = deep_copy_object(
-                            attr_value, visited, max_depth, current_depth + 1
-                        )
-                        setattr(new_obj, attr_name, copied_value)
-                    else:
-                        # Pour les attributs privés, essayer une copie simple
-                        try:
-                            setattr(new_obj, attr_name, copy.copy(attr_value))
-                        except:
-                            setattr(new_obj, attr_name, attr_value)
-                except Exception as e:
-                    logger.debug(f"Failed to copy attribute {attr_name}: {e}")
-                    # En cas d'erreur, garder la valeur originale
-                    try:
-                        setattr(new_obj, attr_name, attr_value)
-                    except:
-                        pass  # Ignorer si on ne peut même pas assigner l'original
-
-        # Copier les attributs via __slots__ si disponible
-        if hasattr(obj, '__slots__'):
-            for slot in obj.__slots__:
-                if hasattr(obj, slot):
-                    attr_value = getattr(obj, slot)
-                    try:
-                        copied_value = deep_copy_object(
-                            attr_value, visited, max_depth, current_depth + 1
-                        )
-                        setattr(new_obj, slot, copied_value)
-                    except Exception as e:
-                        logger.debug(f"Failed to copy slot {slot}: {e}")
-                        try:
-                            setattr(new_obj, slot, attr_value)
-                        except:
-                            pass
-        
-        return new_obj
-        
-    except Exception as e:
-        logger.warning(f"Manual copy failed for {obj_type}: {e}")
+    # Types non-copiables
+    non_copyable_types = ['Client', 'LocalCluster', 'DatasetProcessor', 'ArgoIndex', 'DataFetcher']
+    if any(name in obj_type.__name__ for name in non_copyable_types):
         return obj
-
-
+    
+    # Gestion spéciale en premier pour éviter les erreurs
+    if isinstance(obj, SimpleNamespace):
+        copied_vars = {k: deep_copy_object(v, skip_list) if k not in skip_list else v 
+                      for k, v in vars(obj).items()}
+        return SimpleNamespace(**copied_vars)
+    
+    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Namespace':
+        from argparse import Namespace
+        copied_vars = {k: deep_copy_object(v, skip_list) if k not in skip_list else v 
+                      for k, v in vars(obj).items()}
+        return Namespace(**copied_vars)
+    
+    # Essayer pickle d'abord
+    try:
+        pickle.dumps(obj)
+        return copy.deepcopy(obj)
+    except:
+        pass
+    
+    # Collections standards
+    if isinstance(obj, list):
+        return [deep_copy_object(item, skip_list) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(deep_copy_object(item, skip_list) for item in obj)
+    elif isinstance(obj, dict):
+        return {k: deep_copy_object(v, skip_list) if k not in skip_list else v 
+                for k, v in obj.items()}
+    elif isinstance(obj, set):
+        return {deep_copy_object(item, skip_list) for item in obj}
+    
+    # Fallback : retourner l'original
+    return obj
 
 def get_active_workers_count():
     """Retourne le nombre de workers Dask actifs."""
@@ -609,3 +431,58 @@ def get_current_worker_id():
     except Exception as e:
         return {'error': f"Not running in worker context: {e}"}
 
+
+def show_worker_info():
+    """Fonction exécutée sur un worker Dask."""
+    try:
+        # Récupérer le worker actuel
+        worker = get_worker()
+        
+        # Informations sur le worker
+        worker_id = worker.id
+        worker_address = worker.address
+        worker_name = getattr(worker, 'name', 'unknown')
+        process_id = os.getpid()
+        
+        print(f"Worker ID: {worker_id}")
+        print(f"Worker Name: {worker_name}")
+        print(f"Worker Address: {worker_address}")
+        print(f"Process ID: {process_id}")
+        
+    except ValueError as e:
+        # Pas dans un contexte de worker Dask
+        print(f"Not running in worker context: {e}")
+        return f"Not in worker (PID: {os.getpid()})"
+
+
+def find_unpicklable_objects(obj, path="root", max_depth=5, visited=None):
+    """
+    Explore récursivement un objet et affiche les sous-objets non picklables avec leur chemin.
+    """
+    if visited is None:
+        visited = set()
+    obj_id = id(obj)
+    if obj_id in visited or max_depth < 0:
+        return
+    visited.add(obj_id)
+    try:
+        pickle.dumps(obj)
+    except Exception as e:
+        print(f"Unpicklable at {path}: {type(obj)} - {e}")
+        # Explorer les attributs __dict__ si possible
+        if hasattr(obj, "__dict__"):
+            for k, v in obj.__dict__.items():
+                find_unpicklable_objects(v, f"{path}.{k}", max_depth-1, visited)
+        # Explorer les items si dict
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                find_unpicklable_objects(v, f"{path}[{repr(k)}]", max_depth-1, visited)
+        # Explorer les éléments si list/tuple/set
+        elif isinstance(obj, (list, tuple, set)):
+            for i, v in enumerate(obj):
+                find_unpicklable_objects(v, f"{path}[{i}]", max_depth-1, visited)
+        # Explorer les slots
+        elif hasattr(obj, "__slots__"):
+            for k in obj.__slots__:
+                v = getattr(obj, k, None)
+                find_unpicklable_objects(v, f"{path}.{k}", max_depth-1, visited)

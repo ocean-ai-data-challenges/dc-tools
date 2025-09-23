@@ -1,30 +1,245 @@
 
+from pathlib import Path
+import traceback
+from typing import Any, Callable, Dict, Optional, Sequence
+
 import numpy as np
 import xarray as xr
+import xesmf as xe
 
-import pyinterp
-
-import pyinterp.backends.xarray
 from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
+from scipy.interpolate import RegularGridInterpolator
 
 from dctools.data.coordinates import (
     GEO_STD_COORDS
 )
 # from dctools.processing.distributed import ParallelExecutor
-from dctools.utilities.xarray_utils import rename_coords_and_vars
+from dctools.utilities.xarray_utils import rename_coords_and_vars, create_empty_dataset
 
+
+
+
+def interpolate_scipy(
+    ds: xr.Dataset,
+    target_grid: Dict[str, Sequence],
+    var_names: Optional[Sequence[str]] = None,
+    depth_name: str = "depth",
+    lat_name: str = "latitude",
+    lon_name: str = "longitude",
+    tol_depth: float = 1e-3,
+    output_mode: str = "zarr",  # 'zarr'|'lazy'|'inmemory'
+    output_path: str = None,
+    zarr_target_chunks: dict = None,
+) -> xr.Dataset:
+    """
+    Applique la fonction callable_fct sur un Dataset en utilisant un maillage cible.
+    Parameters
+    ----------
+    ds: xr.Dataset
+        Dataset d'entrée (doit contenir lat/lon)
+    callable_fct: Callable
+        Fonction à appliquer. Doit avoir la signature:
+            fct(data2d, lat_src, lon_src, target_lat, target_lon, **kwargs)
+        où data2d est une tranche 2D (lat, lon) de la variable.
+    target_grid: Dict[str, Sequence]
+        Dictionnaire avec 'lat' et 'lon' comme clés et les valeurs cibles.
+    var_names: Optional[Sequence[str]]
+        Liste des noms de variables à traiter. Si None, toutes les variables avec lat/lon sont utilisées.
+    depth_name, lat_name, lon_name: str
+        Noms des dimensions dans le Dataset.
+    callable_kwargs: Optional[Dict[str, Any]]
+        Arguments supplémentaires à passer à callable_fct.
+    dask_gufunc_kwargs: Optional[Dict[str, Any]]
+        Arguments supplémentaires pour dask.apply_ufunc.
+    tol_depth: float
+        Tolérance pour la sélection de profondeur.
+    output_mode: str
+        Mode de sortie: 'zarr' pour écrire dans un fichier Zarr, 'lazy' pour un Dataset paresseux, 'inmemory' pour un Dataset en mémoire.
+    output_path: str
+        Chemin du fichier de sortie si output_mode est 'zarr'. Si None, un fichier temporaire est créé.
+    zarr_target_chunks: dict
+        Spécification des chunks pour l'écriture Zarr.
+    Returns
+    -------
+    xr.Dataset
+        Dataset résultant après application de la fonction.
+    """
+    # target grid
+    tgt_lat = np.asarray(target_grid["lat"])
+    tgt_lon = np.asarray(target_grid["lon"])
+
+    # var selection
+    if var_names is None:
+        var_names = [v for v, da in ds.data_vars.items() if lat_name in da.dims and lon_name in da.dims]
+
+    lat_src = np.asarray(ds[lat_name])
+    lon_src = np.asarray(ds[lon_name])
+
+    out_vars = apply_over_time_depth(
+        ds, var_names, depth_name, lat_name, lon_name,
+        lat_src, lon_src, tgt_lat, tgt_lon,
+        #safe_kwargs, dask_gufunc_kwargs,
+        tol_depth=tol_depth,
+    )
+
+    if len(out_vars) == 0:
+        raise RuntimeError("No metrics computed.")
+
+    ds_out = xr.Dataset(out_vars)
+
+    # writing / returning according to mode
+    if output_mode == "zarr":
+        # Utiliser le système de fichiers temporaires
+        if output_path is None:
+            output_path = self.create_temp_file(suffix=".zarr", prefix="pairwise_")
+            logger.info(f"Using temporary file: {output_path}")
+        
+        if zarr_target_chunks is None:
+            zarr_target_chunks = {}
+            for d in ("time", depth_name):
+                if d in ds_out.dims:
+                    zarr_target_chunks[d] = 1
+        ds_out = ds_out.chunk(zarr_target_chunks)
+        outp = Path(output_path)
+        if outp.exists():
+            import shutil; shutil.rmtree(outp)
+        ds_out.to_zarr(output_path, mode="w", consolidated=True)
+        ds_out.close()
+        ds_out = xr.open_zarr(output_path, chunks=zarr_target_chunks)
+
+    elif output_mode == "lazy":
+        pass # return ds_out
+
+    elif output_mode == "inmemory":
+        ds_out = ds_out.compute()
+
+    else:
+        raise ValueError(f"Unknown mode {output_mode}")
+
+    return ds_out
+
+
+def apply_over_time_depth(
+    ds: xr.Dataset,
+    var_names: Sequence[str],
+    depth_name: str,
+    lat_name: str,
+    lon_name: str,
+    lat_src: np.ndarray,
+    lon_src: np.ndarray,
+    tgt_lat: np.ndarray,
+    tgt_lon: np.ndarray,
+    #callable_kwargs: Dict[str, Any],
+    #dask_gufunc_kwargs: Dict[str, Any],
+    tol_depth: float = 1e-3,
+) -> Dict[str, xr.DataArray]:
+    """
+    Generic loop over time/depth that applies a callable either on one or two datasets.
+    Parameters
+    ----------
+    ds: xr.Dataset
+        Dataset d'entrée (doit contenir lat/lon)
+    var_names: Sequence[str]
+        Liste des noms de variables à traiter.
+    depth_name, lat_name, lon_name: str
+        Noms des dimensions dans le Dataset.
+    lat_src, lon_src: np.ndarray
+        Coordonnées source (1D arrays).
+    tgt_lat, tgt_lon: np.ndarray
+        Coordonnées cibles (1D arrays).
+    callable_fct: Callable
+        Fonction à appliquer. Doit avoir la signature:
+            fct(data2d, lat_src, lon_src, target_lat, target_lon, **kwargs)
+        où data2d est une tranche 2D (lat, lon) de la variable.
+    callable_kwargs: Dict[str, Any]
+        Arguments supplémentaires à passer à callable_fct.
+    dask_gufunc_kwargs: Dict[str, Any]
+        Arguments supplémentaires pour dask.apply_ufunc.
+    tol_depth: float
+        Tolérance pour la sélection de profondeur.
+    mode: str
+        "single" pour une seule dataset, "double" pour deux datasets (ds2 requis).
+    ds2: Optional[xr.Dataset]
+        Second dataset si mode="double".
+    Returns
+    -------
+    Dict[str, xr.DataArray]
+        Dictionnaire des variables résultantes après application de la fonction.
+    """
+    out_vars = {}
+
+    for var in var_names:
+        if var not in ds:
+            continue
+
+        da = ds[var]
+        if not {lat_name, lon_name}.issubset(da.dims):
+            continue
+
+        has_time = "time" in da.dims
+        has_depth = depth_name in da.dims
+
+        time_slices_out = []
+        for t in (ds.time.values if has_time else [None]):
+            depth_slices_out = []
+            for z in (ds[depth_name].values if has_depth else [None]):
+                # Sélection
+                sel_kwargs = {}
+                if t is not None:
+                    sel_kwargs["time"] = t
+                if z is not None:
+                    sel_kwargs[depth_name] = z
+
+                da_sel = da.sel(**sel_kwargs, method="nearest")
+
+                if z is not None:
+                    actual_depth = float(da_sel[depth_name].values)
+                    if abs(actual_depth - float(z)) > tol_depth:
+                        continue
+
+                result_array = scipy_bilinear(
+                    da_sel,
+                    lat_src, lon_src,
+                    tgt_lat, tgt_lon,
+                )
+
+                # Convert numpy.ndarray to DataArray
+                da_out = xr.DataArray(
+                    result_array,
+                    dims=[lat_name, lon_name],  # Dimensions des coordonnées de sortie
+                    coords={
+                        lat_name: tgt_lat,
+                        lon_name: tgt_lon
+                    },
+                    attrs=da_sel.attrs.copy(),  # Conserver les attributs de la variable originale
+                    name=da_sel.name
+                )
+                # add time/depth dims if needed
+                if z is not None:
+                    da_out = da_out.expand_dims({depth_name: [actual_depth]})
+                if t is not None:
+                    da_out = da_out.expand_dims({"time": [t]})
+
+                depth_slices_out.append(da_out)
+
+            if len(depth_slices_out) > 0:
+                depth_concat = xr.concat(depth_slices_out, dim=depth_name) if has_depth else depth_slices_out[0]
+                time_slices_out.append(depth_concat)
+
+        if len(time_slices_out) > 0:
+            var_out = xr.concat(time_slices_out, dim="time") if has_time else time_slices_out[0]
+            out_vars[var] = var_out
+
+    return out_vars
 
 
 def interpolate_dataset(
     ds: xr.Dataset, 
     target_grid: dict,
-    dataset_processor: DatasetProcessor,
+    dataset_processor: DatasetProcessor = None,
     weights_filepath: str = None,
     interpolation_lib: str = 'pyinterp', 
-    max_workers: int = None,
-    chunk_strategy: str = 'auto',
-    **kwargs
 ) -> xr.Dataset:
     """
     Interface unifiée qui utilise uniquement la logique scatter avec Dask.
@@ -67,11 +282,18 @@ def interpolate_dataset(
         # ds_out = interpolate_dataset_time_depth_vars(ds, target_grid)
 
         ds_renamed, coord_mapping = rename_to_standard_pyinterp(ds, 'lat', 'lon')
-        ds_renamed = dataset_processor.apply_single(
-            ds_renamed, scipy_bilinear,
-            target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
-            output_mode="zarr",
-        )
+        if dataset_processor is not None:
+            ds_renamed = dataset_processor.apply_single(
+                ds_renamed, scipy_bilinear,
+                target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
+                output_mode="zarr",
+            )
+        else:
+            ds_renamed = interpolate_scipy(
+                ds_renamed,
+                target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
+                output_mode="zarr",
+            )
         ds_interp = rename_back(ds, ds_renamed, coord_mapping)
     #elif interpolation_lib == "xesmf":
     #    if weights_filepath and Path(weights_filepath).is_file():
@@ -118,28 +340,28 @@ def interpolate_dataset(
 
 def scipy_bilinear(data2d: np.ndarray, lat_src, lon_src, target_lat, target_lon, batch_size=100):
     """Memory-efficient bilinear interpolation using scipy, processed by rows."""
-    from scipy.interpolate import RegularGridInterpolator
-    import numpy as np
 
     # Ensure numpy arrays
-    data_np = np.asarray(data2d, dtype=np.float64)
-    lat_src = np.asarray(lat_src, dtype=np.float64)
-    lon_src = np.asarray(lon_src, dtype=np.float64)
-    target_lat = np.asarray(target_lat, dtype=np.float64)
-    target_lon = np.asarray(target_lon, dtype=np.float64)
-
+    try:
+        data2d = np.asarray(data2d, dtype=np.float64)
+        lat_src = np.asarray(lat_src, dtype=np.float64)
+        lon_src = np.asarray(lon_src, dtype=np.float64)
+        target_lat = np.asarray(target_lat, dtype=np.float64)
+        target_lon = np.asarray(target_lon, dtype=np.float64)
+    except Exception as e:
+        traceback.print_exc()
     # Fix shape if needed
-    if data_np.shape == (len(lon_src), len(lat_src)):
-        data_np = data_np.T
-    elif data_np.shape != (len(lat_src), len(lon_src)):
-        if data_np.ndim == 1 and data_np.size == len(lat_src) * len(lon_src):
-            data_np = data_np.reshape(len(lat_src), len(lon_src))
+    if data2d.shape == (len(lon_src), len(lat_src)):
+        data2d = data2d.T
+    elif data2d.shape != (len(lat_src), len(lon_src)):
+        if data2d.ndim == 1 and data2d.size == len(lat_src) * len(lon_src):
+            data2d = data2d.reshape(len(lat_src), len(lon_src))
         else:
-            raise ValueError(f"Cannot match data shape {data_np.shape}")
+            raise ValueError(f"Cannot match data shape {data2d.shape}")
 
     # Interpolator
     interpolator = RegularGridInterpolator(
-        (lat_src, lon_src), data_np,
+        (lat_src, lon_src), data2d,
         method="linear", bounds_error=False, fill_value=np.nan
     )
 
@@ -154,27 +376,6 @@ def scipy_bilinear(data2d: np.ndarray, lat_src, lon_src, target_lat, target_lon,
         points = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
         out[i:i+batch_size, :] = interpolator(points).reshape(len(lat_batch), len(target_lon))
 
-    return out
-
-
-def _pyinterp_2d_block(arr2d, lat_src, lon_src, lat_tgt, lon_tgt):
-    """
-    Interpole bilinéairement une carte 2D (lat x lon) sur (lat_tgt, lon_tgt) avec PyInterp.
-    - arr2d: np.ndarray 2D [lat, lon]
-    - lat_src, lon_src: 1D numpy arrays (coords sources)
-    - lat_tgt, lon_tgt: 1D numpy arrays (coords cibles)
-    Retourne un np.ndarray 2D [lat_tgt, lon_tgt]
-    """
-    # Construire la grille PyInterp à partir d'un DataArray temporaire
-    da_src = xr.DataArray(
-        arr2d,
-        coords={"lat": np.asarray(lat_src), "lon": np.asarray(lon_src)},
-        dims=("lat", "lon")
-    )
-    grid = pyinterp.backends.xarray.Grid2D(da_src)
-
-    xx, yy = np.meshgrid(np.asarray(lon_tgt), np.asarray(lat_tgt))
-    out = grid.bilinear({"lon": xx.ravel(), "lat": yy.ravel()}).reshape(len(lat_tgt), len(lon_tgt))
     return out
 
 def rename_to_standard_pyinterp(ds, lat_name, lon_name):
@@ -229,7 +430,7 @@ def rename_back(orig_ds, renamed_ds, coord_mapping):
     return ds_final
 
 
-'''def interpolate_xesmf(  # TODO : check and uncomment
+def interpolate_xesmf(  # TODO : check and uncomment
         ds: xr.Dataset, ranges: Dict[str, np.ndarray],
         weights_filepath: Optional[str] = None,
     ) -> xr.Dataset:
@@ -300,4 +501,4 @@ def rename_back(orig_ds, renamed_ds, coord_mapping):
         if not var_std_name:
             var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
 
-    return ds_out'''
+    return ds_out

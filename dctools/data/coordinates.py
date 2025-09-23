@@ -176,16 +176,16 @@ GLOBAL_ZONE_COORDINATES = ZoneCoordinates(
 
 LIST_VARS_GLONET = ["thetao", "zos", "uo", "vo", "so", "depth", "lat", "lon", "time"]
 
-GLONET_DEPTH_VALS = [0.494025, 47.37369, 92.32607, 155.8507, 222.4752, 318.1274, 380.213, 
+TARGET_DEPTH_VALS = [0.494025, 47.37369, 92.32607, 155.8507, 222.4752, 318.1274, 380.213, 
         453.9377, 541.0889, 643.5668, 763.3331, 902.3393, 1245.291, 1684.284, 
         2225.078, 3220.82, 3597.032, 3992.484, 4405.224, 4833.291, 5274.784]
 
 GLONET_TIME_VALS = range(0, 10)
 
-RANGES_GLONET = {
+TARGET_DIM_RANGES = {
     "lat": np.arange(-78, 90, 0.25),
     "lon": np.arange(-180, 180, 0.25),
-    "depth": GLONET_DEPTH_VALS,
+    "depth": TARGET_DEPTH_VALS,
     #"time": GLONET_TIME_VALS,
 }
 
@@ -201,6 +201,18 @@ GLONET_ENCODING = {"depth": {"dtype": "float32"},
                    "zos": {"dtype": "float32"},
 """
 
+
+def get_standardized_var_name(name: str):
+
+    for key, config in VARIABLES_ALIASES.items():
+        list_aliases = config["aliases"]
+        if name.lower() in list_aliases:
+            return key
+        if name.lower() == key:
+            return key
+    logger.warning(f"Unknown variable alias. Ignoring variable: {name}.")
+    return None
+    
 
 class CoordinateSystem:
     def __init__(
@@ -352,10 +364,7 @@ class CoordinateSystem:
                         standardized[key] = var_names_lower[alias.lower()]
 
         dims = set(ds.dims)
-        has_lat_dim = "lat" in standardized and standardized["lat"] in dims
-        has_lon_dim = "lon" in standardized and standardized["lon"] in dims
-        has_time_dim = "time" in standardized and standardized["time"] in dims
-        has_depth_dim = "depth" in standardized and standardized["depth"] in dims
+        # has_depth_dim = "depth" in standardized and standardized["depth"] in dims
 
         has_lat = "lat" in standardized
         has_lon = "lon" in standardized
@@ -374,12 +383,12 @@ class CoordinateSystem:
         coord_level = CoordinateSystem.detect_data_level(ds, standardized)
 
         # N'inclure depth dans coordinates que si pertinent
-        coords_out = {}
+        '''coords_out = {}
         for key in std_keys:
             if key in standardized:
                 if key == "depth" and not (has_depth_dim or (coord_level in ["grid_3d", "point_3d"])):
                     continue
-                coords_out[key] = standardized[key]
+                coords_out[key] = standardized[key]'''
 
         crs = ds.attrs.get("crs", None)
         if crs is None:
@@ -387,7 +396,7 @@ class CoordinateSystem:
         return CoordinateSystem(
             coord_type=coord_type,
             coord_level=coord_level,
-            coordinates=coords_out,
+            coordinates=standardized,
             crs=crs,
             # is_observation=is_observation,
         )

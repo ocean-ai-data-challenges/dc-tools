@@ -1,35 +1,26 @@
 
 from abc import ABC, abstractmethod
 import logging
-import tempfile
-import threading
-import time
-import random
+import pickle
 import re
 import traceback
+from types import SimpleNamespace
 from typing import (
-    Any, Callable, Dict, List, Optional, Type, Union
+    Any, Dict, List, Optional, Type, Union
 )
 
-from argopy import ArgoIndex, DataFetcher, IndexFetcher, set_options
+from argopy import DataFetcher, IndexFetcher
+from argopy import set_options as argo_set_options
 from argparse import Namespace
 import copernicusmarine
-import dask
-from dask.distributed import Client, LocalCluster
 import datetime
 
-import geopandas as gpd
+import dask
 from loguru import logger
 import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import psutil
-
-# import random
-# from shapely.geometry import box, Point
-from shapely.geometry import box
-# import string
 import xarray as xr
 
 from dctools.data.connection.config import BaseConnectionConfig
@@ -41,7 +32,7 @@ from dctools.data.coordinates import (
 )
 from dctools.data.coordinates import (
     VARIABLES_ALIASES,
-    GLONET_DEPTH_VALS,
+    TARGET_DEPTH_VALS,
 )
 
 from dctools.data.datasets.dc_catalog import GLOBAL_METADATA
@@ -126,13 +117,29 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
             # Vérifier le type de données
             if np.issubdtype(time_vals.dtype, np.datetime64):
                 # Pour les données temporelles
-                min_val = pd.to_datetime(time_vals.values.min())
-                max_val = pd.to_datetime(time_vals.values.max())
+                # Utiliser les méthodes xarray
+                if time_vals.size == 1:   # nombre total d’éléments
+                    min_val = time_vals.isel(N_POINTS=0).load().item()
+                    max_val = min_val
+                else:
+                    min_val = pd.to_datetime(time_vals.values.min())
+                    max_val = pd.to_datetime(time_vals.values.max())
+                # Conversion seulement si nécessaire
+                if isinstance(min_val, np.datetime64):
+                    min_val = pd.Timestamp(min_val)
+                    max_val = pd.Timestamp(max_val)
+                else:
+                    min_val = pd.to_datetime(min_val)
+                    max_val = pd.to_datetime(max_val)
                 return (min_val, max_val)
             elif np.issubdtype(time_vals.dtype, np.floating) or np.issubdtype(time_vals.dtype, np.integer):
                 # Pour les données numériques
-                min_val = float(time_vals.min().values)
-                max_val = float(time_vals.max().values)
+                if time_vals.size == 1:   # nombre total d’éléments
+                    min_val = time_vals.isel(N_POINTS=0).load().item()
+                    max_val = min_val
+                else:
+                    min_val = float(time_vals.min().values)
+                    max_val = float(time_vals.max().values)
 
                 # Vérifier que les valeurs sont valides
                 if np.isnan(min_val) or np.isnan(max_val):
@@ -145,15 +152,58 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
             logger.debug("No temporal data found in dataset")
             return (None, None)
     except Exception as exc:
-        logger.warning(f"Failed to get time bounds: {repr(exc)}")
+        logger.warning(f"Failed to get time bounds for DS: {ds} : {repr(exc)}")
+        traceback.print_exc()
         return (None, None)
 
+def clean_for_serialization(obj):
+    """Nettoie les objets non-sérialisables avant pickle."""
+    # Fermer/nettoyer les objets argopy
+    #if hasattr(obj, '_argo_index'):
+    #    obj._argo_index = None
+    #if hasattr(obj, '_argopy_fetcher'):
+    #    obj._argopy_fetcher = None
+    if isinstance(obj, SimpleNamespace):
+        # Nettoyer fsspec
+        if hasattr(obj, 'fs') and hasattr(obj.fs, '_session'):
+            try:
+                if hasattr(obj.fs._session, 'close'):
+                    obj.fs._session.close()
+            except:
+                pass
+            obj.fs = None
+
+        # Nettoyer dataset_processor
+        if hasattr(obj, 'dataset_processor'):
+            #try:
+            #    obj.params.dataset_processor.close()
+            #except:
+            #    pass
+            obj.dataset_processor = None
+    else:
+        # Nettoyer fsspec
+        if hasattr(obj.params, 'fs') and hasattr(obj.params.fs, '_session'):
+            try:
+                if hasattr(obj.params.fs._session, 'close'):
+                    obj.params.fs._session.close()
+            except:
+                pass
+            obj.params.fs = None
+
+        # Nettoyer dataset_processor
+        if hasattr(obj.params, 'dataset_processor'):
+            #try:
+            #    obj.params.dataset_processor.close()
+            #except:
+            #    pass
+            obj.params.dataset_processor = None
+    return obj
 
 class BaseConnectionManager(ABC):
     def __init__(
         self, connect_config: BaseConnectionConfig | Namespace,
         call_list_files: bool = True,
-        batch_size: Optional[int] = 64,  # Taille de batch adaptée aux métadonnées
+        batch_size: Optional[int] = 64,
     ):
         self.connect_config = connect_config
         self.batch_size = batch_size
@@ -176,49 +226,6 @@ class BaseConnectionManager(ABC):
             self.params.groups = None
         self.file_cache = self.params.file_cache
         self.dataset_processor = self.params.dataset_processor
-        # self.dask_cluster = self.params.dask_cluster
-
-    def setup_dask(self):
-        """Configuration Dask robuste pour éviter les données perdues."""
-    
-        from dctools.utilities.init_dask import get_optimal_workers, get_optimal_memory_limit
-        num_workers = get_optimal_workers()
-        memory_limit = get_optimal_memory_limit()
-        
-        temp_dir = tempfile.mkdtemp(prefix="dask_", dir="/tmp")
-    
-        # Configuration Dask
-        dask.config.set({
-            'scheduler': 'threads',
-            'temporary-directory': temp_dir,
-            'distributed.scheduler.keep-small-data': True,
-            'distributed.scheduler.work-stealing': False,
-            'distributed.worker.memory.target': 0.6,
-            'distributed.worker.memory.pause': 0.7,
-            'distributed.worker.memory.spill': 0.8,
-            'distributed.worker.memory.terminate': 0.95,
-            'distributed.comm.timeouts.tcp': 300,
-            'distributed.comm.timeouts.connect': 180,
-            'distributed.worker.connections.outgoing': 1,
-            'distributed.worker.connections.incoming': 1,
-            #'array.chunk-size': '256MB',
-            #'array.slicing.split_large_chunks': False,
-        })
-        
-        cluster = LocalCluster(
-            n_workers=num_workers,
-            threads_per_worker=1,
-            memory_limit=memory_limit,
-            processes=False,
-            silence_logs=True,
-            dashboard_address=None,
-            death_timeout=600,
-        )
-        
-        logger.info(
-            f"Dask cluster: {num_workers} workers, {memory_limit} memory, temp_dir: {temp_dir}"
-        )
-        return cluster
 
 
     def adjust_full_day(
@@ -272,7 +279,7 @@ class BaseConnectionManager(ABC):
             return self.open_local(local_path)
         except Exception as exc:
             logger.warning(f"Failed to open file: {path}. Error: {repr(exc)}")
-            raise
+            return None
 
     def open_local(
         self,
@@ -293,7 +300,6 @@ class BaseConnectionManager(ABC):
             return FileLoader.open_dataset_auto(
                 local_path, self,
                 groups=self.params.groups,
-                # dask_safe=True,  # Important pour éviter les deadlocks
             )
         return None
 
@@ -354,32 +360,6 @@ class BaseConnectionManager(ABC):
             return None
         filename = Path(remote_path).name
         return os.path.join(self.params.local_root, filename)
-
-    def _clean_for_serialization(self, obj):
-        """Nettoie les objets non-sérialisables avant pickle."""
-        # Fermer/nettoyer les objets argopy
-        #if hasattr(obj, '_argo_index'):
-        #    obj._argo_index = None
-        #if hasattr(obj, '_argopy_fetcher'):
-        #    obj._argopy_fetcher = None
-            
-        # Nettoyer fsspec
-        if hasattr(obj.params, 'fs') and hasattr(obj.params.fs, '_session'):
-            try:
-                if hasattr(obj.params.fs._session, 'close'):
-                    obj.params.fs._session.close()
-            except:
-                pass
-            obj.params.fs = None
-
-        # Nettoyer dataset_processor
-        if hasattr(obj.params, 'dataset_processor'):
-            #try:
-            #    obj.params.dataset_processor.close()
-            #except:
-            #    pass
-            obj.params.dataset_processor = None
-        return obj
 
     def get_global_metadata(self) -> Dict[str, Any]:
         """
@@ -539,11 +519,7 @@ class BaseConnectionManager(ABC):
             "S3Manager": S3Manager,
             "LocalConnectionManager": LocalConnectionManager,
         }
-        try:
-            # Supprimer les logs "INFO" des workers Dask
-            logging.getLogger("distributed.worker").setLevel(logging.WARNING)
-            logging.getLogger("netCDF4").setLevel(logging.WARNING)
-            
+        try:            
             # Récupérer la classe depuis le registre
             if class_name not in CLASS_REGISTRY:
                 raise ValueError(f"Unknown class name: {class_name}")
@@ -552,7 +528,7 @@ class BaseConnectionManager(ABC):
             if class_name == "CMEMSManager":
                 manager = manager_class(
                     connection_params, call_list_files=False,
-                    do_logging=False,
+                    do_logging=True,
                 )
             else:
                 manager = manager_class(
@@ -647,6 +623,10 @@ class BaseConnectionManager(ABC):
                 res["time"] = f"{int(np.median(diffs))}s"
         return res
 
+    def get_config_clean_copy(self):
+        connection_conf = deep_copy_object(self.connect_config)
+        connection_conf = clean_for_serialization(connection_conf)
+        return connection_conf
 
     def list_files_with_metadata(self) -> List[CatalogEntry]:
         """
@@ -661,19 +641,11 @@ class BaseConnectionManager(ABC):
         file_list = self._list_files[-limit:]
 
         logger.info(f"Processing {len(file_list)} files with integrated Dask client")
-
         metadata_list = []
-        #dask_cluster = None
-        #dask_client = None
 
         try:
-            # Configuration et création du client Dask
-            #dask_cluster = self.setup_dask()
-            #dask_client = Client(dask_cluster, serializers=['dask'], deserializers=['dask'])
-            #logger.info(f"Dask client created: {dask_client}")
 
-            connection_conf = deep_copy_object(self.connect_config)
-            connection_conf = self._clean_for_serialization(connection_conf)
+            connection_conf = self.get_config_clean_copy()
 
             futures = [
                 self.dataset_processor.client.submit(
@@ -692,79 +664,16 @@ class BaseConnectionManager(ABC):
 
             self.dataset_processor.cleanup_worker_memory()
 
-            # Parallélisation par batch pour contrôler la charge mémoire
-            '''for i in range(0, len(file_list), self.batch_size):
-                batch_files = file_list[i:i + self.batch_size]
-                logger.info(
-                    f"Processing metadata batch {i//self.batch_size + 1}/{(len(file_list)-1)//self.batch_size + 1}"
-                )
-
-                # Créer les tâches pour ce batch
-                delayed_tasks = [
-                    dask.delayed(self.extract_metadata_worker)(
-                        path, self._global_metadata,
-                        self.connect_config,
-                        self.__class__.__name__,
-                    ) for path in batch_files
-                ]
-
-                try:
-                    # Exécuter le batch avec le client
-                    #batch_futures = dask_client.compute(delayed_tasks, sync=False)
-                    #batch_results = dask_client.gather(batch_futures)
-                    batch_results = self.dataset_processor.compute_delayed_tasks(delayed_tasks, sync=False)
-
-                    # Filtrer et ajouter les résultats valides
-                    valid_results = [meta for meta in batch_results if meta is not None]
-                    metadata_list.extend(valid_results)
-
-                    logger.info(f"Batch completed: {len(valid_results)}/{len(batch_files)} files processed")
-
-                    # Nettoyage explicite entre les batches
-                    #del batch_results, batch_futures
-                    # dask_client.run(self._cleanup_worker_memory)
-                    self.dataset_processor.cleanup_worker_memory()
-
-                except Exception as exc:
-                    logger.warning(f"Batch {i//self.batch_size + 1} failed: {exc}")
-                    # Fallback séquentiel pour ce batch
-                    for path in batch_files:
-                        try:
-                            meta = self.extract_metadata(path)
-                            if meta is not None:
-                                metadata_list.append(meta)
-                        except Exception as file_exc:
-                            logger.warning(f"Failed to process {path}: {file_exc}")'''
-
         except Exception as exc:
             logger.error(f"Dask metadata extraction failed: {exc}")
             raise
-
-        '''finally:
-            # Nettoyage du client Dask
-            if dask_cluster is not None:
-                dask_cluster.close()
-            if dask_client is not None:
-                try:
-                    logger.info("Closing Dask client and cluster")
-                    dask_client.close()
-                    if hasattr(dask_client, 'cluster'):
-                        dask_client.cluster.close()
-                except Exception as cleanup_exc:
-                    logger.warning(f"Error during Dask cleanup: {cleanup_exc}")'''
 
         if not metadata_list:
             logger.error("No valid metadata entries were generated.")
             raise ValueError("No valid metadata entries were generated.")
 
         return metadata_list
-                                           
 
-    '''@staticmethod
-    def _cleanup_worker_memory():
-        """Fonction de nettoyage à exécuter sur chaque worker."""
-        import gc
-        gc.collect()'''
 
     @classmethod
     @abstractmethod
@@ -819,60 +728,6 @@ class CMEMSManager(BaseConnectionManager):
             self._list_files = self.list_files()
 
 
-    def get_credentials(self):
-        """Get CMEMS credentials.
-
-        Return:
-            (dict): CMEMS credentials
-        """
-        with open(self.params.cmems_credentials_path, "rb") as f:
-            lines = f.readlines()
-        credentials = {}
-        for line in lines:
-            key, value = line.strip().split("=")
-            credentials[key] = value
-        return credentials
-
-    def get_username(self):
-        """Get CMEMS username.
-
-        Return:
-            (str): CMEMS username
-        """
-        return self.get_credentials()["cmems_username"]
-
-    def get_password(self):
-        """Get CMEMS password.
-
-        Return:
-            (str): CMEMS password
-        """
-        return self.get_credentials()["cmems_password"]
-
-    def get_api_key(self):
-        """Get CMEMS API key.
-
-        Return:
-            (str): CMEMS API key
-        """
-        return self.get_credentials()["cmems_api_key"]
-
-    def get_url(self):
-        """Get CMEMS URL.
-
-        Return:
-            (str): CMEMS URL
-        """
-        return self.get_credentials()["cmems_url"]
-
-    def get_credentials_dict(self):
-        """Get CMEMS credentials as a dictionary.
-
-        Return:
-            (dict): CMEMS credentials
-        """
-        return self.get_credentials()
-
     def cmems_login(self) -> str:
         """Login to Copernicus Marine."""
         logger.info("Logging to Copernicus Marine.")
@@ -882,16 +737,6 @@ class CMEMSManager(BaseConnectionManager):
                 copernicusmarine.login(credentials_file=self.params.cmems_credentials_path)
         except Exception as exc:
             logger.error(f"login to CMEMS failed: {repr(exc)}")
-
-    def cmems_logout(self) -> None:
-        """Logout from Copernicus Marine."""
-        logger.info("Logging out from Copernicus Marine.")
-        try:
-            copernicusmarine.logout()
-        except Exception as exc:
-            logger.error(f"logout from CMEMS failed: {repr(exc)}")
-        return None
-
 
     def remote_file_exists(self, dt: datetime.datetime) -> bool:
         """
@@ -990,16 +835,15 @@ class CMEMSManager(BaseConnectionManager):
                 #maximum_longitude=self.params.filter_values.get("max_lon"),
                 #minimum_latitude=self.params.filter_values.get("min_lat"),
                 #maximum_latitude=self.params.filter_values.get("max_lat"),
-                # variables=[]
+                # variables=[],
+                #file_format='zarr',
                 credentials_file=self.params.cmems_credentials_path,
             ) 
-            return ds
-            # TODO : get back the remote opening after solving (?) the pickling error
-            # with botocore features
 
+            return ds
         except Exception as e:
             logger.warning(f"Failed to open CMEMS dataset for date : {dt}")
-            # traceback.print_exc()
+            traceback.print_exc()
             return None
 
     @classmethod
@@ -1160,8 +1004,13 @@ class S3WasabiManager(S3Manager):
 
     @classmethod
     def supports(cls, path: str) -> bool:
-        extension = Path(path).suffix
-        return path.startswith("s3://") and extension == ".zarr"
+        try:
+            extension = Path(path).suffix
+            return (path.startswith("s3://")) and (extension == ".zarr" or extension == ".nc")
+        except Exception as exc:
+            logger.warning(f"Error in supports check for S3WasabiManager path: {path}")
+            traceback.print_exc()
+            return False
 
     def open_remote(
         self,
@@ -1261,7 +1110,7 @@ class ArgoManager(BaseConnectionManager):
         lat_range: Optional[tuple[float, float]] = (-90, 90),
         lon_step: Optional[float] = 1.0,
         lat_step: Optional[float] = 1.0,
-        depth_values: Optional[List[float]] = GLONET_DEPTH_VALS,
+        depth_values: Optional[List[float]] = TARGET_DEPTH_VALS,
         time_step_days: Optional[int] = 1,
         custom_cache: Optional[str] = None,
         batch_size: Optional[int] = 10,
@@ -1269,9 +1118,14 @@ class ArgoManager(BaseConnectionManager):
         argo_index: Optional[Any] = None,
     ):
         self.batch_size = batch_size
+
+        self.idx_fetcher = IndexFetcher(src="gdac", mode="research")
+        self.backup_idx_fetcher = IndexFetcher(src="erddap", mode="research")
         if custom_cache is not None:
-            set_options(cachedir=custom_cache)
-        self.argo_loader = DataFetcher()
+            argo_set_options(cachedir=custom_cache)  # Cache local
+
+        self.argo_loader = DataFetcher(src="gdac", mode="research")
+        self.backup_argo_loader = DataFetcher(src="erddap", mode="research")
         self.lon_range = lon_range
         self.lat_range = lat_range
         self.lon_step = lon_step
@@ -1279,7 +1133,7 @@ class ArgoManager(BaseConnectionManager):
         self.depth_values = depth_values
         self.time_step_days = time_step_days
 
-        super().__init__(connect_config, call_list_files=False)  # Appeler l'initialisation de la classe parente
+        super().__init__(connect_config, call_list_files=False)
         # Charger l'index
         self.argo_index = argo_index
         if argo_index is None:
@@ -1289,14 +1143,9 @@ class ArgoManager(BaseConnectionManager):
             self._list_files = self.list_files()
 
     def _load_index_once(self):
-        """Load ARGO index using modern argopy API with proper initialization."""
+        """Load ARGO index using argopy API with proper initialization."""
         # Chargement de l'index ARGO
-        from argopy import set_options
-        set_options(
-            src="erddap",  # Source par défaut
-            mode="standard",  # Mode standard
-            cachedir=os.path.expanduser("~/.cache/argopy"),  # Cache local
-        )
+
         # Période basée sur les filtres si disponibles
         if not hasattr(self, 'start_time') or not hasattr(self, 'end_time'):
             self.start_time = self.params.filter_values.get("start_time")
@@ -1311,29 +1160,116 @@ class ArgoManager(BaseConnectionManager):
             f"Fetching ARGO index for region lat{self.lat_range}, lon{self.lon_range}, {start_date_str} to {end_date_str}"
         )
         try:
-            idx_fetcher = IndexFetcher(src="erddap", mode="standard")
-            # Utiliser des chunks plus petits
             region_box = [
                 self.lon_range[0], self.lon_range[1],  # longitude min/max
                 self.lat_range[0], self.lat_range[1],  # latitude min/max
                 start_date_str, end_date_str           # dates en format string
             ]
-            self.argo_index = idx_fetcher.region(
+            self.argo_index = self.idx_fetcher.region(
                 region_box,
             ).to_dataframe()
             # Normalisation des timestamps
             self.argo_index['date'] = pd.to_datetime(self.argo_index['date']).dt.floor("min")
         
-            logger.info(f"Loaded ARGO index via ERDDAP region with {len(self.argo_index)} profiles")
+            logger.info(f"Loaded ARGO index region with {len(self.argo_index)} profiles")
             return
             
-        except Exception as erddap_error:
-            logger.warning(f"ERDDAP regional index loading failed: {erddap_error}")
+        except Exception as argo_error:
+            logger.warning(f"ARGO index loading failed: {argo_error}")
+            traceback.print_exc()
+            logger.warning(f"trying backup argo server")
+            try:
+                self.argo_index =  self.idx_fetcher.region(
+                    region_box,
+                ).to_dataframe()
+                # Normalisation des timestamps
+                self.argo_index['date'] = pd.to_datetime(self.argo_index['date']).dt.floor("min")
+            
+                logger.info(f"Loaded ARGO index region with {len(self.argo_index)} profiles")
+                return
+            except Exception as backup_error:
+                logger.warning(f"Backup ARGO index loading also failed: {backup_error}")
+                traceback.print_exc()
+                self.argo_index = pd.DataFrame()  # Empty DataFrame
+                return
 
+    def get_argo_index(self):
+        return self.argo_index
 
     @classmethod
     def supports(cls, path: str) -> bool:
         return True
+
+
+    @staticmethod
+    def filter_argo_profile_by_time(
+        ds: xr.Dataset,
+        tmin: pd.Timestamp,
+        tmax: pd.Timestamp,
+        time_var_candidates=("TIME", "JULD", "time"),
+        point_dim_candidates=("N_POINTS", "n_points", "points", "obs"),
+    ) -> xr.Dataset:
+        """
+        Filter an ARGO profile dataset by a time interval [tmin, tmax].
+
+        Works for both:
+        - Standard profiles (single timestamp for the whole cycle)
+        - Trajectory-type profiles (time attached to each observation point)
+
+        Parameters
+        ----------
+        ds : xr.Dataset
+            ARGO profile dataset opened with argopy or xarray.
+        tmin, tmax : pandas.Timestamp
+            Time window for filtering.
+        time_var_candidates : tuple[str], optional
+            Possible names of the time variable.
+        point_dim_candidates : tuple[str], optional
+            Possible names of the point dimension.
+
+        Returns
+        -------
+        xr.Dataset
+            Filtered dataset containing only points within the time window.
+        """
+        # Find the time variable
+        time_var = None
+        for cand in time_var_candidates:
+            if cand in ds:
+                time_var = cand
+                break
+            if cand in ds.coords:
+                time_var = cand
+                break
+        if time_var is None:
+            raise ValueError("No valid time variable found in dataset")
+
+        times = pd.to_datetime(ds[time_var].values)
+
+        # Case 1: trajectory-like dataset with N_POINTS dimension
+        point_dim = None
+        for cand in point_dim_candidates:
+            if cand in ds.dims:
+                point_dim = cand
+                break
+
+        if point_dim is not None and times.shape[0] == ds.sizes[point_dim]:
+            mask = (times >= tmin) & (times <= tmax)
+            ds_filtered = ds.isel({point_dim: mask})
+
+        # Case 2: profile dataset with scalar or 1D time
+        else:
+            if times.ndim == 0 or len(times) == 1:
+                if tmin <= times[0] <= tmax:
+                    ds_filtered = ds
+                else:
+                    ds_filtered = ds.isel({list(ds.dims)[0]: slice(0, 0)})  # empty slice
+            else:
+                # fallback: filter on "time" dimension
+                ds_filtered = ds.sel(time=slice(tmin, tmax))
+
+        return ds_filtered
+
 
     @staticmethod
     def _extract_argo_metadata(
@@ -1343,7 +1279,8 @@ class ArgoManager(BaseConnectionManager):
         argo_index: Any,
     ) -> Optional[CatalogEntry]:
         """Version pour worker Dask - ARGO."""
-        try:         
+        try:
+            logger.debug(f"Process ARGO item: {path}")
             # Recréer le manager
             manager = ArgoManager(
                 connection_params, call_list_files=False, argo_index=argo_index
@@ -1375,8 +1312,7 @@ class ArgoManager(BaseConnectionManager):
             return metadata
             
         except Exception as exc:
-            # Logger pas disponible dans le worker
-            print(f"ARGO worker error for {path}: {exc}")
+            logger.error(f"ARGO worker error for {path}: {exc}")
             traceback.print_exc()
             return None
 
@@ -1394,7 +1330,7 @@ class ArgoManager(BaseConnectionManager):
         try:
             # Scatter une seule fois les objets volumineux
             connection_conf = deep_copy_object(self.connect_config)
-            connection_conf = self._clean_for_serialization(self.connect_config)
+            connection_conf = clean_for_serialization(self.connect_config)
             scattered_config = self.dataset_processor.scatter_data(
                 connection_conf, broadcast_item=True)
             scattered_metadata = self.dataset_processor.scatter_data(
@@ -1402,15 +1338,14 @@ class ArgoManager(BaseConnectionManager):
             scattered_argo_index = self.dataset_processor.scatter_data(
                 self.argo_index, broadcast_item=True)
             
-
-            futures = [
-                self.dataset_processor.client.submit(
-                    self._extract_argo_metadata,
+            delayed_tasks = [
+                dask.delayed(self._extract_argo_metadata)(
                     start_date, scattered_config, scattered_metadata, scattered_argo_index
                 )
                 for start_date in list_dates
             ]
-            batch_results = self.dataset_processor.client.gather(futures)
+
+            batch_results = self.dataset_processor.compute_delayed_tasks(delayed_tasks)
             valid_results = [meta for meta in batch_results if meta is not None]
             metadata_list.extend(valid_results)
 
@@ -1429,20 +1364,12 @@ class ArgoManager(BaseConnectionManager):
 
         return metadata_list
 
-
-    '''def safe_numeric_conversion(self, series, column_name):
-        """Conversion numérique sécurisée avec diagnostic."""
-        original_count = len(series)
-        converted = pd.to_numeric(series, errors='coerce')
-        nan_count = converted.isna().sum()
-        
-        if nan_count > 0:
-            logger.warning(f"{column_name}: {nan_count}/{original_count} values became NaN")
-            # Montrer les valeurs problématiques
-            problem_values = series[converted.isna()].unique()
-            logger.debug(f"Problematic {column_name} values: {problem_values}")
-
-        return converted'''
+    def extract_cycle(self, filename):
+        # Cherche un pattern du type "_<digits><optional_letter>.nc" à la fin
+        match = re.search(r"_([0-9]{3,4}[A-Z]?)\.nc$", filename)
+        if match:
+            return match.group(1)
+        return None
 
     def list_files(self) -> list[str]:
         """Liste les couples (wmo, cycle) sous forme de string 'wmo:cycle'."""
@@ -1455,10 +1382,6 @@ class ArgoManager(BaseConnectionManager):
         
         start_dt = pd.to_datetime(self.start_time)
         end_dt = pd.to_datetime(self.end_time)
-        
-        # Conversions numériques
-        #self.argo_index['latitude'] = self.safe_numeric_conversion(self.argo_index['latitude'], 'latitude')
-        #self.argo_index['longitude'] = self.safe_numeric_conversion(self.argo_index['longitude'], 'longitude')
 
         # Filtrage temporel et spatial
         filtered = self.argo_index[
@@ -1474,10 +1397,9 @@ class ArgoManager(BaseConnectionManager):
             logger.warning("No ARGO profiles found in requested range")
             return []
 
-        # Extraire le cycle à partir du nom de fichier (3 chiffres avant ".nc")
-        filtered["cycle"] = (
-            filtered["file"].str.extract(r"_(\d{3})\.nc$").astype(float).astype("Int64")
-        )
+        # Extraire le cycle à partir du nom de fichier (3 à 4 caractèress avant ".nc")
+        filtered["cycle"] = filtered["file"].apply(self.extract_cycle)
+        # Pour garder la colonne cycle au format string (pour les cas alphanumériques)
         cycle_na_count = filtered["cycle"].isna().sum()
         wmo_na_count = filtered["wmo"].isna().sum()
         
@@ -1509,8 +1431,8 @@ class ArgoManager(BaseConnectionManager):
         limit = self.params.max_samples if self.params.max_samples else len(couples)
         couples = couples[:limit]
 
-        # Formatter en string "wmo:cycle"
-        couples_str = [f"{int(wmo)}:{int(cycle)}" for wmo, cycle in couples]
+        # Formatter en string "wmo:cycle" / supprimer les cycles "spéciaux"
+        couples_str = [f"{int(wmo)}:{cycle}" for wmo, cycle in couples if len(cycle) == 3]
 
         logger.info(f"Found {len(couples_str)} valid ARGO profiles (formatted as 'wmo:cycle')")
         return couples_str
