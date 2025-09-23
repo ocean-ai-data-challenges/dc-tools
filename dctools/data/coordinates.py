@@ -150,8 +150,27 @@ VARIABLES_ALIASES = {
         "standard_names": ["leadmap"],
         "aliases": ["leadmap"]
     },
-    # IABP
-    # TODO: Add IABP variables
+    # IABP variables
+    "barometric_pressure": { # TODO: check for conflicts with sea_water_pressure
+        "standard_names": ["barometric_pressure"],
+        "aliases": ["bp", "BP"]
+    },
+    "barometric_pressure_tendency": {
+        "standard_names": ["barometric_pressure_tendency"],
+        "aliases": ["bpt", "BPT"]
+    },
+    "air_temperature": {
+        "standard_names": ["air_temperature"],
+        "aliases": ["Ta"]
+    },
+    "hull_temperature": {
+        "standard_names": ["hull_temperature"],
+        "aliases": ["Th"]
+    },
+    "surface_temperature": {
+        "standard_names": ["surface_temperature"],
+        "aliases": ["Ts"]
+    },
 }
 
 GEO_STD_COORDS = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
