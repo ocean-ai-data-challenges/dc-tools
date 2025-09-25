@@ -172,7 +172,7 @@ VARIABLES_ALIASES = {
         "standard_names": ["surface_temperature"],
         "aliases": ["Ts"]
     },
-    # AMSR2 variables
+    # DC3 (AMSR2) variables
     "siconc": {
         "standard_names": ["sea_ice_area_fraction"],
         "aliases": ["siconc", "sea_icea_area_fraction"]

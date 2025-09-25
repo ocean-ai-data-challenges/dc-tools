@@ -119,7 +119,7 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                 # Pour les données temporelles
                 # Utiliser les méthodes xarray
                 if time_vals.size == 1:   # nombre total d’éléments
-                    min_val = time_vals.isel(N_POINTS=0).load().item()
+                    min_val = time_vals.min().load().item()
                     max_val = min_val
                 else:
                     min_val = pd.to_datetime(time_vals.values.min())
@@ -135,7 +135,7 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
             elif np.issubdtype(time_vals.dtype, np.floating) or np.issubdtype(time_vals.dtype, np.integer):
                 # Pour les données numériques
                 if time_vals.size == 1:   # nombre total d’éléments
-                    min_val = time_vals.isel(N_POINTS=0).load().item()
+                    min_val = time_vals.min().load().item()
                     max_val = min_val
                 else:
                     min_val = float(time_vals.min().values)
