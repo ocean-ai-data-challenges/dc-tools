@@ -175,7 +175,7 @@ VARIABLES_ALIASES = {
     # DC3 (AMSR2) variables
     "siconc": {
         "standard_names": ["sea_ice_area_fraction"],
-        "aliases": ["siconc", "sea_icea_area_fraction"]
+        "aliases": ["siconc", "sea_icea_area_fraction", "z"] # "z" used for siconc on AMSR2
     },
 }
 
@@ -430,7 +430,21 @@ class CoordinateSystem:
     def detect_oceanographic_variables(variables: dict) -> dict:
         """
         Detect oceanographic variables in an xarray Dataset based on standard_name and aliases.
-        Returns a dictionary mapping variable type -> actual name in the dataset.
+
+        Parameters
+        ----------
+        variables : dict
+            _description_
+
+        Returns
+        -------
+        dict
+            mapping variable type -> actual name in the dataset.
+
+        Raises
+        ------
+        ValueError
+            _description_
         """
         found = defaultdict(lambda: None)
         try:
