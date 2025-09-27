@@ -70,10 +70,12 @@ patool = "^3.1.3"
 optional = false
 
 [tool.poetry.group.custom.dependencies]
-oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
-xrpatcher = { git = "ssh://git@github.com/jejjohnson/xrpatcher.git", branch = "main" }
-xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
-
+#oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
+#oceanbench = { git = "https://github.com/aitmohandk/oceanbench.git", branch = "main" }
+#xrpatcher = { git = "ssh://git@github.com/jejjohnson/xrpatcher.git", branch = "main" }
+xrpatcher = { git = "https://github.com/jejjohnson/xrpatcher.git", branch = "main" }
+#xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
+xesmf = { git = "https://github.com/pangeo-data/xESMF.git", branch = "master" }
 
 [build-system]
 build-backend = "poetry.core.masonry.api"
