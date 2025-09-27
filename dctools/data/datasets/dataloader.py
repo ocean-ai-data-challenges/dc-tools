@@ -4,7 +4,7 @@
 """Dataloder."""
 
 import traceback
-from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Type, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type, Union
 
 import dask
 import geopandas as gpd
@@ -29,8 +29,6 @@ from dctools.data.connection.connection_manager import (
     GlonetManager,
     S3Manager,
     S3WasabiManager,
-    deep_copy_object,
-    clean_for_serialization,
 )
 from dctools.utilities.xarray_utils import (
     filter_variables, interp_single_argo_profile,
@@ -104,7 +102,6 @@ def add_coords_as_dims(ds: xr.Dataset, coords=("LATITUDE", "LONGITUDE")) -> xr.D
 
 def swath_to_points(
         ds,
-        vars_to_keep=None,
         drop_coords=["num_lines", "num_pixels", "num_nadir"],
         coords_to_keep=None,
     ):  # , drop_missing=True):
@@ -115,8 +112,6 @@ def swath_to_points(
     ----------
     ds : xr.Dataset
         Input dataset, possibly with swath-like dimensions (e.g. num_lines, num_pixels).
-    vars_to_keep : list of str, optional
-        Variables to retain. Default = all data variables.
     drop_missing : bool, default True
         If True, drop points where *all* variables are NaN or _FillValue.
 
@@ -126,7 +121,7 @@ def swath_to_points(
         Flattened dataset with dimension 'n_points'.
         Includes time, lat, lon if present.
     """
-    # Identify swath dimensions
+
     if "n_points" in ds.dims:
         # Already flat
         return ds
@@ -135,12 +130,8 @@ def swath_to_points(
     if not swath_dims:
         raise ValueError("No swath dims found (already 1D or unexpected format).")
 
-    # Select variables
-    if vars_to_keep is None:
-        vars_to_keep = list(ds.data_vars)
-
     # Stack swath dims into 'n_points'
-    ds_flat = ds[vars_to_keep].stack(n_points=swath_dims)
+    ds_flat = ds.stack(n_points=swath_dims)
 
     # Sauvegarder les coordonnées importantes avant suppression
     coords_to_reassign = {}
@@ -202,9 +193,9 @@ def add_time_dim(
     # Standardize time_coord to pandas datetime
     time_values = pd.to_datetime(getattr(time_coord, "values", time_coord))
 
+    # Case: time per point
+    unique_times = pd.unique(time_values)
     if points_dim in getattr(time_coord, "dims", []):
-        # Case: time per point
-        unique_times = pd.unique(time_values)
 
         if len(unique_times) == 1:
             # Only one unique time → add as scalar dimension if not already there
@@ -213,9 +204,13 @@ def add_time_dim(
             else:
                 return ds.expand_dims(time=[unique_times[0]])
         else:
-            # Per-point times: assign as coordinate
-            ds = ds.assign_coords(time=(points_dim, time_values))
-            return ds
+            try:
+                # Per-point times: assign as coordinate
+                ds = ds.assign_coords(time=(points_dim, time_values))
+                return ds
+            except Exception as e:
+                logger.error(f"Error assigning time coordinates: {e}")
+                return ds
 
     else:
         # Case: time scalar or broadcastable
@@ -231,14 +226,11 @@ def add_time_dim(
         else:
             return ds.expand_dims(time=[time_val])
 
-
-def preprocess_one_npoints(
-    source, is_swath, n_points_dims, filtered_df, idx,
-    connection_params, class_name, alias,
-    keep_variables_list, target_dimensions,
-    coordinates,
-    argo_index=None, time_bounds=None,
-):
+def connection_manager_from_config(
+    connection_params: BaseConnectionConfig,
+    class_name: Optional[str] = None,
+    argo_index: Optional[Union[pd.DataFrame, xr.Dataset]] = None,
+) -> BaseConnectionManager:
     if class_name not in CLASS_REGISTRY:
         raise ValueError(f"Unknown class name: {class_name}")
   
@@ -258,23 +250,41 @@ def preprocess_one_npoints(
         manager = manager_class(
             connection_params, call_list_files=False
         )
+    return manager
+
+
+def filter_by_time(df: pd.DataFrame, t0: pd.Timestamp, t1: pd.Timestamp) -> pd.DataFrame:
+    """
+    Filtre le DataFrame pour ne garder que les entrées dont l'intervalle
+    [date_start, date_end] recoupe [t0, t1].
+    """
+    df_copy = df.copy()
+    # Conversion en datetime si besoin
+    date_start = pd.to_datetime(df_copy["date_start"])
+    date_end = pd.to_datetime(df_copy["date_end"])
+    mask = (date_start <= t1) & (date_end >= t0)
+    return df_copy[mask]
+
+
+def preprocess_one_npoints(
+    source, is_swath, n_points_dims, filtered_df, idx,
+    alias, open_func,
+    keep_variables_list, target_dimensions,
+    coordinates,
+    time_bounds=None,
+):
     try:
         # open dataset
         if alias is not None:
-            ds = manager.open(source, alias)
+            ds = open_func(source, alias)
         else:
-            ds = manager.open(source)
+            ds = open_func(source)
         if ds is None:
             return None
 
-        ds_float32 = ds.copy()
-        for var in ds_float32.data_vars:
-            if np.issubdtype(ds_float32[var].dtype, np.floating):
-                ds_float32[var] = ds_float32[var].astype(np.float32)
-
         # ds = ds.argo.interp_std_levels(target_dimensions['depth']) # inutilisable sur un profil unique
         # ds = ds.argo.filter_qc()   # inutile dans le mode "research" d'argopy
-        ds_filtered = filter_variables(ds_float32, keep_variables_list)
+        # ds_filtered = filter_variables(ds, keep_variables_list)
 
         if is_swath:
             coords_to_keep = [
@@ -284,29 +294,29 @@ def preprocess_one_npoints(
                 coordinates.get('lon', None),
             ]
             coords_to_keep = list(filter(lambda x: x is not None, coords_to_keep))
-            ds_filtered = swath_to_points(
-                ds_filtered, vars_to_keep=keep_variables_list,
+            ds = swath_to_points(
+                ds,
                 coords_to_keep=list(coordinates.keys()),
             )
 
         # Chercher une coordonnée/variable temporelle
         time_name = coordinates['time']
-        if time_name in ds_filtered.variables and time_name not in ds_filtered.coords:
-            ds_filtered = ds_filtered.set_coords(time_name)
-        time_coord = ds_filtered.coords[time_name]
+        if time_name in ds.variables and time_name not in ds.coords:
+            ds = ds.set_coords(time_name)
 
         # Filtrer les valeurs de temps (si profil ARGO)
-        if class_name == "ArgoManager" and time_bounds is not None:
-            ds_filtered = manager.filter_argo_profile_by_time(
-                ds_filtered,
+        if alias == "argo_profiles":
+            ds = ArgoManager.filter_argo_profile_by_time(
+                ds,
                 tmin=time_bounds[0],
                 tmax=time_bounds[1],
             )
+        time_coord = ds.coords[time_name]
 
         # Identifier la dimension de points
         points_dim = None
         for dim_name in n_points_dims:
-            if dim_name in ds_filtered.dims:
+            if dim_name in ds.dims:
                 points_dim = dim_name
                 break
         
@@ -315,10 +325,10 @@ def preprocess_one_npoints(
             return None
 
         ds_with_time = add_time_dim(
-            ds_filtered, filtered_df, points_dim=points_dim, time_coord=time_coord, idx=idx
+            ds, filtered_df, points_dim=points_dim, time_coord=time_coord, idx=idx
         )
 
-        if coordinates.get('depth', None) in list(ds_with_time.coords):
+        if coordinates.get('depth', None) in list(ds_with_time.coords) and alias == "argo_profiles":
             # sous-échantilloner depth aux valeurs de la grille cible (par interpolation)
             ds_interp = interp_single_argo_profile(ds_with_time, target_dimensions['depth'])
         else:
@@ -372,95 +382,97 @@ class EvaluationDataloader:
 
     def _generate_batches(self) -> Generator[List[Dict[str, Any]], None, None]:
         batch = []
-        for _, row in self.forecast_index.iterrows():
-            # Vérifier si on a suffisamment de données pour ce forecast
-            forecast_reference_time = row["forecast_reference_time"]
-            lead_time = row["lead_time"]
-            valid_time = row["valid_time"]
-
-            # Calculer la fin du forecast complet (dernier lead time)
-            max_lead_time = self.n_days_forecast - 1  # 0-indexé
-            if hasattr(self, 'lead_time_unit') and self.lead_time_unit == "hours":
-                forecast_end_time = forecast_reference_time + pd.Timedelta(hours=max_lead_time)
-            else:
-                forecast_end_time = forecast_reference_time + pd.Timedelta(days=max_lead_time)
-            
+        try:
             # Vérifier que le forecast complet est dans la plage de données disponibles
             for ref_alias in self.ref_aliases:
-                if ref_alias:
-                    ref_catalog = self.ref_catalogs[ref_alias]
-                    ref_df = ref_catalog.get_dataframe()
-                    
-                    # Trouver la date de fin maximale disponible dans les données de référence
-                    max_available_date = ref_df["date_end"].max()
-                    
-                    # Si la fin du forecast dépasse les données disponibles, ignorer cette entrée
-                    if forecast_end_time > max_available_date:
-                        logger.debug(f"Skipping forecast starting at {forecast_reference_time}: "
-                                f"forecast ends at {forecast_end_time} but data only available until {max_available_date}")
-                        continue
-                
-                entry = {
-                    "forecast_reference_time": forecast_reference_time,
-                    "lead_time": lead_time,
-                    "valid_time": valid_time,
-                    "pred_data": row["file"],
-                    "ref_data": None,
-                    "ref_alias": ref_alias,
-                    "pred_coords": self.pred_coords,
-                    "ref_coords": self.ref_coords[ref_alias] if ref_alias else None,
-                }
-                
-                if ref_alias:
-                    ref_catalog = self.ref_catalogs[ref_alias]
-                    coord_system = ref_catalog.get_global_metadata().get("coord_system")
-                    is_observation = coord_system.is_observation_dataset() if coord_system else False
-                    
-                    if is_observation:
-                        # Logique observation : filtrer le catalogue d'observation sur l'intervalle temporel du forecast_index
-                        obs_time_interval = (valid_time, valid_time)
-                        keep_vars = self.keep_variables[ref_alias]
-                        rename_vars_dict = self.metadata[ref_alias]['variables_dict']
-                        keep_vars = [rename_vars_dict[var] for var in keep_vars if var in rename_vars_dict]
-                        target_dimensions = self.target_dimensions
-                        ref_entries = ObservationDataViewer(
-                            ref_catalog.get_dataframe(),
-                            self.open_ref, ref_alias,
-                            keep_vars, target_dimensions, self.metadata[ref_alias],
-                            self.time_tolerance,
-                            dataset_processor=getattr(self, 'dataset_processor', None),
-                        )
-                        ref_manager = self.ref_managers[ref_alias]
-                        ref_manager_class_name = ref_manager.__class__.__name__
-                        connection_params = ref_manager.get_config_clean_copy()
-                        filtered_obs = ref_entries.preprocess_datasets(
-                            ref_manager,
-                            ref_manager_class_name,
-                            connection_params,
-                            obs_time_interval,
-                        )
+                logger.info(f"=============  PROCESSING REFERENCE ALIAS: {ref_alias} ==============")
+                for _, row in self.forecast_index.iterrows():
+                    # Vérifier si on a suffisamment de données pour ce forecast
+                    forecast_reference_time = row["forecast_reference_time"]
+                    lead_time = row["lead_time"]
+                    valid_time = row["valid_time"]
 
-                        if filtered_obs is None:
-                            continue
-                        entry["ref_data"] = filtered_obs
-                        entry["ref_is_observation"] = True
+                    # Calculer la fin du forecast complet (dernier lead time)
+                    max_lead_time = self.n_days_forecast - 1  # 0-indexé
+                    if hasattr(self, 'lead_time_unit') and self.lead_time_unit == "hours":
+                        forecast_end_time = forecast_reference_time + pd.Timedelta(hours=max_lead_time)
                     else:
-                        # Logique gridded : associer le fichier de référence couvrant valid_time
-                        ref_path = self._find_matching_ref(valid_time, ref_alias)
-                        if ref_path is None:
-                            logger.debug(f"No reference data found for valid_time {valid_time}")
-                            continue
-                        entry["ref_data"] = ref_path
-                        entry["ref_is_observation"] = False
-                
-                batch.append(entry)
-                # Adapter la taille de batch selon le mode parallélisation
-                # target_batch_size = self._get_optimal_batch_size()
-                if len(batch) >= self.batch_size:
+                        forecast_end_time = forecast_reference_time + pd.Timedelta(days=max_lead_time)
+
+                    if ref_alias:
+                        ref_catalog = self.ref_catalogs[ref_alias]
+                        ref_df = ref_catalog.get_dataframe()
+                        
+                        # Trouver la date de fin maximale disponible dans les données de référence
+                        max_available_date = ref_df["date_end"].max()
+                        
+                        # Si la fin du forecast dépasse les données disponibles, ignorer cette entrée
+                        if forecast_end_time > max_available_date:
+                            logger.debug(f"Skipping forecast starting at {forecast_reference_time}: "
+                                    f"forecast ends at {forecast_end_time} but data only available until {max_available_date}")
+                            if batch:
+                                yield batch
+                                batch = []
+                            break
+
+                    entry = {
+                        "forecast_reference_time": forecast_reference_time,
+                        "lead_time": lead_time,
+                        "valid_time": valid_time,
+                        "pred_data": row["file"],
+                        "ref_data": None,
+                        "ref_alias": ref_alias,
+                        "pred_coords": self.pred_coords,
+                        "ref_coords": self.ref_coords[ref_alias] if ref_alias else None,
+                    }
+                    
+                    if ref_alias:
+                        ref_catalog = self.ref_catalogs[ref_alias]
+                        coord_system = ref_catalog.get_global_metadata().get("coord_system")
+                        is_observation = coord_system.is_observation_dataset() if coord_system else False
+                        
+                        if is_observation:
+                            # Logique observation : filtrer le catalogue d'observation sur l'intervalle temporel du forecast_index
+                            obs_time_interval = (valid_time, valid_time)
+                            keep_vars = self.keep_variables[ref_alias]
+                            rename_vars_dict = self.metadata[ref_alias]['variables_dict']
+                            keep_vars = [rename_vars_dict[var] for var in keep_vars if var in rename_vars_dict]
+
+                            t0, t1 = obs_time_interval
+                            t0 = t0 - self.time_tolerance
+                            t1 = t1 + self.time_tolerance
+                            time_bounds = (t0, t1)
+
+                            entry["ref_data"] = {
+                                "source": ref_catalog,
+                                "keep_vars": keep_vars,
+                                "target_dimensions": self.target_dimensions,
+                                "metadata": self.metadata[ref_alias],
+                                "time_bounds": time_bounds,
+                            }
+                            entry["ref_is_observation"] = True
+                        else:
+                            # Logique gridded : associer le fichier de référence couvrant valid_time
+                            ref_path = self._find_matching_ref(valid_time, ref_alias)
+                            if ref_path is None:
+                                logger.debug(f"No reference data found for valid_time {valid_time}")
+                                continue
+                            entry["ref_data"] = ref_path
+                            entry["ref_is_observation"] = False
+                            entry["obs_time_interval"] = obs_time_interval
+                    
+                    batch.append(entry)
+                    # Adapter la taille de batch selon le mode parallélisation
+                    # target_batch_size = self._get_optimal_batch_size()
+                    if len(batch) >= self.batch_size:
+                        yield batch
+                        batch = []
+                if batch:  # dernier batch de ref_alias
                     yield batch
                     batch = []
-        if batch:
-            yield batch
+        except Exception as e:
+            logger.error(f"Error generating batches: {e}")
+            traceback.print_exc()
 
 
     def open_pred(self, pred_entry: str) -> xr.Dataset:
@@ -540,7 +552,8 @@ class TorchCompatibleDataloader:
         patches = patcher.extract_patches()
         return torch.tensor(patches)
 
-def concat_with_dim(
+
+def concat_with_dim_delayed(
     datasets: List[xr.Dataset],
     concat_dim: str,
     sort: bool = True,
@@ -561,6 +574,25 @@ def concat_with_dim(
     return result
 
 
+def concat_with_dim(
+    datasets: List[xr.Dataset],
+    concat_dim: str,
+    sort: bool = True,
+):
+    datasets_with_dim = []
+    for i, ds in enumerate(datasets):
+        if concat_dim not in ds.dims:
+                ds = ds.expand_dims({concat_dim: [i]})
+        datasets_with_dim.append(ds)
+
+    result = xr.concat(datasets_with_dim, dim=concat_dim,
+        coords="minimal",
+        compat="override", join="outer"
+    )
+    if sort:
+        result = result.sortby(concat_dim)
+    return result
+
 class ObservationDataViewer:
     def __init__(
         self,
@@ -570,8 +602,10 @@ class ObservationDataViewer:
         keep_vars: List[str],
         target_dimensions: Dict[str, Any],
         dataset_metadata: Any,
-        time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
+        time_bounds: Tuple[pd.Timestamp, pd.Timestamp],
+        # time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
         dataset_processor: Optional[DatasetProcessor] = None,
+        include_geometry: bool = False,
     ):
         """
         Parameters:
@@ -584,11 +618,12 @@ class ObservationDataViewer:
         """
         self.is_metadata = isinstance(source, (pd.DataFrame, gpd.GeoDataFrame))
         self.load_fn = load_fn
-        self.time_tolerance = time_tolerance
+        # self.time_tolerance = time_tolerance
         self.alias = alias
         self.keep_vars = keep_vars
         self.target_dimensions = target_dimensions
         self.dataset_processor = dataset_processor 
+        self.time_bounds = time_bounds
 
         if self.is_metadata:
             if self.load_fn is None:
@@ -597,72 +632,63 @@ class ObservationDataViewer:
         else:
             self.datasets = source if isinstance(source, list) else [source]
         self.coordinates = dataset_metadata['coord_system'].coordinates
+        self.include_geometry = include_geometry
+
 
     def preprocess_datasets(
         self,
-        dataset_manager: Any,
-        class_name: str,
-        connect_config: BaseConnectionConfig,
-        time_interval: tuple
+        dataframe: pd.DataFrame,
+        load_to_memory: bool = False,
     ) -> xr.Dataset:
         """
-        Version qui évite les conflits de dimensions en supprimant les variables num_nadir
-        et ne conserve que les variables océanographiques 2D principales.
+        Preprocess the input DataFrame and single observations files and return an xarray Dataset.
         """
-        connection_params = deep_copy_object(
-            connect_config, skip_list=['dataset_processor', 'fs']
-        )
-        connection_params = clean_for_serialization(connection_params)
-
-        if class_name not in CLASS_REGISTRY:
-            raise ValueError(f"Unknown class name: {class_name}")
-        
-        if class_name == "ArgoManager":
-            argo_index = dataset_manager.get_argo_index()
-            scattered_argo_index = self.dataset_processor.scatter_data(
-                argo_index, broadcast_item=False)
-        else:
-            scattered_argo_index = None
-    
-        t0, t1 = time_interval
-        t0 = t0 - self.time_tolerance
-        t1 = t1 + self.time_tolerance
-        time_bounds = (t0, t1)
-        filtered_df = self.filter_by_time(t0, t1)
-
-        if filtered_df.empty:
-            logger.warning(f"No {self.alias} Data for time interval: {time_interval}")
-            return None
+        # remove "geometry" fields if needed:
+        if not self.include_geometry and "geometry" in dataframe.columns:
+            dataframe = dataframe.drop(columns=["geometry"])
 
         # chargement des fichiers  
-        dataset_paths = [row["path"] for _, row in filtered_df.iterrows()]
+        dataset_paths = [row["path"] for _, row in dataframe.iterrows()]
 
         first_ds = None
         while first_ds is None:
             if self.alias is not None:
-                first_ds = dataset_manager.open(dataset_paths[0], self.alias)
+                first_ds = self.load_fn(dataset_paths[0], self.alias)
             else:
-                first_ds = dataset_manager.open(dataset_paths[0])
+                first_ds = self.load_fn.open(dataset_paths[0])
 
-        swath_dims = {"num_lines", "num_pixels", "num_nadir"}
+        # swath_dims = {"num_lines", "num_pixels", "num_nadir"}
+        reduced_swath_dims = {"num_lines", "num_pixels"}
         n_points_dims = {"n_points", "N_POINTS", "points", "obs"}
     
         # Données avec dimension n_points/N_POINTS uniquement
-        if any(dim in first_ds.dims for dim in n_points_dims) and not swath_dims.issubset(first_ds.dims):            
+        if any(dim in first_ds.dims for dim in n_points_dims) and not reduced_swath_dims.issubset(first_ds.dims):            
             try:
                 # Nettoyer et traiter les datasets
-                delayed_tasks = []
-                for idx, dataset_path in enumerate(dataset_paths):
-                    delayed_tasks.append(dask.delayed(preprocess_one_npoints)(
-                        dataset_path, False, n_points_dims, filtered_df, idx,
-                        connection_params, class_name, self.alias,
-                        self.keep_vars, self.target_dimensions,
-                        self.coordinates,
-                        scattered_argo_index, time_bounds,
-                    ))
-                batch_results = self.dataset_processor.compute_delayed_tasks(
-                    delayed_tasks, sync=False
-                )
+                if self.dataset_processor is not None:
+                    delayed_tasks = []
+                    for idx, dataset_path in enumerate(dataset_paths):
+                        delayed_tasks.append(dask.delayed(preprocess_one_npoints)(
+                            dataset_path, False, n_points_dims, dataframe, idx,
+                            self.alias, self.load_fn,
+                            self.keep_vars, self.target_dimensions,
+                            self.coordinates,
+                            self.time_bounds,
+                        ))
+                    batch_results = self.dataset_processor.compute_delayed_tasks(
+                        delayed_tasks, sync=False
+                    )
+                else:
+                    batch_results = []
+                    for idx, dataset_path in enumerate(dataset_paths):
+                        result = preprocess_one_npoints(
+                            dataset_path, False, n_points_dims, dataframe, idx,
+                            self.alias, self.load_fn,
+                            self.keep_vars, self.target_dimensions,
+                            self.coordinates,
+                            self.time_bounds,
+                        )
+                        batch_results.append(result)
                 cleaned_datasets = [meta for meta in batch_results if meta is not None]
 
                 if not cleaned_datasets:
@@ -693,6 +719,8 @@ class ObservationDataViewer:
                 
                 logger.info(f"Final n_points result: {result.sizes.get('time', 1)} time steps, "
                         f"{len(result.data_vars)} variables")
+                if load_to_memory:
+                    result = result.compute()
                 return result
                 
             except Exception as e:
@@ -701,22 +729,34 @@ class ObservationDataViewer:
                 return None
 
         # Données Swath
-        elif swath_dims.issubset(first_ds.dims):
+        elif reduced_swath_dims.issubset(first_ds.dims):
             logger.info("Swath data detected - reshaping and filtering to n_points")
             
             try:
                 is_swath_data = True
                 # nettoyer les datasets
-                delayed_tasks = []
-                for idx, dataset_path in enumerate(dataset_paths):
-                    delayed_tasks.append(dask.delayed(preprocess_one_npoints)(
-                        dataset_path, is_swath_data, n_points_dims, filtered_df, idx,
-                        connection_params, class_name, self.alias,
-                        self.keep_vars, self.target_dimensions,
-                        self.coordinates,
-                        time_bounds,
-                    ))
-                batch_results = self.dataset_processor.compute_delayed_tasks(delayed_tasks)
+                if self.dataset_processor is not None:
+                    delayed_tasks = []
+                    for idx, dataset_path in enumerate(dataset_paths):
+                        delayed_tasks.append(dask.delayed(preprocess_one_npoints)(
+                            dataset_path, is_swath_data, n_points_dims, dataframe, idx,
+                            self.alias, self.load_fn,
+                            self.keep_vars, self.target_dimensions,
+                            self.coordinates,
+                            self.time_bounds,
+                        ))
+                    batch_results = self.dataset_processor.compute_delayed_tasks(delayed_tasks)
+                else:
+                    batch_results = []
+                    for idx, dataset_path in enumerate(dataset_paths):
+                        result = preprocess_one_npoints(
+                            dataset_path, is_swath_data, n_points_dims, dataframe, idx,
+                            self.alias, self.load_fn,
+                            self.keep_vars, self.target_dimensions,
+                            self.coordinates,
+                            self.time_bounds,
+                        )
+                        batch_results.append(result)
                 cleaned_datasets = [meta for meta in batch_results if meta is not None]
 
                 if not cleaned_datasets:
@@ -761,6 +801,8 @@ class ObservationDataViewer:
                     'processed_datasets': len(compatible_datasets),
                 })
                 
+                if load_to_memory:
+                    result = result.compute()
                 return result
                 
             except Exception as e:
@@ -772,13 +814,15 @@ class ObservationDataViewer:
         elif "time" in first_ds.dims or "time" in first_ds.coords:
             try:
                 if self.alias is not None:
-                    all_datasets = [dataset_manager.open(row["path"], self.alias) for _, row in filtered_df.iterrows()][:5]
+                    all_datasets = [self.load_fn(row["path"], self.alias) for _, row in dataframe.iterrows()]
                 else:
-                    all_datasets = [dataset_manager.open(row["path"]) for _, row in filtered_df.iterrows()]
+                    all_datasets = [self.load_fn(row["path"]) for _, row in dataframe.iterrows()]
                 for idx, ds in enumerate(all_datasets):
                     all_datasets[idx] = filter_variables(ds, self.keep_vars)
                 combined = concat_with_dim(all_datasets, concat_dim="time", sort=True)
-                combined = dask.delayed(combined.sel)(time=slice(t0, t1))
+                # combined = dask.delayed(combined.sel)(time=slice(t0, t1))
+                if load_to_memory:
+                    combined = combined.compute()
                 return combined
             except Exception as e:
                 logger.error(f"Failed to concatenate time series data: {e}")
@@ -788,32 +832,6 @@ class ObservationDataViewer:
         else:
             logger.warning("Unknown data structure, returning first dataset")
             return first_ds
-
-    def filter_by_time(self, t0: pd.Timestamp, t1: pd.Timestamp) -> List[xr.Dataset]:
-        """
-        Returns a list of datasets that fall within the time window.
-        If source is metadata, loads only the required datasets.
-        """
-        
-        # Convertir t0, t1 en datetime64[s] (précision seconde)
-        t0_clean = np.datetime64(pd.Timestamp(t0).floor('s'))
-        t1_clean = np.datetime64(pd.Timestamp(t1).ceil('s'))
-        
-        # Convertir les colonnes DataFrame en datetime64[s] également
-        df_date_start = pd.to_datetime(self.meta_df["date_start"]).dt.floor('s')
-        df_date_end = pd.to_datetime(self.meta_df["date_end"]).dt.floor('s')
-        
-        # Conversion explicite en datetime64[s] pour uniformiser le format
-        df_date_start_clean = df_date_start.values.astype('datetime64[s]')
-        df_date_end_clean = df_date_end.values.astype('datetime64[s]')
-        
-        # Filtrage temporel
-        mask1 = df_date_start_clean <= t1_clean
-        mask2 = df_date_end_clean >= t0_clean
-        combined_mask = mask1 & mask2
-        filtered = self.meta_df[combined_mask]
-
-        return filtered
 
     def filter_by_time_and_region(
         self,

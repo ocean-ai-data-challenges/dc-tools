@@ -96,7 +96,6 @@ class OceanbenchMetrics(DCMetric):
         self,
         eval_variables: Optional[List[str]] = None,
         oceanbench_eval_variables: Optional[List[str]] = None,
-        #dataset_processor: DatasetProcessor,
         is_class4: Optional[bool] = None,
         class4_kwargs: Optional[dict] = None,
         **kwargs: Optional[Dict[str, Any]],
@@ -246,4 +245,3 @@ class OceanbenchMetrics(DCMetric):
             except Exception as exc:
                 logger.error(f"Failed to compute metric {self.metric_name}: {traceback.format_exc()}")
                 raise
-

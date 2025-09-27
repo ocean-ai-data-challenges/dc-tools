@@ -117,5 +117,5 @@ def configure_dask_logging():
         'distributed.worker.memory.pause': 0.95,
         'distributed.worker.memory.terminate': False,
         'logging.distributed': 'error',
-        'logging.distributed.worker': 'error'
+        #'logging.distributed.worker': 'error'
     })

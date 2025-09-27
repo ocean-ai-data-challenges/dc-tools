@@ -18,13 +18,11 @@ class MetricComputer(OceanbenchMetrics):
             self,
             eval_variables: List[str] = None,
             oceanbench_eval_variables: List[str] = None,
-            #dataset_processor: DatasetProcessor,
             is_class4: bool = False,
             class4_kwargs: dict = None,
             **kwargs,
         ):
         super().__init__(
-            #dataset_processor,
             is_class4=is_class4, class4_kwargs=class4_kwargs, **kwargs
         )
         self.is_class4 = is_class4
@@ -51,14 +49,6 @@ class MetricComputer(OceanbenchMetrics):
             logger.warning("Cannot rename SLA")'''
 
         try:
-            # Restriction des variables à celles présentes dans les deux datasets
-            '''pred_vars = set(pred_data.data_vars)
-            ref_vars = set(ref_data.data_vars)
-            common_vars = [v for v in self.eval_variables if v in pred_vars and v in ref_vars]
-            if not common_vars:
-                logger.warning("No common variables found between pred_data and ref_data for evaluation.")
-                return {}
-            self.eval_variables = common_vars'''
             if self.is_class4:
                 # Appel harmonisé pour la classe 4
                 result = self.compute_metric(

@@ -22,7 +22,7 @@ from dctools.data.connection.connection_manager import (
     LocalConnectionManager, S3WasabiManager,
     S3Manager, FTPManager, CMEMSManager, clean_for_serialization,
 )
-from dctools.data.datasets.dataloader import EvaluationDataloader
+from dctools.data.datasets.dataloader import EvaluationDataloader, ObservationDataViewer, filter_by_time
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.metrics import MetricComputer
 from dctools.utilities.misc_utils import deep_copy_object, make_fully_serializable
@@ -56,7 +56,7 @@ def compute_metric(
     model: str,
     list_metrics: list[MetricComputer],
     pred_transform: Callable,
-    ref_transforms: List[Callable],
+    ref_transform: Callable,
     argo_index: Optional[Any] = None,
 ) -> Dict[str, Any]:
     try:
@@ -69,8 +69,6 @@ def compute_metric(
         ref_is_observation = entry.get("ref_is_observation")
         logger.info(f"Process forecast: {forecast_reference_time}, lead time: {lead_time}")
 
-        if ref_transforms and ref_alias in ref_transforms:
-            ref_transform = ref_transforms[ref_alias]
         pred_source = entry["pred_data"]
         ref_source = entry["ref_data"]
     
@@ -158,7 +156,37 @@ def compute_metric(
 
         if ref_source is not None:
             if ref_is_observation:
-                ref_data = ref_source
+                ref_source = entry["ref_data"]
+                raw_ref_df = ref_source["source"]
+                keep_vars = ref_source["keep_vars"]
+                target_dimensions = ref_source["target_dimensions"]
+                time_bounds = ref_source["time_bounds"]
+                metadata = ref_source["metadata"]
+
+                ref_df = raw_ref_df.get_dataframe()
+                t0, t1 = time_bounds
+                ref_df = filter_by_time(ref_df, t0, t1)
+
+                if ref_df.empty:
+                    logger.warning(f"No {ref_alias} Data for time interval: {t0}/{t1}]")
+                    return {
+                        "model": model,
+                        "ref_alias": ref_alias,
+                        "result": None,
+                    }
+
+                ref_raw_data = ObservationDataViewer(
+                    ref_df,
+                    open_ref_func, ref_alias,
+                    keep_vars, target_dimensions, metadata,
+                    time_bounds,
+                    dataset_processor=None,
+                )
+                # load immediately before increasing Dask graph size
+                ref_data = ref_raw_data.preprocess_datasets(
+                    ref_df,
+                    load_to_memory=False,
+                )
             else:
                 if ref_protocol == "cmems":
                     with dask.config.set(scheduler='synchronous'):
@@ -174,7 +202,7 @@ def compute_metric(
                     pred_data = pred_transform(pred_data)
             else:
                 pred_data = pred_transform(pred_data)
-        if ref_data and ref_transform:
+        if ref_data is not None and ref_transform is not None:
             if ref_protocol == "cmems":
                 with dask.config.set(scheduler='synchronous'):
                     ref_data = ref_transform(ref_data)
@@ -292,9 +320,25 @@ class Evaluator:
         """
         try:
             for batch in self.dataloader:
+                pred_alias =self.dataloader.pred_alias
+                ref_alias = batch[0].get("ref_alias")
+                # Extraire les informations nécessaires
+                pred_connection_params = self.dataloader.pred_connection_params
+                ref_connection_params = self.dataloader.ref_connection_params[ref_alias]
+                pred_transform = self.dataloader.pred_transform
+                if self.dataloader.ref_transforms is not None:
+                    ref_transform = self.dataloader.ref_transforms[ref_alias]
+                argo_index = None
+                if hasattr(self.dataloader.ref_managers[ref_alias], 'argo_index'):
+                    argo_index = self.dataloader.ref_managers[ref_alias].get_argo_index()
                 batch_results = self._evaluate_batch(
-                    batch, self.dataloader,
+                    batch, pred_alias, ref_alias,
+                    pred_connection_params, ref_connection_params,
+                    pred_transform, ref_transform,
+                    argo_index=argo_index,
                 )
+                if batch_results is None:
+                    continue
                 serial_results = [make_fully_serializable(res) for res in batch_results if res is not None]
                 self.results.extend(serial_results) 
             return self.results
@@ -302,30 +346,6 @@ class Evaluator:
         except Exception as exc:
             logger.error(f"Evaluation failed: {traceback.format_exc()}")
             raise
-
-    '''def clean_namespace(self, namespace: Namespace) -> Namespace:
-        try:
-            # Crée une copie pour éviter les effets de bord
-            ns = Namespace(**vars(namespace))
-            # remove these from config to avoid serialization issues with Dask
-
-            for key in ['dask_cluster', 'fs', 'dataset_processor']:
-                if hasattr(ns, key):
-                    delattr(ns, key)
-
-                if key == 'fs':
-                    if hasattr(ns.fs.params.fs, '_session'):
-                        try:
-                            if hasattr(ns.fs.params.fs._session, 'close'):
-                                ns.fs.params.fs._session.close()
-                        except:
-                            pass
-                        ns.fs.params.fs = None
-            return ns
-        except Exception as exc:
-            logger.error(f"Error cleaning namespace: {exc}")
-            # Retourne la version originale si erreur
-            return namespace'''
 
     def clean_namespace(self, namespace: Namespace) -> Namespace:
         ns = Namespace(**vars(namespace))
@@ -342,41 +362,36 @@ class Evaluator:
 
     def _evaluate_batch(
         self, batch: List[Dict[str, Any]],
-        dataloader: EvaluationDataloader,
+        pred_alias: str, ref_alias: str,
+        pred_connection_params: Dict[str, Any], ref_connection_params: Dict[str, Any],
+        pred_transform: Any, ref_transform: Any,
+        argo_index: Any = None,
     ) -> List[Dict[str, Any]]:
         delayed_tasks = []
 
-        #cmems_logout
-
-        pred_connection_params = deep_copy_object(
-            dataloader.pred_connection_params, skip_list=['dataset_processor', 'fs']
-        )
-        pred_connection_params = clean_for_serialization(pred_connection_params)
-        pred_connection_params = self.clean_namespace(pred_connection_params) #dataloader.pred_connection_params)
-
-        pred_transform=dataloader.pred_transform
-        ref_transforms = None
-        if dataloader.ref_transforms is not None:
-            ref_transforms = dataloader.ref_transforms
-        if hasattr(pred_transform, 'dataset_processor'):
-            delattr(pred_transform, 'dataset_processor')
-
         ref_alias = batch[0].get("ref_alias")
 
+        pred_connection_params = deep_copy_object(
+            pred_connection_params, skip_list=['dataset_processor', 'fs']
+        )
+        pred_connection_params = clean_for_serialization(pred_connection_params)
+        pred_connection_params = self.clean_namespace(pred_connection_params)
+
+        if hasattr(pred_transform, 'dataset_processor'):
+            delattr(pred_transform, 'dataset_processor')
+        if hasattr(ref_transform, 'dataset_processor'):
+            delattr(ref_transform, 'dataset_processor')
+
         ref_connection_params = deep_copy_object(
-            dataloader.ref_connection_params.get(ref_alias, None), skip_list=['dataset_processor', 'fs']
+            ref_connection_params, skip_list=['dataset_processor', 'fs']
         )
         ref_connection_params = clean_for_serialization(ref_connection_params)
-        ref_connection_params = self.clean_namespace(ref_connection_params) #dataloader.ref_connection_params.get(ref_alias, None))
+        ref_connection_params = self.clean_namespace(ref_connection_params)
 
-
-        argo_index = None
-        if hasattr(dataloader.ref_managers[ref_alias], 'argo_index'):
-            argo_index = dataloader.ref_managers[ref_alias].get_argo_index()
         if argo_index is not None:
             scattered_argo_index = self.dataset_processor.scatter_data(
                 argo_index,
-                broadcast_item = False,
+                broadcast_item = True,
             )
         else:
             scattered_argo_index = None
@@ -387,16 +402,15 @@ class Evaluator:
                     entry,
                     pred_connection_params,
                     ref_connection_params,
-                    dataloader.pred_alias,
+                    pred_alias,
                     self.metrics[ref_alias],
                     pred_transform=pred_transform,
-                    ref_transforms=ref_transforms,
+                    ref_transform=ref_transform,
                     argo_index=scattered_argo_index,
                 ))
 
             batch_results = self.dataset_processor.compute_delayed_tasks(delayed_tasks)
-            valid_results = [meta for meta in batch_results if meta is not None]
-            return valid_results
+            return batch_results
         except Exception as exc:
             logger.error(f"Error processing entry {entry}: {repr(exc)}")
             traceback.print_exc()

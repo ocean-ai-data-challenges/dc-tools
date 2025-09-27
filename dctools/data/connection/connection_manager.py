@@ -41,8 +41,6 @@ from dctools.utilities.misc_utils import (
     ensure_timestamp,
     deep_copy_object,
 )
-# from dctools.dcio.saver import DataSaver
-# from dctools.utilities.init_dask import setup_dask
 
 
 def get_time_bound_values(ds: xr.Dataset) -> tuple:
@@ -156,6 +154,8 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
         traceback.print_exc()
         return (None, None)
 
+
+
 def clean_for_serialization(obj):
     """Nettoie les objets non-sérialisables avant pickle."""
     # Fermer/nettoyer les objets argopy
@@ -165,13 +165,24 @@ def clean_for_serialization(obj):
     #    obj._argopy_fetcher = None
     if isinstance(obj, SimpleNamespace):
         # Nettoyer fsspec
-        if hasattr(obj, 'fs') and hasattr(obj.fs, '_session'):
-            try:
-                if hasattr(obj.fs._session, 'close'):
-                    obj.fs._session.close()
-            except:
-                pass
+        if hasattr(obj, 'fs'):
+            if hasattr(obj.fs, '_session'):
+                try:
+                    if hasattr(obj.fs._session, 'close'):
+                        obj.fs._session.close()
+                except:
+                    pass
             obj.fs = None
+        if hasattr(obj, 'params'):
+            obj_params = obj.params
+            if hasattr(obj_params, 'fs'):
+                if hasattr(obj_params.fs, '_session'):
+                    try:
+                        if hasattr(obj_params.fs._session, 'close'):
+                            obj_params.fs._session.close()
+                    except:
+                        pass
+                obj_params.fs = None
 
         # Nettoyer dataset_processor
         if hasattr(obj, 'dataset_processor'):
@@ -300,6 +311,7 @@ class BaseConnectionManager(ABC):
             return FileLoader.open_dataset_auto(
                 local_path, self,
                 groups=self.params.groups,
+                variables=self.params.keep_variables,
             )
         return None
 
@@ -324,6 +336,7 @@ class BaseConnectionManager(ABC):
             return FileLoader.open_dataset_auto(
                 path, self,
                 groups=self.params.groups,
+                variables=self.params.keep_variables,
             )
         except Exception as exc:
             logger.warning(
@@ -481,7 +494,7 @@ class BaseConnectionManager(ABC):
                     path=path,
                     date_start=date_start,
                     date_end=date_end,
-                    variables=self._global_metadata.get("variables"),
+                    # variables=self._global_metadata.get("variables"),
                     geometry=ds_region,
                 )
         except Exception as exc:
@@ -561,7 +574,7 @@ class BaseConnectionManager(ABC):
                 path=path,
                 date_start=date_start,
                 date_end=date_end,
-                variables=global_metadata.get("variables"),
+                # variables=global_metadata.get("variables"),
                 geometry=ds_region,
             )
         except Exception as exc:
@@ -624,7 +637,7 @@ class BaseConnectionManager(ABC):
         return res
 
     def get_config_clean_copy(self):
-        connection_conf = deep_copy_object(self.connect_config)
+        connection_conf = deep_copy_object(self.connect_config.params)
         connection_conf = clean_for_serialization(connection_conf)
         return connection_conf
 
@@ -992,7 +1005,8 @@ class S3Manager(BaseConnectionManager):
                 return None
             return(
                 FileLoader.open_dataset_auto(
-                    path, self, groups=self.params.groups
+                    path, self, groups=self.params.groups,
+                    variables=self.params.keep_variables,
                 )
             )
         except Exception as exc:
@@ -1032,7 +1046,8 @@ class S3WasabiManager(S3Manager):
                 return None
             return(
                 FileLoader.open_dataset_auto(
-                    path, self, groups=self.params.groups
+                    path, self, groups=self.params.groups,
+                    variables=self.params.keep_variables,
                 )
             )
         except Exception as exc:
@@ -1306,7 +1321,7 @@ class ArgoManager(BaseConnectionManager):
                 path=str(path),
                 date_start=ensure_timestamp(date_start),
                 date_end=ensure_timestamp(date_end) + pd.Timedelta(minutes=1),
-                variables=variables,
+                # variables=variables,
                 geometry=geometry,
             )
             return metadata
@@ -1427,7 +1442,7 @@ class ArgoManager(BaseConnectionManager):
             logger.error(f"Error creating couples even after NA removal: {e}")
             return []
 
-        # Limite si besoin
+        # Limiter le nombre de profils
         limit = self.params.max_samples if self.params.max_samples else len(couples)
         couples = couples[:limit]
 

@@ -1,8 +1,6 @@
 
-from copy import deepcopy
-import profile
-import traceback
-from typing import Any, Dict, List, Optional, Tuple
+
+from typing import Any, Dict, List, Optional
 
 import ast
 # import kornia
@@ -15,12 +13,8 @@ from torchvision import transforms
 import xarray as xr
 from pyproj import Transformer
 
-from dctools.data.coordinates import (
-    LIST_VARS_GLONET,
-)
 # from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.xarray_utils import (
-    rename_coordinates,
     rename_coords_and_vars,
     subset_variables,
     assign_coordinate,
@@ -40,6 +34,8 @@ def detect_and_normalize_longitude_system(
     # Vérifier que la coordonnée longitude existe
     if lon_name not in ds.dims and lon_name not in ds.coords and lon_name not in ds.data_vars:
         logger.warning(f"Longitude coordinate '{lon_name}' not found in dataset")
+        from dctools.utilities.xarray_utils import preview_display_dataset
+        preview_display_dataset(ds)
         return ds
     
     # Analyser les plages de longitude
@@ -93,10 +89,7 @@ def _convert_longitude_to_180(ds: xr.Dataset, lon_name: str) -> xr.Dataset:
     Returns:
         xr.Dataset: Dataset avec longitudes normalisées
     """
-    # Créer une copie du dataset pour éviter de modifier l'original
     ds_work = ds.copy(deep=True)
-    
-    # Obtenir les longitudes
     lon_data = ds_work[lon_name]
     
     # Conversion : lon > 180 devient lon - 360
@@ -423,8 +416,6 @@ class CustomTransforms:
         ])
 
         transf_dataset = transform(dataset)
-        # new_vars = list(transf_dataset.data_vars)
-
         return transf_dataset
 
     #@profile

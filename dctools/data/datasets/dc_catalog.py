@@ -37,7 +37,7 @@ class CatalogEntry:
     path: str
     date_start: pd.Timestamp
     date_end: pd.Timestamp
-    variables: Dict[str, List[str]]
+    # variables: Dict[str, List[str]]
     geometry: gpd.GeoSeries
 
     def to_dict(self):
@@ -200,7 +200,7 @@ class DatasetCatalog:
                                                 props["path"] = datetime.strptime(path_value, "%Y-%m-%d %H:%M:%S")
                                             except ValueError:
                                                 logger.warning(f"Could not parse path as datetime for glorys: {path_value}")
-                                                # Garder la valeur originale si la conversion échoue                        except Exception as exc:
+                                                # Garder la valeur originale si la conversion échoue
                                                 traceback.print_exc()
                             except Exception as exc:
                                 logger.warning(f"Error converting path to datetime for glorys: {exc}")

@@ -1,11 +1,10 @@
 
 
-from abc import ABC, abstractmethod
+from abc import ABC
 import os
 from typing import (
-    Any, Callable, Dict, List,
-    Iterator, Optional, Tuple, Type,
-    Union,
+    Any, Dict, List,
+    Iterator, Optional, Type,
 )
 
 import ast
@@ -42,11 +41,6 @@ from dctools.utilities.file_utils import FileCacheManager
 
 
 class DatasetConfig:
-    """DATASET_ALIAS_MAP: Dict[str, Type[BaseConnectionConfig]] = {
-        "glorys": CMEMSConnectionConfig,
-        "glonet": GlonetConnectionConfig,
-        "glonet_wasabi": WasabiS3ConnectionConfig,
-    }"""
     CONNECTION_MANAGER_MAP: Dict[Type[BaseConnectionConfig], Type[BaseConnectionManager]] = {
         LocalConnectionConfig: LocalConnectionManager,
         CMEMSConnectionConfig: CMEMSManager,
@@ -103,7 +97,7 @@ class BaseDataset(ABC):
         self.catalog_type = ""
         self.keep_variables = config.keep_variables
         self.eval_variables = config.eval_variables
-        self.std_eval_variables = config.eval_variables
+        self.std_eval_variables = []
 
         # Vérifier si un fichier de catalogue JSON est spécifié dans catalog_options
         catalog_path = config.catalog_options.get("catalog_path") if config.catalog_options else None
@@ -125,21 +119,19 @@ class BaseDataset(ABC):
 
             self._paths = [entry.path for entry in self._metadata]
             self.build_catalog()  # Construire le catalogue à partir des métadonnées
-            # self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
             self.catalog_type = "from_data"
-        
-        self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
+
         # save catalog to json
         if self.catalog_type == "from_data":
             self.get_catalog().to_json(catalog_path)
 
-        # global_metadata = self.get_global_metadata()
         if self._global_metadata is not None:
             vars_rename_dict= self._global_metadata.get("variables_rename_dict")
             if vars_rename_dict:
                 self.std_eval_variables = [
                     vars_rename_dict[var] if var in vars_rename_dict else None for var in self.eval_variables
                 ]
+        logger.debug(f"self.std_eval_variables: {self.std_eval_variables}")
 
     def list_paths(self) -> List[str]:
         """
@@ -342,7 +334,6 @@ class BaseDataset(ABC):
         """
         try:
             logger.info(f"Exportation de BaseDataset en JSON dans {path}")
-            # logger.debug(f"Catalogue : {self.catalog}")
             # Sauvegarder le catalogue en JSON
             self.catalog.to_json(str(path))
             # Construire un dictionnaire pour les attributs de BaseDataset
@@ -374,8 +365,6 @@ class RemoteDataset(BaseDataset):
 
 class LocalDataset(BaseDataset):
     """Dataset pour les fichiers locaux (NetCDF ou autres)."""
-    #def __init__(self, config: DatasetConfig):
-    #    super().__init__(config)
     def empty_fct(self):
         """
         Fonction vide.
@@ -402,7 +391,6 @@ def get_dataset_from_config(
     file_pattern = source.get('file_pattern', None)
     observation_dataset = source.get('observation_dataset', None)
     full_day_data = source.get('full_day_data', False)
-    # connection_type = source['connection_type']
 
     data_root = os.path.join(
         root_data_folder,

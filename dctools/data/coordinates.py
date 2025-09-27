@@ -31,10 +31,10 @@ COORD_ALIASES = {
 
 # Dictionnaire des variables d'intérêt : {nom générique -> standard_name(s), alias courants}
 VARIABLES_ALIASES = {
-    "sla": {
-        "standard_names": ["sea_surface_height_above_sea_level"],
-        "aliases": ["sla", "data_01__ku__ssha", "ssha"]
-    },
+    #"sla": {   # TODO : check about computing sla from ssh
+    #    "standard_names": ["sea_surface_height_above_sea_level"],
+    #    "aliases": ["sla", "data_01__ku__ssha", "ssha"]
+    #},
     #"sst": {
     #    "standard_names": ["sea_surface_temperature"],
     #    "aliases": ["sst", "surface_temperature", "temperature_surface"]

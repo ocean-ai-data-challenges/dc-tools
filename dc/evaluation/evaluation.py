@@ -9,7 +9,6 @@ import os
 # from typing import Any, Optional
 
 
-from dask.distributed import Client
 from datetime import timedelta
 import geopandas as gpd
 from loguru import logger
@@ -17,20 +16,17 @@ from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
 from shapely import geometry
 
-from dctools.data.coordinates import get_standardized_var_name
-from dctools.data.datasets.dataset import get_dataset_from_config
-from dctools.data.datasets.dataloader import EvaluationDataloader
-from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
-
-from dctools.metrics.evaluator import Evaluator
-from dctools.metrics.metrics import MetricComputer
-from dctools.metrics.oceanbench_metrics import get_variable_alias
-# from dctools.processing.distributed import ParallelExecutor
-from dctools.utilities.init_dask import setup_dask
 from dctools.data.coordinates import (
+    get_standardized_var_name,
     TARGET_DIM_RANGES,
     TARGET_DEPTH_VALS,
 )
+from dctools.data.datasets.dataset import get_dataset_from_config
+from dctools.data.datasets.dataloader import EvaluationDataloader
+from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
+from dctools.metrics.evaluator import Evaluator
+from dctools.metrics.metrics import MetricComputer
+from dctools.metrics.oceanbench_metrics import get_variable_alias
 from dctools.utilities.misc_utils import (
     make_serializable,
     nan_to_none,
@@ -38,7 +34,7 @@ from dctools.utilities.misc_utils import (
 )
 
 class DC2Evaluation:
-    """Class to evaluate models on Glorys forecasts."""
+    """Class that manages evaluation of Data Challenge 2."""
 
     def __init__(self, arguments: Namespace) -> None:
         """Init class.
@@ -48,16 +44,9 @@ class DC2Evaluation:
         """
         self.args = arguments
 
-        '''self.dataset_references = {
-            "glonet": [
-                "glorys", "argo_profiles", "argo_velocities",
-                "jason1", "jason2", "jason3",
-                "saral", "swot", "SSS_fields", "SST_fields",
-            ]
-        }'''
         self.dataset_references = {
             "glonet": [
-                "jason3", "glorys", "argo_profiles", "argo_velocities",
+                "jason3", "glorys_wasabi", "argo_profiles", "argo_velocities",
                 "saral", "swot", "SSS_fields", "SST_fields",
             ]
         }
@@ -137,15 +126,16 @@ class DC2Evaluation:
             max_cache_files=self.args.max_cache_files,
         )
         datasets = {}
-        for source in sorted(self.args.sources, key=lambda x: x["dataset"], reverse=True):
+        for source in sorted(self.args.sources, key=lambda x: x["dataset"], reverse=False):
             source_name = source['dataset']
             if source_name not in self.all_datasets:
+                logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            if source_name != "glonet" and source_name != "glorys":  # and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
-                continue
+            #if source_name != "glonet" and source_name != "glorys_wasabi": #  and source_name != "saral" and source_name != "jason3": # and source_name != "glorys":
+            #    continue
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory
@@ -185,7 +175,7 @@ class DC2Evaluation:
     def run_eval(self) -> None:
         """Proceed to evaluation."""
 
-        dataset_manager = self.setup_dataset_manager( self.all_datasets)
+        dataset_manager = self.setup_dataset_manager(self.all_datasets)
         aliases = dataset_manager.datasets.keys()
 
         dataloaders = {}
@@ -194,7 +184,7 @@ class DC2Evaluation:
         metrics_kwargs = {}
         evaluators = {}
         models_results = {}
-        transforms_dict = self.setup_transforms(dataset_manager, aliases, )
+        transforms_dict = self.setup_transforms(dataset_manager, aliases)
 
         json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
         for alias in self.dataset_references.keys():
@@ -215,7 +205,7 @@ class DC2Evaluation:
             ref_transforms = {}
             metrics[alias] = {}
             pred_transform = transforms_dict.get(alias)
-            for ref_alias in  list_references:
+            for ref_alias in list_references:
                 # Vérifier que le dataset de référence existe
                 if ref_alias not in dataset_manager.datasets:
                     logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
@@ -228,20 +218,21 @@ class DC2Evaluation:
                 pred_eval_vars = dataset_manager.datasets[alias].get_eval_variables()
                 ref_eval_vars = dataset_manager.datasets[ref_alias].get_eval_variables()
 
-                # variables communes
+                # Common variables
+                x = get_standardized_var_name("ssha_filtered")
                 common_vars = [get_standardized_var_name(var) for var in pred_eval_vars if var in ref_eval_vars]
                 if not common_vars:
                     logger.warning("No common variables found between pred_data and ref_data for evaluation.")
                     continue
                 
-                oceanbench_eval_variables = [
+                oceanbench_eval_variables = [   # Oceanbench lib format
                     get_variable_alias(var) for var in common_vars
                 ] if common_vars else None
 
+                # common metrics
                 common_metrics = [metric for metric in metrics_names[alias] if metric in metrics_names[ref_alias]]
                 metrics_kwargs[alias][ref_alias] = {
-                    "add_noise": False,
-                    #"eval_variables": pred_eval_vars,
+                    "add_noise": False
                 }
                 if not ref_is_observation:
                     metrics[alias][ref_alias] = [
@@ -255,7 +246,7 @@ class DC2Evaluation:
                     ]
                 else:
                     interpolation_method = ref_source_dict.get(
-                        "interpolation_method", "kdtree"
+                        "interpolation_method", "pyinterp"
                     )
                     time_tolerance = ref_source_dict.get("time_tolerance", None)
                     time_tolerance = timedelta(hours=time_tolerance)
@@ -302,6 +293,7 @@ class DC2Evaluation:
             models_results[alias] = evaluators[alias].evaluate()
 
 
+        # Eval has finished. Process results and write JSON
         try:
             # Sérialiser tous les résultats
             serialized_results = {}

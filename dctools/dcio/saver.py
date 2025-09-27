@@ -2,15 +2,15 @@
 # -*- coding: UTF-8 -*-
 
 """Classes and functions for saving xarray datasets."""
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from loguru import logger
 import xarray as xr
+import zarr
 
 
 class DataSaver:
     """Saving datasets."""
-
     @staticmethod
     def save_dataset(
         ds: xr.Dataset,
@@ -50,7 +50,7 @@ class DataSaver:
                         store=file_path, compute=kwargs["compute"], mode=kwargs["mode"],
                     )
             else:
-                raise ValueError(f"Unsupported file format: {kwargs["file_format"]}")
+                raise ValueError(f"Unsupported file format: {kwargs['file_format']}")
         except FileNotFoundError as error:
             message = (f"File not found: {file_path}: {repr(error)}")
             logger.error(message)
@@ -60,3 +60,19 @@ class DataSaver:
         except Exception as error:
             message = (f"Error when saving dataset to {file_path}: {repr(error)}")
             logger.error(message)
+
+
+def progressive_zarr_save(ds: xr.Dataset, zarr_path: str):
+    try:
+        # Créer le store Zarr (dossier ou fichier)
+        store = zarr.DirectoryStore(zarr_path)
+
+        # Écrire la première variable (crée le groupe)
+        first_var = list(ds.data_vars)[0]
+        ds[[first_var]].to_zarr(store, mode="w", consolidated=False)
+
+        # Ajouter les autres variables une par une
+        for var in list(ds.data_vars)[1:]:
+            ds[[var]].to_zarr(store, mode="a", consolidated=False)
+    except Exception as exc:
+        logger.error(f"Erreur lors de la sauvegarde progressive vers Zarr: {exc}")

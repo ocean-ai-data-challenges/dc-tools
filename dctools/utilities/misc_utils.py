@@ -255,9 +255,15 @@ def add_noise_with_snr(signal: np.ndarray, snr_db: float, seed: int = None) -> n
 def nan_to_none(obj):
     if isinstance(obj, float) and np.isnan(obj):
         return None
+    if isinstance(obj, float) and (pd.isna(obj) or obj != obj):
+        return None
     if isinstance(obj, pd.Interval):
         # Convertit en string ou tuple
         return str(obj)  # ou (obj.left, obj.right)
+    if isinstance(obj, pd.Timestamp) and pd.isna(obj):
+        return None
+    if isinstance(obj, pd.NaT.__class__):  # Pour NaTType
+        return None
     if isinstance(obj, dict):
         return {k: nan_to_none(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -455,7 +461,7 @@ def show_worker_info():
         return f"Not in worker (PID: {os.getpid()})"
 
 
-def find_unpicklable_objects(obj, path="root", max_depth=5, visited=None):
+def find_unpicklable_objects(obj, path="root", max_depth=15, visited=None):
     """
     Explore récursivement un objet et affiche les sous-objets non picklables avec leur chemin.
     """

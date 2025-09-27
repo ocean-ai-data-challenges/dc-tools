@@ -16,7 +16,7 @@ from dctools.data.coordinates import (
 )
 from dctools.data.datasets.dataset import BaseDataset
 from dctools.data.datasets.forecast import build_forecast_index_from_catalog
-from dctools.data.transforms import CustomTransforms, WrapLongitudeTransform
+from dctools.data.transforms import CustomTransforms
 from dctools.data.datasets.dc_catalog import DatasetCatalog
 from dctools.data.datasets.dataloader import EvaluationDataloader
 # from dctools.processing.distributed import ParallelExecutor
@@ -439,7 +439,7 @@ class MultiSourceDatasetManager:
                 )
                 transform_interp = CustomTransforms(
                     transform_name="glorys_to_glonet",
-                    dataset_processor=None,  # self.dataset_processor,
+                    dataset_processor=None,
                     depth_coord_vals=depth_coord_vals,
                     interp_ranges=interp_ranges,
                     weights_path=regridder_weights,
