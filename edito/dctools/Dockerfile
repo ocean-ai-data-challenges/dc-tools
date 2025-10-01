@@ -27,7 +27,7 @@ RUN \
     # Clean caches
     poetry cache clear pypi --all -n && \
     pip cache purge || true && \
-    rm -rf /home/$USER/.cache/pypoetry /home/$USER/.cache/pip
+    rm -rf /home/$USERNAME/.cache/pypoetry /home/$USERNAME/.cache/pip
 
 RUN python -c "import dctools; print('Import réussi pendant le build !')" || (echo "Erreur d'import de dctools pendant le build !" && exit 1)
 

@@ -1,3 +1,46 @@
+
+
+Je déploie dans un environnement k8s/docker, une application qui s'appuie sur des GPU Nvidia, et la librairir torch.
+Cette application est gérée en utilisant poetry.
+
+Ce sont les développeurs qui utilisent poetry, et qui donc sont en charge du fichier pyproject.yml.
+Je souhaterais donc éviter de le modifier.
+
+L'application utilise également des bibliothèques qui n'existent pas sous forme de paquets pypi.
+Pour les installer, je dois utiliser micromamba. et un fichier environment.yml
+
+Je ne peux pas partir d'image de base NVIDIA.
+Je dois partir d'images "clé en main" fournies par le gestionnaire de l'environnement de déploiement, que je peux enrichir, notament une image proposant : environnement CUDA 12.6 + Jupyter + python 3.13.7 + torch
+Micromamba n'est pas installé par défaut sur ces images.
+
+J'ai fait des essais, et je suis confronté à des duplications d'installation de paquets, entre l'image de base, les composants installées micromamba, et ceux installé avec poetry.
+Ce qui entraine une image de plus de 30Go.
+
+Je recherche donc une solution qui me permetrait d'enrichir la VM, via micromamba, puis poerty, sans doublons.
+Avec pour objectif une taille d'image autour de 20go max.
+
+Pour l'environnent de runtime du conteneur, il y a 2 contraintes: 
+- il faut qu'il se lance en tant que `USER ${USERNAME}` et pas root
+- Les Variable $USERNAME, $GROUPNAME, $WORKSPACE_DIR sont pré-définies daans l'image de base
+- le systéme de déploiment impose la `CMD`, pour lancer jupyter. A ce jour c'est `CMD ["/bin/sh", "-c", "jupyter lab --no-browser --ip 0.0.0.0 --LabApp.token=password --ContentsManager.allow_hidden=True"]`, mais ca évolue. il n'est donc pas possible de modifier CMD
+
+
+Je voudrais avoir une image fonctionnelle dans un premier temps, puis travailler sur la réduction de sa taille ensuite, par exemple nutilisant un build multi-stage
+
+Pour information, ci dessous mon fichier environment.yml pour micromamba
+```
+channels:
+  - conda-forge
+  - nodefaults
+channel_priority: strict
+dependencies:
+  - python(">=3.11.0,<3.14.0")
+  - esmpy
+  - xesmf
+  - poetry
+```
+Et mon fichier pypriject.toml
+```
 [project]
 name = "dctools"
 description = "Basic tools common to all data challenges."
@@ -141,4 +184,4 @@ lint = "ruff check 'dctools' 'tests'"
 test = "pytest --capture=no --cov=dctools --cov-fail-under=80 tests/"
 # run all
 all = [ {ref="lint"}, {ref="types"}, {ref="test"} ]
-
+```

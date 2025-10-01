@@ -37,11 +37,11 @@ RUN  \
     # # 
     # poetry run pip wheel --no-cache-dir --use-pep517 netcdf4==1.6.5 && \
     # Install DC-TOOLS dependencies --skip netcdf4
-    poetry install --no-root --without dev   --verbose && \
+    poetry install --no-root  --without dev --verbose && \
     # Clean caches
     poetry cache clear pypi --all -n && \
     pip cache purge || true && \
-    rm -rf /home/$USER/.cache/pypoetry /home/$USER/.cache/pip
+    rm -rf /home/$USERNAME/.cache/pypoetry /home/$USERNAME/.cache/pip
 
 
 # =======================

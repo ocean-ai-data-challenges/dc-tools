@@ -37,32 +37,32 @@ ENV MAMBA_RETRY_COUNT=5
 
 # Install dependencies with micromamba (dans base)
 # Get environment file
-COPY .devcontainer/environment.yml ${HOME}/environment.yml
+COPY edito/environment.yml ${HOME}/environment.yml
 # Create base environment using python 3.12 to avoid netcdf4 issues
 RUN /usr/local/bin/micromamba install -n base python=3.12 -y && \
     /usr/local/bin/micromamba env update -n base -f ${HOME}/environment.yml &&\
     /usr/local/bin/micromamba clean --all --yes
 
 # Installer les dépendances pour le build des paquet pip via micromamba
-RUN micromamba install -c conda-forge -y \
-    eigen>=3.3.1 \
-    boost-cpp>=1.79 \
-    openblas \
-    lapack \
-    blas \
-    cmake \
-    pkg-config &&\
-    /usr/local/bin/micromamba clean --all --yes
+# RUN micromamba install -c conda-forge -y \
+#     eigen>=3.3.1 \
+#     boost-cpp>=1.79 \
+#     openblas \
+#     lapack \
+#     blas \
+#     cmake \
+#     pkg-config &&\
+#     /usr/local/bin/micromamba clean --all --yes
 
 # Configurer les variables d'environnement pour CMake
-ENV CMAKE_PREFIX_PATH="$MAMBA_ROOT_PREFIX:$CMAKE_PREFIX_PATH"
-ENV Eigen3_DIR="$MAMBA_ROOT_PREFIX/share/eigen3/cmake"
-ENV EIGEN3_INCLUDE_DIR="$MAMBA_ROOT_PREFIX/include/eigen3"
-ENV PKG_CONFIG_PATH="$MAMBA_ROOT_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+# ENV CMAKE_PREFIX_PATH="$MAMBA_ROOT_PREFIX:$CMAKE_PREFIX_PATH"
+# ENV Eigen3_DIR="$MAMBA_ROOT_PREFIX/share/eigen3/cmake"
+# ENV EIGEN3_INCLUDE_DIR="$MAMBA_ROOT_PREFIX/include/eigen3"
+# ENV PKG_CONFIG_PATH="$MAMBA_ROOT_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
 
 # Install netcdf4 separately to avoid build issues with poetry
-RUN /usr/local/bin/micromamba install -c conda-forge "netcdf4>=1.6.4,<=1.6.5" && \
-    /usr/local/bin/micromamba clean --all --yes
+# RUN /usr/local/bin/micromamba install -c conda-forge "netcdf4>=1.6.4,<=1.6.5" && \
+#     /usr/local/bin/micromamba clean --all --yes
 
 
 # use lock file if available

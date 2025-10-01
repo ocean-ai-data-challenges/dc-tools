@@ -19,20 +19,21 @@ docker build \
   --progress=plain \
   --no-cache \
   -f edito/base/Dockerfile \
-  --build-arg BASE_IMAGE=inseefrlab/onyxia-jupyter-python:py3.12.9-gpu \
+  --build-arg BASE_IMAGE=inseefrlab/onyxia-jupyter-python:py3.13.7-gpu \
   -t ghcr.io/ppr-ocean-ia/dc-tools:base-latest \
   .
 ```
 
-- inseefrlab/onyxia-jupyter-python:py3.12.9-gpu
-``` bash
-#9 20.89     │  ├─ netcdf4 [1.6.4|1.6.5] would require
-#9 20.89     │  │  └─ python [>=3.12,<3.13.0a0 *|>=3.12.0rc3,<3.13.0a0 *], which can be installed;
-```
-- inseefrlab/onyxia-jupyter-python:py3.13.7-gpu
 ```
 docker push ghcr.io/ppr-ocean-ia/dc-tools:base-latest
 ```
+
+Base image possibles : 
+
+- inseefrlab/onyxia-jupyter-python:py3.12.9-gpu
+- inseefrlab/onyxia-jupyter-python:py3.13.7-gpu
+- inseefrlab/onyxia-jupyter-pytorch:py3.12.9-gpu
+- inseefrlab/onyxia-jupyter-pytorch:py3.13.7-gpu
 
 ---
 ## Mamba dependencies
@@ -49,6 +50,10 @@ docker build \
   .
 ```
 
+```
+docker push ghcr.io/ppr-ocean-ia/dc-tools:mamba-latest
+```
+
 ---
 ## Poetry dependencies
 
@@ -63,6 +68,11 @@ docker build \
   -t ghcr.io/ppr-ocean-ia/dc-tools:poetry-latest \
   .
 ```
+
+```
+docker push ghcr.io/ppr-ocean-ia/dc-tools:poetry-latest
+```
+
 
 ---
 ## DC-TOOLS
@@ -86,10 +96,45 @@ docker push ghcr.io/ppr-ocean-ia/dc-tools:latest
 
 ``` bash
 docker tag ghcr.io/ppr-ocean-ia/dc-tools:latest ghcr.io/ppr-ocean-ia/dc-tools:edito-gpu-latest
+
+docker tag ghcr.io/ppr-ocean-ia/dc-tools:py3.13-claude-latest ghcr.io/ppr-ocean-ia/dc-tools:edito-gpu-latest
 docker push ghcr.io/ppr-ocean-ia/dc-tools:edito-gpu-latest
 ```
 
 ---
+## Tester
+
+## La version de torch
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
+```
+
+Si on met dan la conf micromanba
+```
+dependencies:
+  #- python(">=3.11.0,<3.14.0")
+  - python=3.12.11
+  - pytorch>=2.6.0,<3.0.0
+```
+Alors torch est installé sans support CUDA
+``` bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
+2.5.1.post108 False None
+```  
+
+## fonctionnement de dc-tool
+```
+python -c "import dctools;"
+```
+
+---
+##
+``` bash
+#9 20.89     │  ├─ netcdf4 [1.6.4|1.6.5] would require
+#9 20.89     │  │  └─ python [>=3.12,<3.13.0a0 *|>=3.12.0rc3,<3.13.0a0 *], which can be installed;
+```
+
+
 ## Pb install Netcdf4
 
 - Message d'erreur lié à mpi si install ave poetry ou pip
@@ -152,4 +197,34 @@ sudo apt-get install -y libboost-all-dev cmake build-essential
 2. utiliser conda
 ``` bash
 micromamba install -c conda-forge boost=1.79
+```
+
+``` bash
+pyinterp utilise la bibliothèque de templates C++ Eigen pour l'algèbre linéaire, et le processus de compilation via cmake ne trouve pas les fichiers d'en-tête (headers) d'Eigen3 sur votre système de construction (l'image Docker builder).
+```
+
+---
+## Apt sur les images edito
+
+Les source-list sont fausses ....
+``` bash
+#5 2.587 Reading package lists...
+#5 3.220 W: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+#5 3.220 E: The repository 'https://ppa.launchpadcontent.net/ubuntugis/ppa/ubuntu noble Release' does not have a Release file.
+#5 3.220 W: https://apt.postgresql.org/pub/repos/apt/dists/noble-pgdg/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+#5 ERROR: process "/bin/bash -c apt-get update && apt-get install -y curl ca-certificates     && rm -rf /var/lib/apt/lists/*" did not complete successfully: exit code: 100
+------
+ > [2/5] RUN apt-get update && apt-get install -y curl ca-certificates     && rm -rf /var/lib/apt/lists/*:
+1.863 Get:21 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Packages [38.9 kB]
+1.863 Get:22 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages [1,828 kB]
+1.953 Get:23 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages [1,923 kB]
+2.032 Get:24 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages [2,483 kB]
+2.083 Get:25 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Packages [49.4 kB]
+2.084 Get:26 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Packages [33.9 kB]
+
+3.220 W: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+3.220 E: The repository 'https://ppa.launchpadcontent.net/ubuntugis/ppa/ubuntu noble Release' does not have a Release file.
+3.220 W: https://apt.postgresql.org/pub/repos/apt/dists/noble-pgdg/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+------
+
 ```

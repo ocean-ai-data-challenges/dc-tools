@@ -1,21 +1,21 @@
 channels:
   - conda-forge
-  - pytorch
-  - nvidia
+  #- pytorch
+  #- nvidia
   - nodefaults
 channel_priority: strict
 dependencies:
   #- python(">=3.11.0,<3.14.0")
-  - python=3.12.11
-  - pytorch>=2.6.0,<3.0.0
-  # - pytorch>=2.6.0  # PyTorch s'occupe de CUDA automatiquement
-  # - cudatoolkit=12.6  # Spécifie la version de CUDA
   - esmpy
   - xesmf
-  - poetry
-    
+  #- poetry
 
-  # - python>=3.11,<3.13
+# - python=3.12.11
+  #- pytorch>=2.6.0,<3.0.0
+  # - pytorch>=2.6.0  # PyTorch s'occupe de CUDA automatiquement
+  # - cudatoolkit=12.6  # Spécifie la version de CUDA
+   
+#  - python>=3.11,<3.13
   # - netcdf4>=1.6.4,<=1.6.5
   # - pyinterp>=2025.3.0
   # - boost-cpp>=1.79

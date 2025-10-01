@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=inseefrlab/onyxia-jupyter-python:py3.13.7-gpu
+ARG BASE_IMAGE=inseefrlab/onyxia-jupyter-pytorch:py3.12.9-gpu
 FROM $BASE_IMAGE
 LABEL maintainer="emmanuel.braux@imt-atlantique.fr"
 LABEL org.opencontainers.image.source="https://github.com/ppr-ocean-ia/dc-tools"
