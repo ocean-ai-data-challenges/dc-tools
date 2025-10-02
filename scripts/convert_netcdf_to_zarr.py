@@ -136,9 +136,12 @@ def convert_to_zarr_worker(
     input_name = Path(file_path).name
     output_name = str(Path(input_name).with_suffix(".zarr"))
     output_path = os.path.join(output_dir, output_name)
-    zarr_path = netcdf_to_zarr(ds, output_path, overwrite=True)
+    try:
+        zarr_path = netcdf_to_zarr(ds, output_path, overwrite=True)
+    except Exception as e:
+        pass
 
-    logger.info(f"Converted to zarr: {zarr_path}")
+    # logger.info(f"Converted to zarr: {zarr_path}")
 
 
 def estimate_optimal_chunks(sample_file: str) -> dict:

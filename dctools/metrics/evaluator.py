@@ -111,6 +111,7 @@ def compute_metric(
                     open_ref_func, ref_alias,
                     keep_vars, target_dimensions, metadata,
                     time_bounds,
+                    n_points_dim=ref_coords.coordinates["n_points"],
                     dataset_processor=None,
                 )
                 # load immediately before increasing Dask graph size

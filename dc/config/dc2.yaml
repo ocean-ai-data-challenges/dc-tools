@@ -15,14 +15,14 @@ max_cache_files: 1000  # max files to store (older files are deleted)
 ############################# PARALLELIZATION ###################################
 
 batch_size: 64
-n_parallel_workers: 20
+n_parallel_workers: 8
 nthreads_per_worker: 4
 memory_limit_per_worker: "6GB"
 ############################# DATA FILTERS ###################################
 
 ## start time
 start_time: "2024-01-04"
-#start_time: "2023-12-25"
+# start_time: "2023-12-25"
 #start_time: "2022-12-15"
 ## end time
 end_time: "2024-01-13"
@@ -37,6 +37,13 @@ min_lat: -90
 max_lat: 90
 
 ############################# DATASETS ###################################
+catalog_connection:
+  connection_type: "wasabi"
+  url: "https://s3.eu-west-2.wasabisys.com"
+  s3_bucket: "ppr-ocean-climat"
+  s3_folder: "catalogs"
+  s3_key: *WASABI_KEY
+  s3_secret_key: *WASABI_SECRET_KEY
 
 sources:  # lists all datasets used in the DC
   - dataset: saral

@@ -118,6 +118,50 @@ class DC2Evaluation:
             if batch[0]["ref_data"]:
                 assert isinstance(batch[0]["ref_data"], str)
 
+    def get_catalog(
+        self,
+        dataset_name: str, local_catalog_dir: str,
+        catalog_cfg: dict,
+    ):
+        import fsspec
+        def get_storage_options(catalog_cfg):
+            # Si les clés sont présentes, utilise-les
+            if catalog_cfg.get("s3_key") and catalog_cfg.get("s3_secret_key"):
+                return {
+                    "key": catalog_cfg["s3_key"],
+                    "secret": catalog_cfg["s3_secret_key"],
+                    "client_kwargs": {"endpoint_url": catalog_cfg["url"]},
+                }
+            # Sinon, connexion anonyme
+            return {
+                "anon": True,
+                "client_kwargs": {"endpoint_url": catalog_cfg["url"]},
+            }
+        def download_catalog_file(
+                remote_path: str,
+                local_path: str,
+                storage_options: dict = None
+            ):
+            """Télécharge un fichier distant (S3/Wasabi) vers un chemin local."""
+            with fsspec.open(remote_path, mode="rb", **(storage_options or {})) as remote_file:
+                with open(local_path, "wb") as local_file:
+                    local_file.write(remote_file.read())
+        # check if local file exists
+        local_catalog_path = os.path.join(local_catalog_dir, f"{dataset_name}.json")
+        if os.path.isfile(local_catalog_path) and os.path.getsize(local_catalog_path) > 0:
+            return
+        else:
+            # Get catalog from server if no local file exists
+            remote_catalog_path = f"s3://{catalog_cfg['s3_bucket']}/{catalog_cfg['s3_folder']}/{dataset_name}.json"
+
+            '''storage_options = {
+                "key": catalog_cfg["s3_key"],
+                "secret": catalog_cfg["s3_secret_key"],
+                "client_kwargs": {"endpoint_url": catalog_cfg["endpoint_url"]},
+            }'''
+            storage_options = get_storage_options(catalog_cfg)
+            #################download_catalog_file(remote_catalog_path, local_catalog_path, storage_options)
+
     def setup_dataset_manager(self, list_all_references: list[str]) -> None:
 
         manager = MultiSourceDatasetManager(
@@ -133,12 +177,21 @@ class DC2Evaluation:
             if source_name not in self.all_datasets:
                 logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
+
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            if source_name != "glonet" and source_name != "saral" and source_name != "glorys_wasabi" and source_name != "swot" and source_name != "saral" and source_name != "jason3":
+            if source_name != "glonet" and source_name != "argo_profiles": #  and source_name != "glorys_wasabi" and source_name != "swot" and source_name != "saral" and source_name != "jason3":
                 logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
+    
+            # Download dataset index file (catalog) if needed
+            self.get_catalog(
+                source_name,
+                self.args.catalog_dir,
+                self.args.catalog_connection,
+            )
+
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory

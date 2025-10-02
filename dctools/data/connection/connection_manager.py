@@ -500,7 +500,7 @@ class BaseConnectionManager(ABC):
             CatalogEntry: Metadata for the specific file as a CatalogEntry.
         """
         try:
-
+            logger.debug("FUCK")
             open_func = create_worker_connect_config(
                 connection_params,
                 argo_index,
@@ -1339,7 +1339,9 @@ class ArgoManager(BaseConnectionManager):
                 for start_date in list_dates
             ]
 
-            batch_results = self.dataset_processor.compute_delayed_tasks(delayed_tasks)
+            batch_results = self.dataset_processor.compute_delayed_tasks(
+                delayed_tasks, sync=False
+            )
             valid_results = [meta for meta in batch_results if meta is not None]
             metadata_list.extend(valid_results)
 

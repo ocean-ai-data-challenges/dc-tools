@@ -94,7 +94,6 @@ def build_forecast_index_from_catalog(
             # Si plusieurs fichiers correspondent, choisir celui avec le même forecast_reference_time
             if len(matching_files) > 1:
                 # Priorité 1: fichier dont date_start == init_time (même forecast_reference_time)
-                print(f"matching_files['date_start']: {matching_files['date_start']}")
                 exact_forecast_match = matching_files[matching_files["date_start"] == init_time]
                 if not exact_forecast_match.empty:
                     selected_file = exact_forecast_match.iloc[0]

@@ -105,6 +105,7 @@ def swath_to_points(
         ds,
         drop_coords=["num_lines", "num_pixels", "num_nadir"],
         coords_to_keep=None,
+        n_points_dim = "n_points",
     ):  # , drop_missing=True):
     """
     Convert a swath-style Dataset into a 1D point collection along 'n_points'.
@@ -127,7 +128,7 @@ def swath_to_points(
         # Already flat
         return ds
     
-    swath_dims = [d for d in ds.dims if d not in ("time", "n_points")]
+    swath_dims = [d for d in ds.dims if d not in ("time", n_points_dim)]
     if not swath_dims:
         raise ValueError("No swath dims found (already 1D or unexpected format).")
 
@@ -142,7 +143,7 @@ def swath_to_points(
             # Si la coordonnée dépend des swath dims, on la réindexe sur n_points
             if set(arr.dims) <= set(swath_dims):
                 coords_to_reassign[coord] = arr.stack(n_points=swath_dims).values
-            elif "n_points" in arr.dims:
+            elif n_points_dim in arr.dims:
                 coords_to_reassign[coord] = arr.values
 
     # Supprimer les coordonnées orphelines (non utilisées)
@@ -152,16 +153,16 @@ def swath_to_points(
 
     # Ré-attacher les coordonnées importantes
     for coord, vals in coords_to_reassign.items():
-        ds_flat = ds_flat.assign_coords({coord: ("n_points", vals)})
+        ds_flat = ds_flat.assign_coords({coord: (n_points_dim, vals)})
 
     # Reset attributes to avoid concat conflicts
     ds_flat.attrs = {}
 
     # Ensure time is broadcast to n_points
-    if "time" in ds_flat.coords and ds_flat["time"].ndim < ds_flat["n_points"].ndim:
+    if "time" in ds_flat.coords and ds_flat["time"].ndim < ds_flat[n_points_dim].ndim:
         # Case: time per line only → broadcast to pixels
         ds_flat = ds_flat.assign_coords(
-            time=("n_points", np.repeat(ds_flat["time"].values, np.prod([ds_flat.sizes[d] for d in swath_dims[1:]])))
+            time=(n_points_dim, np.repeat(ds_flat["time"].values, np.prod([ds_flat.sizes[d] for d in swath_dims[1:]])))
         )
 
     return ds_flat
@@ -170,7 +171,7 @@ def swath_to_points(
 def add_time_dim(
     ds: xr.Dataset,
     input_df: pd.DataFrame,
-    points_dim: str,
+    n_points_dim: str,
     time_coord,
     idx: int,
 ):
@@ -186,7 +187,7 @@ def add_time_dim(
         # Fallback: use metadata mid_time
         file_info = input_df.iloc[idx]
         mid_time = file_info["date_start"] + (file_info["date_end"] - file_info["date_start"]) / 2
-        ds = ds.assign_coords(time=(points_dim, np.full(ds.sizes[points_dim], mid_time)))
+        ds = ds.assign_coords(time=(n_points_dim, np.full(ds.sizes[n_points_dim], mid_time)))
         if "time" not in ds.dims:
             ds = ds.expand_dims(time=[mid_time])
         return ds
@@ -196,7 +197,7 @@ def add_time_dim(
 
     # Case: time per point
     unique_times = pd.unique(time_values)
-    if points_dim in getattr(time_coord, "dims", []):
+    if n_points_dim in getattr(time_coord, "dims", []):
 
         if len(unique_times) == 1:
             # Only one unique time → add as scalar dimension if not already there
@@ -207,7 +208,7 @@ def add_time_dim(
         else:
             try:
                 # Per-point times: assign as coordinate
-                ds = ds.assign_coords(time=(points_dim, time_values))
+                ds = ds.assign_coords(time=(n_points_dim, time_values))
                 return ds
             except Exception as e:
                 logger.error(f"Error assigning time coordinates: {e}")
@@ -247,6 +248,7 @@ def preprocess_argo_profiles(
     alias: str,
     time_bounds: Tuple[pd.Timestamp, pd.Timestamp],
     depth_levels: Union[List[float], np.ndarray],
+    n_points_dim: str = "N_POINTS"
 ):
     interp_profiles = []
     time_vals = []
@@ -264,7 +266,7 @@ def preprocess_argo_profiles(
                 tmin=time_bounds[0],
                 tmax=time_bounds[1],
             )
-            if "N_POINTS" not in ds.dims or ds.sizes.get("N_POINTS", 0) == 0:
+            if n_points_dim not in ds.dims or ds.sizes.get(n_points_dim, 0) == 0:
                 logger.warning(f"Argo profile {profile_source} is empty after time filtering, skipping.")
                 return None, None
 
@@ -337,16 +339,19 @@ def preprocess_argo_profiles(
     if len(interp_profiles) == 1:
         combined = interp_profiles[0]
     else:
-        combined = xr.concat(interp_profiles, dim="N_POINTS")
+        combined = xr.concat(interp_profiles, dim=n_points_dim)
 
     combined = combined.assign_coords(time=mean_time)
     return combined
 
 
 def preprocess_one_npoints(
-    source, is_swath, n_points_dims, filtered_df, idx,
+    source, is_swath, 
+    n_points_dim,
+    filtered_df, idx,
     alias, open_func,
-    keep_variables_list, target_dimensions,
+    keep_variables_list,
+    target_dimensions,
     coordinates,
     time_bounds=None,
 ):
@@ -382,24 +387,17 @@ def preprocess_one_npoints(
             ds = ds.set_coords(time_name)
 
         time_coord = ds.coords[time_name]
-
-        # Identifier la dimension de points
-        points_dim = None
-        for dim_name in n_points_dims:
-            if dim_name in ds.dims:
-                points_dim = dim_name
-                break
         
-        if points_dim is None:
+        if n_points_dim not in ds.dims:
             logger.warning(f"Dataset {idx}: No points dimension found")
             return None
 
         ds_with_time = add_time_dim(
-            ds, filtered_df, points_dim=points_dim, time_coord=time_coord, idx=idx
+            ds, filtered_df, points_dim=n_points_dim, time_coord=time_coord, idx=idx
         )
 
         ds_interp = ds_with_time
-        ds_interp = ds_interp.chunk({points_dim: 50000})
+        ds_interp = ds_interp.chunk({n_points_dim: 50000})
         return ds_interp
 
     except Exception as e:
@@ -693,6 +691,7 @@ class ObservationDataViewer:
         dataset_metadata: Any,
         time_bounds: Tuple[pd.Timestamp, pd.Timestamp],
         # time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
+        n_points_dim: str,
         dataset_processor: Optional[DatasetProcessor] = None,
         include_geometry: bool = False,
     ):
@@ -711,12 +710,13 @@ class ObservationDataViewer:
         self.alias = alias
         self.keep_vars = keep_vars
         self.target_dimensions = target_dimensions
+        self.n_points_dim = n_points_dim
         self.dataset_processor = dataset_processor 
         self.time_bounds = time_bounds
 
         if self.is_metadata:
             if self.load_fn is None:
-                raise ValueError("A `load_fn(link: str)` must be provided when using metadata.")
+                raise ValueError("A 'load_fn(link: str)' must be provided when using metadata.")
             self.meta_df = source
         else:
             self.datasets = source if isinstance(source, list) else [source]
@@ -748,7 +748,6 @@ class ObservationDataViewer:
 
         # swath_dims = {"num_lines", "num_pixels", "num_nadir"}
         reduced_swath_dims = {"num_lines", "num_pixels"}
-        n_points_dims = {"n_points", "N_POINTS", "points", "obs"}
 
         # si profils argo, prétraitement particulier :
 
@@ -776,14 +775,14 @@ class ObservationDataViewer:
                 return None
     
         # Données avec dimension n_points/N_POINTS uniquement
-        elif any(dim in first_ds.dims for dim in n_points_dims) and not reduced_swath_dims.issubset(first_ds.dims):            
+        elif (self.n_points_dim in first_ds.dims) and not reduced_swath_dims.issubset(first_ds.dims):            
             try:
                 # Nettoyer et traiter les datasets
                 if self.dataset_processor is not None:
                     delayed_tasks = []
                     for idx, dataset_path in enumerate(dataset_paths):
                         delayed_tasks.append(dask.delayed(preprocess_one_npoints)(
-                            dataset_path, False, n_points_dims, dataframe, idx,
+                            dataset_path, False, self.n_points_dim, dataframe, idx,
                             self.alias, self.load_fn,
                             self.keep_vars, self.target_dimensions,
                             self.coordinates,
@@ -796,7 +795,7 @@ class ObservationDataViewer:
                     batch_results = []
                     for idx, dataset_path in enumerate(dataset_paths):
                         result = preprocess_one_npoints(
-                            dataset_path, False, n_points_dims, dataframe, idx,
+                            dataset_path, False, self.n_points_dim, dataframe, idx,
                             self.alias, self.load_fn,
                             self.keep_vars, self.target_dimensions,
                             self.coordinates,
@@ -853,7 +852,7 @@ class ObservationDataViewer:
                     delayed_tasks = []
                     for idx, dataset_path in enumerate(dataset_paths):
                         delayed_tasks.append(dask.delayed(preprocess_one_npoints)(
-                            dataset_path, is_swath_data, n_points_dims, dataframe, idx,
+                            dataset_path, is_swath_data, self.n_points_dim, dataframe, idx,
                             self.alias, self.load_fn,
                             self.keep_vars, self.target_dimensions,
                             self.coordinates,
@@ -864,7 +863,7 @@ class ObservationDataViewer:
                     batch_results = []
                     for idx, dataset_path in enumerate(dataset_paths):
                         result = preprocess_one_npoints(
-                            dataset_path, is_swath_data, n_points_dims, dataframe, idx,
+                            dataset_path, is_swath_data, self.n_points_dim, dataframe, idx,
                             self.alias, self.load_fn,
                             self.keep_vars, self.target_dimensions,
                             self.coordinates,

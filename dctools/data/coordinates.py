@@ -27,6 +27,7 @@ COORD_ALIASES = {
     },
     "quadrant": {"quadrant", "sector"},
     "time": {"time", "date", "datetime", "valid_time", "forecast_time", "time_counter"},
+    "n_points": {"n_points", "N_POINTS", "points", "obs"},
 }
 
 # Dictionnaire des variables d'intérêt : {nom générique -> standard_name(s), alias courants}
@@ -136,7 +137,11 @@ VARIABLES_ALIASES = {
     "depth": {
         "standard_names": ["depth"],
         "aliases": ["depth", "z", "lev", "level", "bottom", "deptht", "isodepth", "data_01__depth_or_elevation", "data_01__altitude"]
-    }
+    },
+    "n_points": {
+        "standard_names": ["n_points"],
+        "aliases": ["n_points", "N_POINTS", "points", "obs"],
+    },
 }
 
 GEO_STD_COORDS = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
@@ -346,7 +351,7 @@ class CoordinateSystem:
                     if alias.lower() in var_names_lower:
                         standardized[key] = var_names_lower[alias.lower()]
 
-        dims = set(ds.dims)
+        # dims = set(ds.dims)
         # has_depth_dim = "depth" in standardized and standardized["depth"] in dims
 
         has_lat = "lat" in standardized
