@@ -60,6 +60,7 @@ class DatasetConfig:
         eval_variables: Optional[str] = None,
         observation_dataset: Optional[bool] = False,
         use_catalog: Optional[bool] = True,
+        ignore_geometry: Optional[bool] = False,
     ):
         """
         Configuration pour un dataset.
@@ -78,6 +79,7 @@ class DatasetConfig:
         self.observation_dataset = observation_dataset
         # self.connection_manager = self._create_connection_manager()
         self.use_catalog = use_catalog
+        self.ignore_geometry = ignore_geometry
 
 
 class BaseDataset(ABC):
@@ -102,7 +104,11 @@ class BaseDataset(ABC):
         # Vérifier si un fichier de catalogue JSON est spécifié dans catalog_options
         catalog_path = config.catalog_options.get("catalog_path") if config.catalog_options else None
         if config.use_catalog and catalog_path and Path(catalog_path).exists():
-            self.catalog = DatasetCatalog.from_json(catalog_path, config.alias)
+            self.catalog = DatasetCatalog.from_json(
+                catalog_path, config.alias,
+                limit=config.connection_config.params.max_samples,
+                ignore_geometry=config.ignore_geometry if hasattr(config, 'ignore_geometry') else False,
+            )
             self._paths = self.catalog.list_paths()
             self.catalog_type = "from_catalog_file"
             self._global_metadata = self.catalog.get_global_metadata()
@@ -254,11 +260,12 @@ class BaseDataset(ABC):
         Returns:
         """
         if self.catalog_type == "from_catalog_file":
-            logger.info("Le catalogue existe déjà (chargé à partir d'un fichier)")
+            logger.info("Dataset catalog file alreay exists. Loading ...")
             return
         self.catalog = DatasetCatalog(
             self.alias, global_metadata=self._global_metadata, entries=self._metadata
         )
+        return
 
     '''def filter_attrs(
         self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
@@ -391,6 +398,7 @@ def get_dataset_from_config(
     file_pattern = source.get('file_pattern', None)
     observation_dataset = source.get('observation_dataset', None)
     full_day_data = source.get('full_day_data', False)
+    ignore_geometry = source.get('ignore_geometry', False)
 
     data_root = os.path.join(
         root_data_folder,
@@ -413,17 +421,20 @@ def get_dataset_from_config(
 
     match config_name:
         case "cmems":
+            connect_config_params = {
+                "dataset_processor": dataset_processor,
+                "init_type": init_type,
+                "local_root": data_root,
+                "dataset_id": source['cmems_product_name'],
+                "max_samples": max_samples,
+                "file_pattern": file_pattern,
+                "keep_variables": keep_variables,
+                "file_cache": file_cache,
+                "filter_values": filter_values,
+                "full_day_data": full_day_data,
+            }
             cmems_connection_config = CMEMSConnectionConfig(
-                dataset_processor=dataset_processor,
-                init_type=init_type,
-                local_root=data_root,
-                dataset_id=source['cmems_product_name'],
-                max_samples=max_samples,
-                file_pattern=file_pattern,
-                keep_variables=keep_variables,
-                file_cache=file_cache,
-                filter_values=filter_values,
-                full_day_data=full_day_data,
+                connect_config_params
             )
             # Load dataset metadata from catalog
             cmems_config = DatasetConfig(
@@ -434,21 +445,25 @@ def get_dataset_from_config(
                 eval_variables=eval_variables,
                 observation_dataset=observation_dataset,
                 use_catalog=use_catalog,
+                ignore_geometry=ignore_geometry,
             )
             # Création du dataset
             dataset = RemoteDataset(cmems_config)
 
         case "argopy":
+            connect_config_params = {
+                "dataset_processor": dataset_processor,
+                "init_type": init_type,
+                "local_root": data_root,
+                "max_samples": max_samples,
+                "file_pattern": file_pattern,
+                "keep_variables": keep_variables,
+                "file_cache": file_cache,
+                "filter_values": filter_values,
+                "full_day_data": full_day_data,
+            }
             argo_connection_config = ARGOConnectionConfig(
-                dataset_processor=dataset_processor,
-                init_type=init_type,
-                local_root=data_root,
-                max_samples=max_samples,
-                file_pattern=file_pattern,
-                keep_variables=keep_variables,
-                file_cache=file_cache,
-                filter_values=filter_values,
-                full_day_data=full_day_data,
+                connect_config_params
             )
             argo_config = DatasetConfig(
                 alias=dataset_name,
@@ -458,43 +473,50 @@ def get_dataset_from_config(
                 eval_variables=eval_variables,
                 observation_dataset=observation_dataset,
                 use_catalog=use_catalog,
+                ignore_geometry=ignore_geometry,
             )
             # Création du dataset
             dataset = RemoteDataset(argo_config)
         case "s3":
             # logger.debug(f"Creating S3 dataset with config: {source}")
             if source["connection_type"] == "wasabi":
+                connect_config_params = {
+                    "dataset_processor": dataset_processor,
+                    "init_type": init_type,
+                    "local_root": data_root,
+                    "bucket": source['s3_bucket'],
+                    "bucket_folder": source['s3_folder'],
+                    "key": source['s3_key'],
+                    "secret_key": source['s3_secret_key'],
+                    "endpoint_url": source['url'],
+                    "max_samples": max_samples,
+                    "file_pattern": file_pattern,
+                    "groups": source['groups'] if 'groups' in source else None,
+                    "keep_variables": keep_variables,
+                    "file_cache": file_cache,
+                    "filter_values": filter_values,
+                    "full_day_data": full_day_data,
+                }
                 s3_connection_config = WasabiS3ConnectionConfig(
-                    dataset_processor=dataset_processor,
-                    init_type=init_type,
-                    local_root=data_root,
-                    bucket=source['s3_bucket'],
-                    bucket_folder=source['s3_folder'],
-                    key=source['s3_key'],
-                    secret_key=source['s3_secret_key'],
-                    endpoint_url=source['url'],
-                    max_samples=max_samples,
-                    file_pattern=file_pattern,
-                    groups=source['groups'] if 'groups' in source else None,
-                    keep_variables=keep_variables,
-                    file_cache=file_cache,
-                    filter_values=filter_values,
-                    full_day_data=full_day_data,
+                    connect_config_params
                 )
             elif dataset_name == "glonet":
+                connect_config_params = {
+                    "dataset_processor": dataset_processor,
+                    "init_type": init_type,
+                    "local_root": data_root,
+                    "endpoint_url": source['url'],
+                    "glonet_s3_bucket": source['s3_bucket'],
+                    "s3_glonet_folder": source['s3_folder'],
+                    "max_samples": max_samples,
+                    "file_pattern": file_pattern,
+                    "keep_variables": keep_variables,
+                    "file_cache": file_cache,
+                    "filter_values": filter_values,
+                    "full_day_data": full_day_data,
+                }
                 s3_connection_config = GlonetConnectionConfig(
-                    dataset_processor=dataset_processor,
-                    init_type=init_type,
-                    local_root=data_root,
-                    endpoint_url=source['url'],
-                    glonet_s3_bucket=source['s3_bucket'],
-                    s3_glonet_folder=source['s3_folder'],
-                    max_samples=max_samples,
-                    file_pattern=file_pattern,
-                    keep_variables=keep_variables,
-                    file_cache=file_cache,
-                    filter_values=filter_values,
-                    full_day_data=full_day_data,
+                    connect_config_params
                 )
             s3_config = DatasetConfig(
                 alias=dataset_name,
@@ -504,6 +526,7 @@ def get_dataset_from_config(
                 eval_variables=eval_variables,
                 observation_dataset=observation_dataset,
                 use_catalog=use_catalog,
+                ignore_geometry=ignore_geometry,
             )
             # Création du dataset
             dataset = RemoteDataset(s3_config)

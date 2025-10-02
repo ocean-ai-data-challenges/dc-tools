@@ -4,6 +4,7 @@
 """Evaluator class."""
 
 from argparse import Namespace
+from glob import glob
 import json
 import os
 # from typing import Any, Optional
@@ -27,6 +28,7 @@ from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.evaluator import Evaluator
 from dctools.metrics.metrics import MetricComputer
 from dctools.metrics.oceanbench_metrics import get_variable_alias
+from dctools.utilities.file_utils import empty_folder
 from dctools.utilities.misc_utils import (
     make_serializable,
     nan_to_none,
@@ -46,8 +48,8 @@ class DC2Evaluation:
 
         self.dataset_references = {
             "glonet": [
-                "jason3", "glorys_wasabi", "argo_profiles", "argo_velocities",
-                "saral", "swot", "SSS_fields", "SST_fields",
+                "jason3", "saral", "swot", "glorys_wasabi", "argo_profiles", "argo_velocities",
+                "SSS_fields", "SST_fields",
             ]
         }
         self.all_datasets = list(set(
@@ -134,8 +136,9 @@ class DC2Evaluation:
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            #if source_name != "glonet" and source_name != "glorys_wasabi": #  and source_name != "saral" and source_name != "jason3": # and source_name != "glorys":
-            #    continue
+            if source_name != "glonet" and source_name != "saral" and source_name != "glorys_wasabi" and source_name != "swot" and source_name != "saral" and source_name != "jason3":
+                logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
+                continue
             kwargs = {}
             kwargs["source"] = source
             kwargs["root_data_folder"] = self.args.data_directory
@@ -186,8 +189,20 @@ class DC2Evaluation:
         models_results = {}
         transforms_dict = self.setup_transforms(dataset_manager, aliases)
 
-        json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
+        # json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
         for alias in self.dataset_references.keys():
+            dataset_json_path = os.path.join(self.args.catalog_dir, f"results_{alias}.json")
+            results_files_dir = os.path.join(self.args.data_directory, "results_batches")
+
+            # Vérifier si le répertoire existe
+            if os.path.isdir(results_files_dir):
+                # Vérifier s'il est vide
+                if os.listdir(results_files_dir):
+                    logger.info("Results dir exists. Removing old results files.")
+                    empty_folder(results_files_dir, extension=".json")
+            else:
+                os.makedirs(results_files_dir, exist_ok=True)
+
             dataset_manager.build_forecast_index(
                 alias,
                 init_date=self.args.start_time,
@@ -219,7 +234,6 @@ class DC2Evaluation:
                 ref_eval_vars = dataset_manager.datasets[ref_alias].get_eval_variables()
 
                 # Common variables
-                x = get_standardized_var_name("ssha_filtered")
                 common_vars = [get_standardized_var_name(var) for var in pred_eval_vars if var in ref_eval_vars]
                 if not common_vars:
                     logger.warning("No common variables found between pred_data and ref_data for evaluation.")
@@ -288,51 +302,38 @@ class DC2Evaluation:
                 dataloader=dataloaders[alias],
                 ref_aliases=list_references,
                 dataset_processor=self.dataset_processor,
+                results_dir=results_files_dir,
             )
             logger.info(f"\n\n\n=========  START EVALUATION FOR CANDIDATE : {alias}  =========")
             models_results[alias] = evaluators[alias].evaluate()
 
 
-        # Eval has finished. Process results and write JSON
-        try:
-            # Sérialiser tous les résultats
-            serialized_results = {}
-            for dataset_alias, results in models_results.items():
-                logger.info(f"Processing results for {dataset_alias}: {len(results)} entries")
-                
-                # Sérialiser chaque résultat individuellement
-                serialized_entries = []
-                for result in results:
-                    # Vérifier que le résultat contient les champs attendus
-                    if "result" not in result:
-                        logger.warning(f"Missing 'result' field in entry: {result}")
-                        continue
-                        
-                    # Transformer pour rendre sérialisable
-                    transform_in_place(result, make_serializable)
-                    serializable_result = nan_to_none(result)
-                    serialized_entries.append(serializable_result)
-
-                serialized_results[dataset_alias] = serialized_entries
-
-            # Écrire le JSON final
-            with open(json_path, 'w') as json_file:
-                json.dump(serialized_results, json_file, indent=2, ensure_ascii=False)
-
-            logger.info(f"Successfully wrote {len(serialized_results)} datasets results to {json_path}")
-
-            for dataset_alias, results in serialized_results.items():
-                dataset_json_path = os.path.join(self.args.catalog_dir, f"results_{dataset_alias}.json")
+            # Eval has finished. Process results and write JSON
+            try:
+                # Cherche tous les fichiers batch
+                batch_files = glob(os.path.join(results_files_dir, "results_*_batch_*.json"))
+                results_dict = {}
+                for batch_file in batch_files:
+    
+                    with open(batch_file, "r") as f:
+                        batch_results = json.load(f)
+                        # Transformer pour rendre sérialisable
+                        transform_in_place(batch_results, make_serializable)
+                        serializable_result = nan_to_none(batch_results)
+                    if alias not in results_dict:
+                        results_dict[alias] = []
+                    results_dict[alias].extend(serializable_result)
+                # Sauvegarde le JSON final
                 with open(dataset_json_path, 'w') as json_file:
                     # Vider le fichier s'il existe déjà
                     json_file.write('')
                     logger.info(f"Cleared contents of {json_file}")
                     json.dump({
-                        "dataset": dataset_alias,
-                        "results": results,
+                        "dataset": alias,
+                        "results": results_dict,
                         "metadata": {
                             "evaluation_date": pd.Timestamp.now().isoformat(),
-                            "total_entries": len(results),
+                            "total_entries": sum(len(v) for v in results_dict.values()),
                             "config": {
                                 "start_time": self.args.start_time,
                                 "end_time": self.args.end_time,
@@ -341,11 +342,15 @@ class DC2Evaluation:
                             }
                         }
                     }, json_file, indent=2, ensure_ascii=False)
-                logger.info(f"Created individual results file: {json_file}")
 
-        except Exception as exc:
-            logger.error(f"Failed to write JSON results: {exc}")
-            raise
-        finally:
-            self.dataset_processor.close()
+            except Exception as exc:
+                logger.error(f"Failed to write JSON results: {exc}")
+                raise
+            finally:
+                self.dataset_processor.close()
+
+
+
+        dataset_manager.file_cache.clear()
+
 

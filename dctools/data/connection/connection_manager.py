@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 import logging
 import pickle
+from pydoc import Helper
 import re
 import traceback
 from types import SimpleNamespace
@@ -23,7 +24,15 @@ import pandas as pd
 from pathlib import Path
 import xarray as xr
 
-from dctools.data.connection.config import BaseConnectionConfig
+
+from dctools.data.connection.config import (
+    BaseConnectionConfig,
+    ARGOConnectionConfig, GlonetConnectionConfig,
+    WasabiS3ConnectionConfig, S3ConnectionConfig, 
+    FTPConnectionConfig, CMEMSConnectionConfig,
+    LocalConnectionConfig
+)
+
 from dctools.data.datasets.dc_catalog import CatalogEntry
 from dctools.data.coordinates import (
     get_dataset_geometry,
@@ -37,109 +46,72 @@ from dctools.data.coordinates import (
 
 from dctools.data.datasets.dc_catalog import GLOBAL_METADATA
 from dctools.dcio.loader import FileLoader
+from dctools.utilities.file_utils import remove_file, empty_folder
 from dctools.utilities.misc_utils import (
     ensure_timestamp,
     deep_copy_object,
+    list_all_days,
 )
+
+
+# Liste des noms possibles pour la dimension temporelle
+TIME_NAMES = ['time', 'Time', 'TIME', 'date', 'datetime', 'valid_time',
+            'forecast_time', 'time_counter', 'profile_date']
+# Liste des noms possibles pour la dimension n_points
+POINT_DIM_NAMES =("N_POINTS", "n_points", "points", "obs")
 
 
 def get_time_bound_values(ds: xr.Dataset) -> tuple:
     """
-    Obtient les bornes min/max temporelles d'un dataset xarray de manière robuste.
-    
-    Explore différentes configurations où 'time' peut être :
-    - Une dimension principale
-    - Une coordonnée 
-    - Une variable de données
-    - Absente du dataset
-    
-    Args:
-        ds: Dataset xarray
-        
-    Returns:
-        tuple: (min_time, max_time) ou (None, None) si aucune donnée temporelle trouvée
+    Retourne les bornes temporelles (min, max) d'un dataset xarray, 
+    quelle que soit la structure (dimension, coordonnée, variable).
     """
-    # Liste des noms possibles pour la dimension temporelle
-    time_names = ['time', 'Time', 'TIME', 'date', 'datetime', 'valid_time', 
-                  'forecast_time', 'time_counter', 'profile_date']
-    
     time_vals = None
-    
+
     try:
-        # Chercher dans les dimensions principales
-        for time_name in time_names:
+        # Chercher la variable temporelle dans dims, coords, data_vars
+        for time_name in TIME_NAMES:
             if time_name in ds.dims:
-                try:
+                time_vals = ds[time_name] if time_name in ds.data_vars else ds.coords.get(time_name)
+                if time_vals is not None:
+                    break
+        if time_vals is None:
+            for time_name in TIME_NAMES:
+                if time_name in ds.coords:
                     time_vals = ds.coords[time_name]
                     break
-                except KeyError:
-                    continue
-        
-        # Si pas trouvé, chercher dans les coordonnées
         if time_vals is None:
-            for time_name in time_names:
-                if time_name in ds.coords:
-                    try:
-                        time_vals = ds.coords[time_name]
-                        break
-                    except KeyError:
-                        continue
-        
-        # Si pas trouvé, chercher dans les variables de données
-        if time_vals is None:
-            for time_name in time_names:
+            for time_name in TIME_NAMES:
                 if time_name in ds.data_vars:
-                    try:
-                        time_vals = ds[time_name]
-                        break
-                    except KeyError:
-                        continue
-        
-        # Si toujours pas trouvé, chercher des variables avec attributs temporels
+                    time_vals = ds[time_name]
+                    break
+
+        # Si rien trouvé, chercher une variable avec dtype datetime64
         if time_vals is None:
             for var_name, var in ds.data_vars.items():
-                if hasattr(var, 'attrs'):
-                    attrs = var.attrs
-                    # Chercher des indices d'attributs temporels
-                    temporal_indicators = ['time', 'date', 'temporal', 'calendar']
-                    if any(indicator in str(attrs).lower() for indicator in temporal_indicators):
-                        try:
-                            # Vérifier si ça ressemble à des données temporelles
-                            if np.issubdtype(var.dtype, np.datetime64) or 'time' in var_name.lower():
-                                time_vals = var
-                                break
-                        except Exception:
-                            continue
+                if np.issubdtype(var.dtype, np.datetime64):
+                    time_vals = var
+                    break
 
         if time_vals is not None:
-            # Vérifier le type de données
+            # Si tableau vide
+            if time_vals.size == 0:
+                return (None, None)
+            # Si datetime
             if np.issubdtype(time_vals.dtype, np.datetime64):
-                # Pour les données temporelles
-                # Utiliser les méthodes xarray
-                if time_vals.size == 1:   # nombre total d’éléments
-                    min_val = time_vals.isel(N_POINTS=0).load().item()
-                    max_val = min_val
+                vals = pd.to_datetime(time_vals.values)
+                # Si tableau, prendre min/max
+                if hasattr(vals, "min") and hasattr(vals, "max"):
+                    min_val = vals.min()
+                    max_val = vals.max()
                 else:
-                    min_val = pd.to_datetime(time_vals.values.min())
-                    max_val = pd.to_datetime(time_vals.values.max())
-                # Conversion seulement si nécessaire
-                if isinstance(min_val, np.datetime64):
-                    min_val = pd.Timestamp(min_val)
-                    max_val = pd.Timestamp(max_val)
-                else:
-                    min_val = pd.to_datetime(min_val)
-                    max_val = pd.to_datetime(max_val)
-                return (min_val, max_val)
+                    min_val = max_val = vals
+                return (pd.Timestamp(min_val), pd.Timestamp(max_val))
+            # Si numérique
             elif np.issubdtype(time_vals.dtype, np.floating) or np.issubdtype(time_vals.dtype, np.integer):
-                # Pour les données numériques
-                if time_vals.size == 1:   # nombre total d’éléments
-                    min_val = time_vals.isel(N_POINTS=0).load().item()
-                    max_val = min_val
-                else:
-                    min_val = float(time_vals.min().values)
-                    max_val = float(time_vals.max().values)
-
-                # Vérifier que les valeurs sont valides
+                vals = np.asarray(time_vals.values)
+                min_val = float(np.nanmin(vals))
+                max_val = float(np.nanmax(vals))
                 if np.isnan(min_val) or np.isnan(max_val):
                     return (None, None)
                 return (min_val, max_val)
@@ -154,15 +126,13 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
         traceback.print_exc()
         return (None, None)
 
-
-
 def clean_for_serialization(obj):
     """Nettoie les objets non-sérialisables avant pickle."""
     # Fermer/nettoyer les objets argopy
-    #if hasattr(obj, '_argo_index'):
-    #    obj._argo_index = None
-    #if hasattr(obj, '_argopy_fetcher'):
-    #    obj._argopy_fetcher = None
+    if hasattr(obj, '_argo_index'):
+        obj._argo_index = None
+    if hasattr(obj, '_argopy_fetcher'):
+        obj._argopy_fetcher = None
     if isinstance(obj, SimpleNamespace):
         # Nettoyer fsspec
         if hasattr(obj, 'fs'):
@@ -186,27 +156,28 @@ def clean_for_serialization(obj):
 
         # Nettoyer dataset_processor
         if hasattr(obj, 'dataset_processor'):
-            #try:
-            #    obj.params.dataset_processor.close()
-            #except:
-            #    pass
+            try:
+                obj.params.dataset_processor.close()
+            except:
+                pass
             obj.dataset_processor = None
     else:
         # Nettoyer fsspec
-        if hasattr(obj.params, 'fs') and hasattr(obj.params.fs, '_session'):
-            try:
-                if hasattr(obj.params.fs._session, 'close'):
-                    obj.params.fs._session.close()
-            except:
-                pass
+        if hasattr(obj.params, 'fs'):
+            if hasattr(obj.params.fs, '_session'):
+                try:
+                    if hasattr(obj.params.fs._session, 'close'):
+                        obj.params.fs._session.close()
+                except:
+                    pass
             obj.params.fs = None
 
         # Nettoyer dataset_processor
         if hasattr(obj.params, 'dataset_processor'):
-            #try:
-            #    obj.params.dataset_processor.close()
-            #except:
-            #    pass
+            try:
+                obj.params.dataset_processor.close()
+            except:
+                pass
             obj.params.dataset_processor = None
     return obj
 
@@ -220,10 +191,10 @@ class BaseConnectionManager(ABC):
         self.batch_size = batch_size
         if isinstance(connect_config, BaseConnectionConfig):
             self.params = connect_config.to_dict()
-        elif isinstance(connect_config, Namespace):
+        elif isinstance(connect_config, Namespace) or isinstance(connect_config, SimpleNamespace):
             self.params = connect_config
         else:
-            raise TypeError("Unknown type of connection config.")
+            raise TypeError(f"Unknown type of connection config: {type(connect_config)}.")
 
         self.start_time = self.params.filter_values.get("start_time")
         self.end_time = self.params.filter_values.get("end_time")
@@ -237,6 +208,8 @@ class BaseConnectionManager(ABC):
             self.params.groups = None
         self.file_cache = self.params.file_cache
         self.dataset_processor = self.params.dataset_processor
+        #if self.params.local_root is not None:
+        #    empty_folder(self.params.local_root, extension=".nc")
 
 
     def adjust_full_day(
@@ -286,10 +259,13 @@ class BaseConnectionManager(ABC):
             local_path = self._get_local_path(path)
             if not os. path. isfile(local_path):
                 self.download_file(path, local_path)
-
-            return self.open_local(local_path)
+                ds = self.open_local(local_path)
+                return ds
+            else:
+                return self.open_local(local_path)
         except Exception as exc:
             logger.warning(f"Failed to open file: {path}. Error: {repr(exc)}")
+            traceback.print_exc()
             return None
 
     def open_local(
@@ -308,11 +284,12 @@ class BaseConnectionManager(ABC):
         if Path(local_path).exists():
             # logger.debug(f"Opening local file: {local_path}")
 
-            return FileLoader.open_dataset_auto(
+            ds = FileLoader.open_dataset_auto(
                 local_path, self,
                 groups=self.params.groups,
                 variables=self.params.keep_variables,
             )
+            return ds
         return None
 
     def open_remote(
@@ -509,6 +486,7 @@ class BaseConnectionManager(ABC):
         global_metadata: dict,
         connection_params: dict,
         class_name: Any,
+        argo_index: Any = None,
     ):
         """
         Extract metadata for a specific file, combining global metadata with file-specific information.
@@ -521,33 +499,21 @@ class BaseConnectionManager(ABC):
         Returns:
             CatalogEntry: Metadata for the specific file as a CatalogEntry.
         """
-        
-        # Dictionnaire de mapping des noms vers les classes
-        CLASS_REGISTRY: Dict[Type[BaseConnectionConfig], Type[BaseConnectionManager]] = {
-            "S3WasabiManager": S3WasabiManager,
-            "FTPManager": FTPManager,
-            "GlonetManager": GlonetManager,
-            "ArgoManager": ArgoManager,
-            "CMEMSManager": CMEMSManager,
-            "S3Manager": S3Manager,
-            "LocalConnectionManager": LocalConnectionManager,
-        }
-        try:            
-            # Récupérer la classe depuis le registre
-            if class_name not in CLASS_REGISTRY:
-                raise ValueError(f"Unknown class name: {class_name}")
-            
-            manager_class = CLASS_REGISTRY[class_name]
+        try:
+
+            open_func = create_worker_connect_config(
+                connection_params,
+                argo_index,
+            )
+
             if class_name == "CMEMSManager":
-                manager = manager_class(
-                    connection_params, call_list_files=False,
-                    do_logging=True,
-                )
+                # cmems not compatible with Dask workers (pickling errors)
+                with dask.config.set(scheduler='synchronous'):
+                    ds = open_func(path, "rb")
             else:
-                manager = manager_class(
-                    connection_params, call_list_files=False
-                )
-            ds = manager.open(path, "rb")
+                ds = open_func(path, "rb")
+
+            # ds = open_func(path, "rb")
             if ds is None:
                 logger.warning(f"Could not open {path}")
                 return None
@@ -606,6 +572,8 @@ class BaseConnectionManager(ABC):
             values = ds.coords[coord].values
             if values.ndim != 1:
                 return None
+            if len(values) == 1:
+                return float(values[0])  # Retourne la valeur unique
             diffs = np.diff(values)
             return float(np.round(np.median(np.abs(diffs)), 6))
 
@@ -656,8 +624,15 @@ class BaseConnectionManager(ABC):
         logger.info(f"Processing {len(file_list)} files with integrated Dask client")
         metadata_list = []
 
-        try:
+        if hasattr(self, "argo_index") and self.argo_index is not None:
+            scattered_argo_index = self.dataset_processor.scatter_data(
+                self.argo_index,
+                broadcast_item=True,
+            )
+        else:
+            scattered_argo_index = None
 
+        try:
             connection_conf = self.get_config_clean_copy()
 
             futures = [
@@ -666,6 +641,7 @@ class BaseConnectionManager(ABC):
                     path, self._global_metadata,
                     connection_conf,
                     self.__class__.__name__,
+                    scattered_argo_index,
                 )
                 for path in file_list
             ]
@@ -808,7 +784,7 @@ class CMEMSManager(BaseConnectionManager):
 
             start_date = datetime.datetime(start_year, start_month, start_day)
             end_date = datetime.datetime(end_year, end_month, end_day)
-            list_dates = self.list_all_days(
+            list_dates = list_all_days(
                 start_date,
                 end_date,
             )
@@ -876,29 +852,6 @@ class CMEMSManager(BaseConnectionManager):
             path = datetime.datetime.strptime(path, "%Y-%m-%dT%H:%M:%S")
         return isinstance(path, datetime.datetime)
 
-    def list_all_days(
-            self,
-            start_date: datetime.datetime,
-            end_date: datetime.datetime
-        ) -> list[datetime.datetime]:
-        """
-        Return a list of datetime.datetime objects for each day between start_date and end_date (inclusive).
-
-        Parameters:
-            start_date (datetime): The start of the range.
-            end_date (datetime): The end of the range.
-
-        Returns:
-            List[datetime]: List of dates at 00:00:00 for each day in the range.
-        """
-        if start_date > end_date:
-            raise ValueError("start_date must be before or equal to end_date.")
-
-        start = datetime.datetime.combine(start_date.date(), datetime.datetime.min.time())
-        end = datetime.datetime.combine(end_date.date(), datetime.datetime.min.time())
-
-        n_days = (end - start).days + 1
-        return [start + datetime.timedelta(days=i) for i in range(n_days)]
 
 class FTPManager(BaseConnectionManager):
     @classmethod
@@ -936,11 +889,29 @@ class FTPManager(BaseConnectionManager):
             logger.error(f"Erreur lors de la liste des fichiers sur le serveur FTP : {repr(exc)}")
             return []
 
+class RecursionExit(Exception):
+    def __init__(self, value):
+        self.value = value
 
 class S3Manager(BaseConnectionManager):
     @classmethod
     def supports(cls, path: str) -> bool:
         return path.startswith("s3://")
+
+    def list_first_n_files(self, fs, remote_path, n=20, pattern="*.nc"):
+        """Use fsspec filesystem to quickly list up to n files recursively."""
+        import fnmatch
+        out = []
+        for root, dirs, files in fs.walk(remote_path):
+            for dir in dirs:
+                path = f"{remote_path}/{dir}"
+                self.list_first_n_files(fs, path, n=n, pattern=pattern)
+            for f in files:
+                if fnmatch.fnmatch(f, pattern):
+                    out.append(f"{root}/{f}")
+                    if len(out) >= n:
+                        raise RecursionExit(out)
+        return out
 
     def list_files(self) -> List[str]:
         """
@@ -956,10 +927,19 @@ class S3Manager(BaseConnectionManager):
                 logger.info(f"Accessing bucket: {self.params.bucket}")
 
             # Construire le chemin distant
-            remote_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}/{self.params.file_pattern}"
+            remote_base_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}"
+            remote_path = f"{remote_base_path}/{self.params.file_pattern}"
 
+            limit = self.params.max_samples if self.params.max_samples else len(files)
             # Utiliser fsspec pour accéder aux fichiers
-            files = sorted(self.params.fs.glob(remote_path))
+            if limit is not None:
+                try:
+                    files = self.list_first_n_files(self.params.fs, remote_base_path, n=limit)
+                except RecursionExit as e:
+                    files = e.value
+            else:
+                files = sorted(self.params.fs.glob(remote_path))
+            # files = files[-limit:]
             files_urls = [
                 f"s3://{file}"
                 for file in files
@@ -1007,6 +987,7 @@ class S3Manager(BaseConnectionManager):
                 FileLoader.open_dataset_auto(
                     path, self, groups=self.params.groups,
                     variables=self.params.keep_variables,
+                    file_storage = self.params.fs,
                 )
             )
         except Exception as exc:
@@ -1048,6 +1029,7 @@ class S3WasabiManager(S3Manager):
                 FileLoader.open_dataset_auto(
                     path, self, groups=self.params.groups,
                     variables=self.params.keep_variables,
+                    file_storage = self.params.fs,
                 )
             )
         except Exception as exc:
@@ -1134,13 +1116,13 @@ class ArgoManager(BaseConnectionManager):
     ):
         self.batch_size = batch_size
 
-        self.idx_fetcher = IndexFetcher(src="gdac", mode="research")
-        self.backup_idx_fetcher = IndexFetcher(src="erddap", mode="research")
+        self.idx_fetcher = IndexFetcher(src="erddap", mode="expert")   # mode = 
+        self.backup_idx_fetcher = IndexFetcher(src="gdac", mode="expert")
         if custom_cache is not None:
             argo_set_options(cachedir=custom_cache)  # Cache local
 
-        self.argo_loader = DataFetcher(src="gdac", mode="research")
-        self.backup_argo_loader = DataFetcher(src="erddap", mode="research")
+        self.argo_loader = DataFetcher(src="erddap", mode="expert")
+        self.backup_argo_loader = DataFetcher(src="gdac", mode="expert")
         self.lon_range = lon_range
         self.lat_range = lat_range
         self.lon_step = lon_step
@@ -1156,6 +1138,8 @@ class ArgoManager(BaseConnectionManager):
 
         if self.init_type != "from_json" and call_list_files:
             self._list_files = self.list_files()
+        import warnings
+        warnings.filterwarnings("ignore", category=FutureWarning, module="argopy")
 
     def _load_index_once(self):
         """Load ARGO index using argopy API with proper initialization."""
@@ -1222,7 +1206,6 @@ class ArgoManager(BaseConnectionManager):
         tmin: pd.Timestamp,
         tmax: pd.Timestamp,
         time_var_candidates=("TIME", "JULD", "time"),
-        point_dim_candidates=("N_POINTS", "n_points", "points", "obs"),
     ) -> xr.Dataset:
         """
         Filter an ARGO profile dataset by a time interval [tmin, tmax].
@@ -1239,14 +1222,13 @@ class ArgoManager(BaseConnectionManager):
             Time window for filtering.
         time_var_candidates : tuple[str], optional
             Possible names of the time variable.
-        point_dim_candidates : tuple[str], optional
-            Possible names of the point dimension.
 
         Returns
         -------
         xr.Dataset
             Filtered dataset containing only points within the time window.
         """
+
         # Find the time variable
         time_var = None
         for cand in time_var_candidates:
@@ -1263,7 +1245,7 @@ class ArgoManager(BaseConnectionManager):
 
         # Case 1: trajectory-like dataset with N_POINTS dimension
         point_dim = None
-        for cand in point_dim_candidates:
+        for cand in POINT_DIM_NAMES:
             if cand in ds.dims:
                 point_dim = cand
                 break
@@ -1310,11 +1292,9 @@ class ArgoManager(BaseConnectionManager):
             date_start, date_end = time_bounds
             # Extraction des coordonnées ARGO
             coord_sys = global_metadata.get('coord_system', {})
-            
-            # Variables
-            variables = global_metadata.get("variables", {})
 
             geometry = get_dataset_geometry(ds, coord_sys)
+            ds.close()
             
             # Créer l'entrée
             metadata = CatalogEntry(
@@ -1325,7 +1305,7 @@ class ArgoManager(BaseConnectionManager):
                 geometry=geometry,
             )
             return metadata
-            
+
         except Exception as exc:
             logger.error(f"ARGO worker error for {path}: {exc}")
             traceback.print_exc()
@@ -1344,15 +1324,14 @@ class ArgoManager(BaseConnectionManager):
         
         try:
             # Scatter une seule fois les objets volumineux
-            connection_conf = deep_copy_object(self.connect_config)
-            connection_conf = clean_for_serialization(self.connect_config)
+            connection_conf = self.get_config_clean_copy()
             scattered_config = self.dataset_processor.scatter_data(
-                connection_conf, broadcast_item=True)
+                connection_conf, broadcast_item=False)
             scattered_metadata = self.dataset_processor.scatter_data(
-                self._global_metadata, broadcast_item=True)
+                self._global_metadata, broadcast_item=False)
             scattered_argo_index = self.dataset_processor.scatter_data(
-                self.argo_index, broadcast_item=True)
-            
+                self.argo_index, broadcast_item=False)
+
             delayed_tasks = [
                 dask.delayed(self._extract_argo_metadata)(
                     start_date, scattered_config, scattered_metadata, scattered_argo_index
@@ -1385,6 +1364,26 @@ class ArgoManager(BaseConnectionManager):
         if match:
             return match.group(1)
         return None
+
+
+    def list_dates(self) -> List[str]:
+        """List files in the Copernicus Marine directory."""
+        logger.info("Listing files in Copernicus Marine directory.")
+        try:
+            start_dt = pd.to_datetime(self.start_time)
+            end_dt = pd.to_datetime(self.end_time)
+
+            start_date = datetime.datetime(start_dt.year, start_dt.month, start_dt.day)
+            end_date = datetime.datetime(end_dt.year, end_dt.month, end_dt.day)
+            list_dates = list_all_days(start_date, end_date)
+            list_dates = list_dates[:self.params.max_samples]
+
+            # Convertir chaque date en string au format attendu par argopy
+            valid_dates = [date.strftime("%Y-%m-%dT%H:%M:%S") for date in list_dates]
+            return valid_dates
+        except Exception as exc:
+            logger.error(f"Failed to list files from CMEMS: {repr(exc)}")
+            return []
 
     def list_files(self) -> list[str]:
         """Liste les couples (wmo, cycle) sous forme de string 'wmo:cycle'."""
@@ -1452,7 +1451,7 @@ class ArgoManager(BaseConnectionManager):
         logger.info(f"Found {len(couples_str)} valid ARGO profiles (formatted as 'wmo:cycle')")
         return couples_str
 
-    def open(self, wmo_cycle_str: str, mode: str = "rb", add_depth: bool = True) -> Optional[xr.Dataset]:
+    def open(self, wmo_cycle_str: str, mode: str = "rb", add_depth: bool = False) -> Optional[xr.Dataset]:
         """Ouvre un profil ARGO à partir d'un string 'wmo:cycle'."""
         try:
             # Parse le string
@@ -1469,21 +1468,21 @@ class ArgoManager(BaseConnectionManager):
             try:
                 profile_ds = profile.load().data
             except Exception as e:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} failed to load: {e}")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} failed to load: {e}")
                 return None
 
             # Vérifier si dataset est valide
             if profile_ds is None:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} returned None")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} returned None")
                 return None
             if not profile_ds.dims:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} has no dimensions")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} has no dimensions")
                 return None
             if "N_POINTS" not in profile_ds.sizes or profile_ds.sizes["N_POINTS"] == 0:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} has zero points")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} has zero points")
                 return None
 
-            # Vérifier si toutes les variables sont vides
+            # Vérifier si les variables sont vides
             n_nonempty_vars = sum(
                 (v.size > 0) for v in profile_ds.data_vars.values()
             )
@@ -1491,18 +1490,29 @@ class ArgoManager(BaseConnectionManager):
                 logger.warning(f"Profile WMO={wmo}, cycle={cycle} has no non-empty variables")
                 return None
 
+            # Filtrage des variables après ouverture
+            if self.params.keep_variables:
+                available_vars = list(profile_ds.variables.keys())
+                vars_to_drop = [v for v in available_vars if v not in self.params.keep_variables]
+                if vars_to_drop:
+                    profile_ds = profile_ds.drop_vars(vars_to_drop, errors="ignore")
+
             # Ajouter dimension profondeur si besoin
             if add_depth:
-                profile_ds = self._add_depth_dimension(profile_ds)
+                profile__with_depth = self._add_depth_dimension(profile_ds)
+                profile_ds.close()
+            else:
+                profile__with_depth = profile_ds
             
             # chunking
-            profile_ds = profile_ds.chunk({"N_POINTS": 10})
+            profile__with_depth = profile__with_depth.chunk({"N_POINTS": 10})
 
             # logger.debug(f"Opened ARGO profile WMO={wmo}, cycle={cycle} with {profile_ds.dims['N_POINTS']} points")
-            return profile_ds
+            return profile__with_depth
 
         except Exception as e:
             logger.error(f"Failed to load ARGO profile {wmo_cycle_str}: {e}")
+            traceback.print_exc()
             return None
 
 
@@ -1541,3 +1551,81 @@ class ArgoManager(BaseConnectionManager):
         }
         
         return ds_copy
+
+
+CONNECTION_CONFIG_REGISTRY = {
+    "argo": ARGOConnectionConfig,
+    "cmems": CMEMSConnectionConfig,
+    "ftp": FTPConnectionConfig,
+    "glonet": GlonetConnectionConfig,
+    "local": LocalConnectionConfig,
+    "s3": S3ConnectionConfig,
+    "wasabi": WasabiS3ConnectionConfig,
+}
+
+CONNECTION_MANAGER_REGISTRY = {
+    "argo": ArgoManager,
+    "cmems": CMEMSManager,
+    "ftp": FTPManager,
+    "glonet": GlonetManager,
+    "local": LocalConnectionManager,
+    "s3": S3Manager,
+    "wasabi": S3WasabiManager,
+}
+
+
+def create_worker_connect_config(
+    config: Any,
+    argo_index: Any = None
+) -> tuple:
+    """Crée les configurations de connexion pour les sources prédictives et de référence."""
+    protocol = config.protocol
+
+    if protocol == 'cmems':
+        if hasattr(config, 'fs') and hasattr(config.fs, '_session'):
+            try:
+                if hasattr(config.fs._session, 'close'):
+                    config.fs._session.close()
+            except:
+                pass
+            config.fs = None
+
+    config.dataset_processor = None
+
+    # Recrée l'objet de lecture dans le worker
+    config_cls = CONNECTION_CONFIG_REGISTRY[protocol]
+    connection_cls = CONNECTION_MANAGER_REGISTRY[protocol]
+    delattr(config, "protocol")
+    config = config_cls(vars(config))
+
+    # remove fsspec handler 'fs' from Config, otherwise: serialization
+    if protocol == 'cmems': 
+        if hasattr(
+            config.params, 'fs') and hasattr(config.params.fs, '_session'
+        ):
+            try:
+                if hasattr(config.params.fs._session, 'close'):
+                    config.params.fs._session.close()
+            except:
+                pass
+            config.params.fs = None
+
+    if protocol == 'cmems':
+        connection_manager = connection_cls(
+            config,
+            call_list_files=False,
+            do_logging=True,
+        )
+    elif protocol == "argo":
+        connection_manager = connection_cls(
+            config,
+            argo_index=argo_index,
+            call_list_files=False,
+        )
+    else:
+        connection_manager = connection_cls(
+            config, call_list_files=False
+        )
+    open_func = connection_manager.open
+
+    return open_func

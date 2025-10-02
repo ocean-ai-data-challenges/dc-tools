@@ -12,6 +12,7 @@ from loguru import logger
 import numpy as np
 from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 # from pathlib import Path
 import xarray as xr
 import torch
@@ -226,32 +227,6 @@ def add_time_dim(
         else:
             return ds.expand_dims(time=[time_val])
 
-def connection_manager_from_config(
-    connection_params: BaseConnectionConfig,
-    class_name: Optional[str] = None,
-    argo_index: Optional[Union[pd.DataFrame, xr.Dataset]] = None,
-) -> BaseConnectionManager:
-    if class_name not in CLASS_REGISTRY:
-        raise ValueError(f"Unknown class name: {class_name}")
-  
-    manager_class = CLASS_REGISTRY[class_name]
-    if class_name == "CMEMSManager":
-        manager = manager_class(
-            connection_params, call_list_files=False,
-            do_logging=False,
-        )
-    elif class_name == "ArgoManager":
-        manager = manager_class(
-            connection_params, call_list_files=False,
-            argo_index=argo_index,
-        )
-
-    else:
-        manager = manager_class(
-            connection_params, call_list_files=False
-        )
-    return manager
-
 
 def filter_by_time(df: pd.DataFrame, t0: pd.Timestamp, t1: pd.Timestamp) -> pd.DataFrame:
     """
@@ -264,6 +239,108 @@ def filter_by_time(df: pd.DataFrame, t0: pd.Timestamp, t1: pd.Timestamp) -> pd.D
     date_end = pd.to_datetime(df_copy["date_end"])
     mask = (date_start <= t1) & (date_end >= t0)
     return df_copy[mask]
+
+
+def preprocess_argo_profiles(
+    profile_sources: List[str],
+    open_func: Callable[[str, Optional[str]], xr.Dataset],
+    alias: str,
+    time_bounds: Tuple[pd.Timestamp, pd.Timestamp],
+    depth_levels: Union[List[float], np.ndarray],
+):
+    interp_profiles = []
+    time_vals = []
+
+    def process_one_profile(profile_source):
+        try:
+            # open dataset
+            ds = open_func(profile_source, alias) if alias is not None else open_func(profile_source)
+            if ds is None:
+                return None, None
+
+            ds = ds.rename({"PRES_ADJUSTED": "depth"})
+            ds = ArgoManager.filter_argo_profile_by_time(
+                ds,
+                tmin=time_bounds[0],
+                tmax=time_bounds[1],
+            )
+            if "N_POINTS" not in ds.dims or ds.sizes.get("N_POINTS", 0) == 0:
+                logger.warning(f"Argo profile {profile_source} is empty after time filtering, skipping.")
+                return None, None
+
+            lat = ds["LATITUDE"].isel(N_POINTS=0).values.item()
+            lon = ds["LONGITUDE"].isel(N_POINTS=0).values.item()
+            time = pd.to_datetime(ds["TIME"].values)
+            if isinstance(time, (np.ndarray, list)) and len(time) > 1:
+                mean_time = pd.to_datetime(time).mean()
+            else:
+                mean_time = pd.to_datetime(time[0] if isinstance(time, (np.ndarray, list)) else time)
+            depths = ds["depth"].values
+
+            data_dict = {}
+            for v in ds.data_vars:
+                if v == "depth":
+                    continue
+                vals = ds[v].values
+                if np.all(np.isnan(vals)):
+                    interp_vals = np.full_like(depth_levels, np.nan, dtype=float)
+                else:
+                    interp_vals = np.interp(
+                        depth_levels,
+                        depths,
+                        vals,
+                        left=np.nan,
+                        right=np.nan
+                    )
+                data_dict[v] = ("depth", interp_vals)
+            ds.close()
+            interp_ds = xr.Dataset(
+                data_dict,
+                coords={
+                    "depth": depth_levels,
+                    "lat": lat,
+                    "lon": lon,
+                    "time": time
+                }
+            )
+            return interp_ds, mean_time
+        except Exception as e:
+            logger.warning(f"Failed to process Argo profile {profile_source}: {e}")
+            traceback.print_exc()
+            return None, None
+
+    # Parallélisation avec ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as executor:  # adapte max_workers à ton CPU
+        futures = [executor.submit(process_one_profile, src) for src in profile_sources[0:10]] # TODO remove this shortcut after optimizing the processing: thousands of files to preprocess at each timestep !
+        p = 0
+        for future in as_completed(futures):
+            p += 1
+            print(f"Processing profile {p}/{len(futures)}")
+            interp_ds, mean_time = future.result()
+            if interp_ds is not None:
+                interp_profiles.append(interp_ds)
+                time_vals.append(mean_time)
+
+    if len(interp_profiles) == 0:
+        return None
+    # Convertit chaque élément en pd.Timestamp scalaire
+    clean_time_vals = []
+    for t in time_vals:
+        if isinstance(t, (pd.DatetimeIndex, np.ndarray, list)):
+            # Prend le premier élément si c'est un index ou une liste
+            clean_time_vals.append(pd.to_datetime(t[0]))
+        else:
+            clean_time_vals.append(pd.to_datetime(t))
+    mean_time = pd.Series(clean_time_vals).mean()
+    interp_profiles = [ds.drop_vars("time") if "time" in ds.coords else ds for ds in interp_profiles]
+
+    if len(interp_profiles) == 1:
+        combined = interp_profiles[0]
+    else:
+        combined = xr.concat(interp_profiles, dim="N_POINTS")
+
+    combined = combined.assign_coords(time=mean_time)
+    return combined
 
 
 def preprocess_one_npoints(
@@ -304,13 +381,6 @@ def preprocess_one_npoints(
         if time_name in ds.variables and time_name not in ds.coords:
             ds = ds.set_coords(time_name)
 
-        # Filtrer les valeurs de temps (si profil ARGO)
-        if alias == "argo_profiles":
-            ds = ArgoManager.filter_argo_profile_by_time(
-                ds,
-                tmin=time_bounds[0],
-                tmax=time_bounds[1],
-            )
         time_coord = ds.coords[time_name]
 
         # Identifier la dimension de points
@@ -328,12 +398,7 @@ def preprocess_one_npoints(
             ds, filtered_df, points_dim=points_dim, time_coord=time_coord, idx=idx
         )
 
-        if coordinates.get('depth', None) in list(ds_with_time.coords) and alias == "argo_profiles":
-            # sous-échantilloner depth aux valeurs de la grille cible (par interpolation)
-            ds_interp = interp_single_argo_profile(ds_with_time, target_dimensions['depth'])
-        else:
-            ds_interp = ds_with_time
-
+        ds_interp = ds_with_time
         ds_interp = ds_interp.chunk({points_dim: 50000})
         return ds_interp
 
@@ -385,7 +450,7 @@ class EvaluationDataloader:
         try:
             # Vérifier que le forecast complet est dans la plage de données disponibles
             for ref_alias in self.ref_aliases:
-                logger.info(f"=============  PROCESSING REFERENCE ALIAS: {ref_alias} ==============")
+                logger.info(f"=============  PREPROCESSING REFERENCE DATASET: {ref_alias} ==============")
                 for _, row in self.forecast_index.iterrows():
                     # Vérifier si on a suffisamment de données pour ce forecast
                     forecast_reference_time = row["forecast_reference_time"]
@@ -399,6 +464,16 @@ class EvaluationDataloader:
                     else:
                         forecast_end_time = forecast_reference_time + pd.Timedelta(days=max_lead_time)
 
+                    entry = {
+                        "forecast_reference_time": forecast_reference_time,
+                        "lead_time": lead_time,
+                        "valid_time": valid_time,
+                        "pred_data": row["file"],
+                        "ref_data": None,
+                        "ref_alias": ref_alias,
+                        "pred_coords": self.pred_coords,
+                        "ref_coords": self.ref_coords[ref_alias] if ref_alias else None,
+                    }
                     if ref_alias:
                         ref_catalog = self.ref_catalogs[ref_alias]
                         ref_df = ref_catalog.get_dataframe()
@@ -414,20 +489,8 @@ class EvaluationDataloader:
                                 yield batch
                                 batch = []
                             break
-
-                    entry = {
-                        "forecast_reference_time": forecast_reference_time,
-                        "lead_time": lead_time,
-                        "valid_time": valid_time,
-                        "pred_data": row["file"],
-                        "ref_data": None,
-                        "ref_alias": ref_alias,
-                        "pred_coords": self.pred_coords,
-                        "ref_coords": self.ref_coords[ref_alias] if ref_alias else None,
-                    }
-                    
-                    if ref_alias:
-                        ref_catalog = self.ref_catalogs[ref_alias]
+                        
+                        # ref_catalog = self.ref_catalogs[ref_alias]
                         coord_system = ref_catalog.get_global_metadata().get("coord_system")
                         is_observation = coord_system.is_observation_dataset() if coord_system else False
                         
@@ -451,6 +514,7 @@ class EvaluationDataloader:
                                 "time_bounds": time_bounds,
                             }
                             entry["ref_is_observation"] = True
+                            entry["obs_time_interval"] = obs_time_interval
                         else:
                             # Logique gridded : associer le fichier de référence couvrant valid_time
                             ref_path = self._find_matching_ref(valid_time, ref_alias)
@@ -459,7 +523,6 @@ class EvaluationDataloader:
                                 continue
                             entry["ref_data"] = ref_path
                             entry["ref_is_observation"] = False
-                            entry["obs_time_interval"] = obs_time_interval
                     
                     batch.append(entry)
                     # Adapter la taille de batch selon le mode parallélisation
@@ -579,6 +642,32 @@ def concat_with_dim(
     concat_dim: str,
     sort: bool = True,
 ):
+    for i, ds in enumerate(datasets):
+        if np.issubdtype(ds.coords["time"].dtype, np.integer):
+            ref_date = ds.coords["time"].attrs.get("units", None)
+            if ref_date:
+                # Exemple: "days since 2024-01-01"
+                import cftime
+                units = ref_date
+                times = ds.coords["time"].values
+                # Utilise cftime.num2date si disponible
+                try:
+                    from cftime import num2date
+                    ds = ds.assign_coords(time=num2date(times, units))
+                except ImportError:
+                    # Fallback: conversion manuelle si possible
+                    base_date = pd.to_datetime(units.split("since")[1].strip().split(" ")[0])
+                    ds = ds.assign_coords(time=base_date + pd.to_timedelta(times, unit="D"))
+            elif ds.coords["time"].dtype == "O":
+                # Si déjà objet, rien à faire
+                pass
+                # Si time est déjà datetime, rien à faire
+            else:
+                ds = ds.assign_coords(time=ds.coords["time"].astype("datetime64[ns]"))
+
+        datasets[i] = ds
+
+
     datasets_with_dim = []
     for i, ds in enumerate(datasets):
         if concat_dim not in ds.dims:
@@ -660,9 +749,34 @@ class ObservationDataViewer:
         # swath_dims = {"num_lines", "num_pixels", "num_nadir"}
         reduced_swath_dims = {"num_lines", "num_pixels"}
         n_points_dims = {"n_points", "N_POINTS", "points", "obs"}
+
+        # si profils argo, prétraitement particulier :
+
+        if self.alias == "argo_profiles":
+            logger.info("Argo profiles detected - special preprocessing")
+            try:
+                result = preprocess_argo_profiles(
+                    profile_sources=dataset_paths,
+                    open_func=self.load_fn,
+                    alias=self.alias,
+                    time_bounds=self.time_bounds,
+                    depth_levels=self.target_dimensions.get('depth', np.array([])),
+                )
+                if result is None:
+                    logger.error("No Argo profiles could be processed")
+                    return None
+                logger.info(f"Final Argo result: {result.sizes.get('profile', 1)} profiles, "
+                        f"{len(result.data_vars)} variables")
+                if load_to_memory:
+                    result = result.compute()
+                return result
+            except Exception as e:
+                logger.error(f"Argo preprocessing failed: {e}")
+                traceback.print_exc()
+                return None
     
         # Données avec dimension n_points/N_POINTS uniquement
-        if any(dim in first_ds.dims for dim in n_points_dims) and not reduced_swath_dims.issubset(first_ds.dims):            
+        elif any(dim in first_ds.dims for dim in n_points_dims) and not reduced_swath_dims.issubset(first_ds.dims):            
             try:
                 # Nettoyer et traiter les datasets
                 if self.dataset_processor is not None:
@@ -817,6 +931,7 @@ class ObservationDataViewer:
                     all_datasets = [self.load_fn(row["path"], self.alias) for _, row in dataframe.iterrows()]
                 else:
                     all_datasets = [self.load_fn(row["path"]) for _, row in dataframe.iterrows()]
+                all_datasets = [x for x in all_datasets if x is not None]
                 for idx, ds in enumerate(all_datasets):
                     all_datasets[idx] = filter_variables(ds, self.keep_vars)
                 combined = concat_with_dim(all_datasets, concat_dim="time", sort=True)

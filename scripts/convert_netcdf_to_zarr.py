@@ -1,52 +1,110 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
 
-import argparse
-from argparse import Namespace
+"""
+Script pour convertir des fichiers NetCDF vers Zarr.
+Utilise dask pour le parallélisme et optimise la mémoire.
+"""
+
 import os
-from unittest import result
-import dask
+import sys
+from pathlib import Path
 import pandas as pd
-import xarray as xr
-from typing import Any
+from typing import Any, List, Optional
+import argparse
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import multiprocessing
 
+import dask
+import dask.array as da
+from dask.distributed import Client, LocalCluster
+from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
+import xarray as xr
 import yaml
+import zarr
+from tqdm import tqdm
 
-from dctools.data.connection.connection_manager import clean_for_serialization
+from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
+from dctools.data.connection.connection_manager import clean_for_serialization, create_worker_connect_config
 from dctools.data.coordinates import TARGET_DIM_RANGES, TARGET_DEPTH_VALS
 from dctools.data.datasets.dataset import get_dataset_from_config
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.dcio.saver import progressive_zarr_save
-from dctools.metrics.evaluator import (
-    CONNECTION_CONFIG_REGISTRY, CONNECTION_REGISTRY,
-)
-from dctools.processing.interpolation import interpolate_dataset
 from dctools.utilities.misc_utils import deep_copy_object
+from dctools.utilities.xarray_utils import netcdf_to_zarr
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Interpole les variables CMEMS et sauvegarde en Zarr journalier.")
+    '''default_config = os.path.join(os.path.dirname(__file__), "interpolate_config.yaml")
+    parser.add_argument(
+        "--config", type=str, default=default_config,
+        help=f"Chemin du fichier de configuration YAML (défaut: {default_config})"
+    )'''
+    parser.add_argument("--source", type=str, required=True, help="Nom de la source à traiter (ex: glorys)")
+    parser.add_argument("--data_dir", type=str, required=True, help="Répertoire de stockage des fichiers intermédiaires")
+    parser.add_argument("--output_dir", type=str, required=True, help="Répertoire de sortie des fichiers Zarr")
 
-def clean_namespace(namespace: Namespace) -> Namespace:
-    ns = Namespace(**vars(namespace))
-    # Supprime les attributs non picklables
-    for key in ['dask_cluster', 'fs', 'dataset_processor', 'client', 'session']:
-        if hasattr(ns, key):
-            delattr(ns, key)
-    # Nettoie aussi les objets dans ns.params si présent
-    if hasattr(ns, "params"):
-        for key in ['fs', 'client', 'session', 'dataset_processor']:
-            if hasattr(ns.params, key):
-                delattr(ns.params, key)
-    return ns
+    return parser.parse_args()
 
-def interpolate_cmems_to_zarr(
+
+def convert_single_file(
+    ds: xr.Dataset, 
+    output_path: str, 
+    chunk_size: dict = None,
+    compression: str = 'zlib',
+    compression_level: int = 3
+) -> bool:
+    """
+    Convertit un seul fichier NetCDF vers Zarr.
+    
+    Args:
+        input_path: Chemin vers le fichier NetCDF
+        output_path: Chemin vers le fichier Zarr de sortie
+        chunk_size: Dictionnaire des tailles de chunks par dimension
+        compression: Type de compression ('gzip', 'lz4', 'blosc')
+        compression_level: Niveau de compression (1-9)
+    
+    Returns:
+        bool: True si succès, False sinon
+    """
+    try:
+        # Ouvrir avec chunks optimisés
+            
+        # Configuration de l'encodage Zarr optimisé
+        encoding = {}
+        for var in ds.data_vars:
+            chunks = ds[var].chunks if hasattr(ds[var], 'chunks') else None
+            if chunks is not None:
+                # Si chunks est une tuple de tuples, aplatir
+                if isinstance(chunks, tuple) and isinstance(chunks[0], tuple):
+                    chunks = tuple(c[0] for c in chunks)
+            encoding[var] = {
+                'compressor': zarr.Blosc(cname=compression, clevel=compression_level),
+                'chunks': chunks
+            }
+        
+        # Conversion vers Zarr
+        ds.to_zarr(
+            output_path,
+            mode='w',
+            encoding=encoding,
+            consolidated=True,  # Métadonnées consolidées pour de meilleures performances
+            )
+            
+        return True
+        
+    except Exception as exc:
+        logger.error(f"Erreur lors de la conversion: {exc}")
+        return False
+
+def convert_to_zarr_worker(
     source_config: dict,
     file_path: str,
     variables: list,
-    out_grid: dict,
     output_dir: str,
-    start_date: str,
-    end_date: str,
-    transform: Any,
-    weights_filepath: str = None,
     argo_index: Any = None,
 ):
     """
@@ -60,98 +118,67 @@ def interpolate_cmems_to_zarr(
         end_date (str): date de fin (YYYY-MM-DD)
         weights_filepath (str): chemin vers le fichier de poids xESMF (optionnel)
     """
-    #os.makedirs(output_dir, exist_ok=True)
-    #dates = pd.date_range(start=start_date, end=end_date, freq="D")
     protocol = source_config.protocol
-    delattr(source_config, "protocol")
 
-    config_cls = CONNECTION_CONFIG_REGISTRY[protocol]
-    connection_cls = CONNECTION_REGISTRY[protocol]
-    config = config_cls(**vars(source_config))
-
-    if protocol == 'cmems':
-        if hasattr(config.params, 'fs'):
-            try:
-                if hasattr(config.params.fs, '_session'):
-                    if hasattr(config.params.fs._session, 'close'):
-                        config.params.fs._session.close()
-            except:
-                pass
-            delattr(config.params, "fs")
-
-
-    if protocol == "argo":
-        connection_manager = connection_cls(config, argo_index=argo_index)
-    else:
-        connection_manager = connection_cls(config)
-    open_func = connection_manager.open
+    open_func = create_worker_connect_config(
+        source_config,
+        argo_index,
+    )
 
     if protocol == "cmems":
         # cmems not compatible with Dask workers (pickling errors)
         with dask.config.set(scheduler='synchronous'):
             ds = open_func(file_path)
-            # Sélectionne les variables à interpoler
-            ds_sel = ds[variables].copy()
-            ds_transform = transform(ds_sel)
-            # Interpolation
-            ds_interp = interpolate_dataset(
-                ds=ds_transform,
-                target_grid=out_grid,
-                dataset_processor=None,
-                weights_filepath=weights_filepath,
-                interpolation_lib='xesmf',
-            )
     else:
         # Sélectionne les variables à interpoler
         ds = open_func(file_path)
-        ds_sel = ds[variables].copy()
-        ds_transform = transform(ds_sel)
-        # Interpolation
-        ds_interp = interpolate_dataset(
-            ds=ds_transform,
-            target_grid=out_grid,
-            dataset_processor=None,
-            weights_filepath=weights_filepath,
-            interpolation_lib='xesmf',
-        )
 
-    if ds_interp is None:
+    input_name = Path(file_path).name
+    output_name = str(Path(input_name).with_suffix(".zarr"))
+    output_path = os.path.join(output_dir, output_name)
+    zarr_path = netcdf_to_zarr(ds, output_path, overwrite=True)
+
+    logger.info(f"Converted to zarr: {zarr_path}")
+
+
+def estimate_optimal_chunks(sample_file: str) -> dict:
+    """Estime la taille optimale des chunks basée sur un fichier d'exemple."""
+    
+    try:
+        with xr.open_dataset(sample_file) as ds:
+            chunks = {}
+            
+            for dim, size in ds.sizes.items():
+                if dim == 'time':
+                    chunks[dim] = min(size, 90)
+                elif dim in ['lat', 'latitude', 'y']:
+                    chunks[dim] = min(size, 200)
+                elif dim in ['lon', 'longitude', 'x']:
+                    chunks[dim] = min(size, 200)
+                elif dim in ['depth', 'lev', 'level']:
+                    # Pour la profondeur, garder toutes les couches ensemble
+                    chunks[dim] = size
+                else:
+                    # Pour autres dimensions, chunks raisonnables
+                    chunks[dim] = min(size, 100)
+            
+            logger.info(f"Chunks estimés: {chunks}")
+            return chunks
+            
+    except Exception as exc:
+        logger.warning(f"Impossible d'estimer les chunks: {exc}")
         return None
-    # Nom du fichier Zarr
-    if isinstance(file_path, pd.Timestamp):
-        file_name = file_path.strftime("%Y%m%d")
-    elif not isinstance(file_path, str):
-        file_path = str(file_path)
-    else:
-        pass
-
-    file_name = file_name.replace(" ", "_").replace(":", "_")
-    zarr_path = os.path.join(output_dir, f"{file_name}.zarr")
 
 
+def find_netcdf_files(directory: str, pattern: str = "**/*.nc") -> List[str]:
+    """Trouve tous les fichiers NetCDF dans un répertoire."""
+    
+    path = Path(directory)
+    files = list(path.glob(pattern))
+    logger.info(f"Trouvé {len(files)} fichiers NetCDF dans {directory}")
+    
+    return [str(f) for f in files]
 
-    # Sauvegarde
-    with dask.config.set(scheduler='synchronous'):
-        ds_interp.to_zarr(zarr_path, mode="w", consolidated=True)
-    ds.close()
-    print(f"Saved standardized dataset to {zarr_path}")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Interpole les variables CMEMS et sauvegarde en Zarr journalier.")
-    default_config = os.path.join(os.path.dirname(__file__), "interpolate_config.yaml")
-    parser.add_argument(
-        "--config", type=str, default=default_config,
-        help=f"Chemin du fichier de configuration YAML (défaut: {default_config})"
-    )
-    parser.add_argument("--source", type=str, required=True, help="Nom de la source à traiter (ex: glorys)")
-    parser.add_argument("--data_dir", type=str, required=True, help="Répertoire de stockage des fichiers intermédiaires")
-    parser.add_argument("--output_dir", type=str, required=True, help="Répertoire de sortie des fichiers Zarr")
-
-    default_weights_filepath = os.path.join(os.path.dirname(__file__), "glorys_weights.nc")
-    parser.add_argument("--weights_filepath", type=str, default=default_weights_filepath,
-        help="Chemin du fichier de poids xESMF (optionnel)")
-    return parser.parse_args()
 
 
 def build_dataset_from_config(args, source_config, dataset_processor, root_data_folder, root_catalog_folder, file_cache=None):
@@ -181,10 +208,21 @@ def build_dataset_from_config(args, source_config, dataset_processor, root_data_
     )
     return dataset
 
-def main():
-    # args = parse_args()
+def clean_namespace(namespace: argparse.Namespace) -> argparse.Namespace:
+    ns = argparse.Namespace(**vars(namespace))
+    # Supprime les attributs non picklables
+    for key in ['dask_cluster', 'fs', 'dataset_processor', 'client', 'session']:
+        if hasattr(ns, key):
+            delattr(ns, key)
+    # Nettoie aussi les objets dans ns.params si présent
+    if hasattr(ns, "params"):
+        for key in ['fs', 'client', 'session', 'dataset_processor']:
+            if hasattr(ns.params, key):
+                delattr(ns.params, key)
+    return ns
 
-    config_name = "interpolate_config"
+def main():
+    config_name = "convert_to_zarr_config"
     config_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         f"{config_name}.yaml",
@@ -203,7 +241,6 @@ def main():
     output_dir = args.output_dir
     start_date = args.start_time
     end_date = args.end_time
-    weights_filepath = args.weights_filepath
     os.makedirs(output_dir, exist_ok=True)
 
     # Trouver la source demandée dans la config
@@ -230,7 +267,7 @@ def main():
         target_dimensions=TARGET_DIM_RANGES,
         time_tolerance=pd.Timedelta(hours=args.delta_time),
         list_references=[source_name],
-        max_cache_files=args.max_cache_files,
+        max_cache_files=args.max_cache_files
     )
     manager.add_dataset(source_name, dataset)
 
@@ -241,18 +278,6 @@ def main():
 
     # Construire le catalogue
     manager.build_catalogs()
-
-    # initialiser transformation standardize_glorys
-    transform = manager.get_transform(
-        "standardize",
-        dataset_alias=source_name,
-        interp_ranges=TARGET_DIM_RANGES,
-        weights_path=weights_filepath,
-        depth_coord_vals=TARGET_DEPTH_VALS,
-    )
-
-    if hasattr(transform, 'dataset_processor'):
-        delattr(transform, 'dataset_processor')
 
     all_managers,_, all_connection_params = manager.get_config()
     connection_params = all_connection_params.get(source_name, None)
@@ -278,12 +303,6 @@ def main():
     # Récupérer le catalogue du dataset
     catalog_df = dataset.get_catalog().get_dataframe()
     variables = source_cfg.get("keep_variables", None)
-    out_grid = {
-        "lat": TARGET_DIM_RANGES["lat"],
-        "lon": TARGET_DIM_RANGES["lon"],
-    }
-    if "depth" in TARGET_DIM_RANGES:
-        out_grid["depth"] = TARGET_DIM_RANGES["depth"]
 
     # Préparer les tâches pour les workers
     delayed_tasks = []
@@ -292,23 +311,18 @@ def main():
 
         # Créer la tâche delayed pour le worker
         task = dataset_processor.client.submit(
-            interpolate_cmems_to_zarr,
+            convert_to_zarr_worker,
             connection_params,
             file_path,
             variables,
-            out_grid,
             output_dir,
-            start_date,
-            end_date,
-            transform,
-            weights_filepath,
             scattered_argo_index,
         )
         delayed_tasks.append(task)
 
     # Exécuter les tâches en parallèle et attendre les résultats
     results = dataset_processor.client.gather(delayed_tasks)
-    print(f"Interpolation terminée pour {len(results)} fichiers.")
+    print(f"  terminée pour {len(results)} fichiers.")
 
 if __name__ == "__main__":
     main()

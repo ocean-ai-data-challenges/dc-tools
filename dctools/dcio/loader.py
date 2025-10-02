@@ -5,14 +5,16 @@
 
 import gc
 import os
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 
+import fsspec
 from loguru import logger
 from memory_profiler import profile
 import netCDF4
 import numpy as np
 import traceback
 import xarray as xr
+import zarr
 
 # Configuration pour la compatibilité Dask
 #os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
@@ -41,30 +43,6 @@ def configure_xarray_for_dask():
         warn_for_unclosed_files=False,  # Évite les warnings dans les workers
     )
 
-
-def list_all_group_paths_0(nc_path: str) -> List[str]:
-    """
-    Liste tous les chemins de groupes dans un fichier NetCDF.
-    Thread-safe pour utilisation avec Dask.
-    """
-    def walk(grp, prefix=""):
-        paths = []
-        for name, subgrp in grp.groups.items():
-            full = f"{prefix}/{name}" if prefix else name
-            paths.append(full)
-            paths.extend(walk(subgrp, full))
-        return paths
-    try:
-        # Utiliser mode 'r' avec format='NETCDF4' pour compatibilité Dask
-        # with netCDF4.Dataset(nc_path, "r", format='NETCDF4') as nc:
-        with netCDF4.Dataset(nc_path, "r", engine="h5netcdf") as nc:
-            groups = walk(nc)
-        gc.collect()
-        return groups
-    except Exception as e:
-        logger.warning(f"Could not read groups from {nc_path}: {e}")
-        traceback.print_exc()
-        return []
 
 def choose_chunks_automatically(
     ds: xr.Dataset,
@@ -136,8 +114,10 @@ class FileLoader:
         groups: Optional[list[str]] = None,
         engine: Optional[str] = "h5netcdf",
         variables: Optional[list[str]] = None,
-        dask_safe: bool = True,
-        target_chunk_mb: int = 128,
+        dask_safe: Optional[bool] = True,
+        target_chunk_mb: Optional[int] = 128,
+        file_storage: Optional[Any] = None,
+        reading_retries: Optional[int] = 3,
     ) -> xr.Dataset | None:
         """
         Load a dataset with Dask-safe configurations and optional adaptive chunking.
@@ -156,7 +136,8 @@ class FileLoader:
         """
         os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
         try:
-            open_kwargs = {"chunks": "auto", "engine": engine}
+            # open_kwargs = {"chunks": "auto", "engine": engine}
+            open_kwargs = {"engine": engine}
             if dask_safe:
                 open_kwargs.update({"lock": False, "cache": False})
 
@@ -185,9 +166,29 @@ class FileLoader:
                     ds = xr.open_dataset(file_path, **open_kwargs)
 
             elif file_path.endswith(".zarr"):
-                zarr_kwargs = {"chunks": "auto"}
-                ds = xr.open_zarr(file_path, **zarr_kwargs)
-
+                zarr_kwargs = {
+                    "chunks": "auto",
+                    "consolidated": True,
+                }
+                if file_storage is not None:
+                    for attempt in range(reading_retries):
+                        try:
+                            # Support for remote storage (e.g., S3)
+                            store = file_storage.get_mapper(file_path)  # <-- mapping, pas file-like
+                            kvstore = zarr.storage.KVStore(store)
+                            ds = xr.open_zarr(kvstore, consolidated=True)  # **zarr_kwargs)
+                        except Exception as e:
+                            logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
+                            if attempt == reading_retries - 1:
+                                raise
+                else:
+                    for attempt in range(reading_retries):
+                        try:
+                            ds = xr.open_zarr(file_path, **zarr_kwargs)
+                        except Exception as e:
+                            logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
+                            if attempt == reading_retries - 1:
+                                raise   
             else:
                 raise ValueError(f"Unsupported file format {file_path}.")
 
@@ -206,12 +207,13 @@ class FileLoader:
             return ds
 
         except Exception as error:
-            logger.error(f"Error when loading file {file_path}: {error}")
+            logger.warning(f"Error when loading file {file_path}: {error}")
+            traceback.print_exc()
             return None
 
 
 
-    @staticmethod
+'''    @staticmethod
     def load_dataset(
         file_path: str,
         adaptive_chunking: bool = False,
@@ -286,3 +288,4 @@ class FileLoader:
         except Exception as error:
             logger.error(f"Error when loading file {file_path}: {error}")
             return None
+'''

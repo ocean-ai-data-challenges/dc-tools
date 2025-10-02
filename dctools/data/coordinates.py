@@ -70,7 +70,7 @@ VARIABLES_ALIASES = {
             "sea_surface_height_above_geoid",
             "sea_surface_height_above_reference_ellipsoid"
         ],
-        "aliases": ["ssh", "sea_level", "surface_height", "ssha_filtered", "zos"]
+        "aliases": ["ssh", "sea_level", "surface_height", "ssha_filtered", "zos", "data_01__ku__ssha"]
     },
     "temperature": {
         "standard_names": ["sea_water_potential_temperature", "sea_water_temperature"],

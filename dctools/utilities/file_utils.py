@@ -28,31 +28,38 @@ def remove_file(filepath: str) -> bool:
             logger.warning(f"remove_file: invalid path: {filepath}")
             return False
         if not os.path.exists(filepath):
-            logger.info(f"remove_file: file not exist: {filepath}")
+            logger.warning(f"remove_file: file not exist: {filepath}")
             return False
         if not os.path.isfile(filepath):
             logger.warning(f"remove_file: not a file: {filepath}")
             return False
         os.remove(filepath)
-        logger.info(f"remove_file: deleted file: {filepath}")
+        # logger.info(f"remove_file: deleted file: {filepath}")
         return True
     except Exception as exc:
         logger.error(f"remove_file: error when removing file {filepath}: {exc}")
         return False
 
-def empty_folder(folder_path: str):
+def empty_folder(dir_name: str, extension: str = None):
     """Remove all files in given folder.
 
     Args:
             folder_path (str): Path to ,folder to empty.
     """
-    for filename in os.listdir(folder_path):
-        file_path = os.path.join(folder_path, filename)
-        try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-        except Exception as e:
-            logger.warning(f"Failed to delete {file_path}: {e}")
+    dir_path = Path(dir_name)
+    if not dir_path.is_dir():
+        print(f"{dir_name} n'est pas un répertoire valide ou n'existe pas.")
+        return 0
+    count = 0
+    for file in dir_path.iterdir():
+        if file.is_file() and file.suffix == extension:
+            try:
+                file.unlink()
+                count += 1
+            except Exception as e:
+                print(f"Erreur lors de la suppression de {file}: {e}")
+    # print(f"{count} fichiers supprimés avec l'extension {extension} dans {dir_name}.")
+    return count
 
 def list_files_with_extension(directory: str, extension: str):
     """Return a list of all files with a given extension in a specified directory.
@@ -173,6 +180,9 @@ class FileCacheManager:
 
     def __contains__(self, filepath: str):
         return filepath in self.cache
+
+    def remove(self, filepath: str):
+        remove_file(filepath)
 
     def clear(self):
         for filepath in list(self.cache.keys()):

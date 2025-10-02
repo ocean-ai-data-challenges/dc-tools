@@ -9,15 +9,13 @@ n_days_forecast: 2
 n_days_interval: 7
 
 delta_time: 12   # delta time (hours) when matching observation data
-max_samples: 5
+max_samples: 
 max_cache_files: 1000  # max files to store (older files are deleted)
-
-
 
 ############################# PARALLELIZATION ###################################
 
 batch_size: 64
-n_parallel_workers: 4
+n_parallel_workers: 20
 nthreads_per_worker: 4
 memory_limit_per_worker: "6GB"
 ############################# DATA FILTERS ###################################
@@ -41,6 +39,35 @@ max_lat: 90
 ############################# DATASETS ###################################
 
 sources:  # lists all datasets used in the DC
+  - dataset: saral
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # time tolerance for matching with observations (hours)
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Nadir_altimetry/Saral"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    ignore_geometry: true
+    keep_variables:
+    - "time"
+    - "lat"
+    - "lon"
+    #- "alt"
+    - "mean_topography"
+    #- "wind_speed_alt"
+    - "mdt"
+    #- "bathymetry"
+    - "i_num_pixel"
+    - "i_num_line"   # dimension variables
+    - "ssha"
+    eval_variables:
+    - "ssha"
+
   - dataset: glorys
     observation_dataset: false
     metrics:
@@ -50,6 +77,7 @@ sources:  # lists all datasets used in the DC
     cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
     file_pattern: "**/*.nc"
     full_day_data: true
+    ignore_geometry: true
     keep_variables:
       - "so"
       - "thetao"
@@ -76,18 +104,23 @@ sources:  # lists all datasets used in the DC
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.zarr"
     full_day_data: true
+    ignore_geometry: true
     keep_variables:
-      - "so"
-      - "thetao"
-      - "uo"
-      - "vo"
-      - "zos"
+      - "salinity"
+      - "ssh"
+      - "temperature"
+      - "u_current"
+      - "v_current"
+      - "depth"
+      - "lat"
+      - "lon"
+      - "time"
     eval_variables:
-      - "so"
-      - "thetao"
-      - "uo"
-      - "vo"
-      - "zos"
+      - "salinity"
+      - "ssh"
+      - "temperature"
+      - "u_current"
+      - "v_current"
 
   - dataset: swot
     observation_dataset: true
@@ -102,6 +135,7 @@ sources:  # lists all datasets used in the DC
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
       - "num_pixels"
       - "num_lines"
@@ -130,6 +164,7 @@ sources:  # lists all datasets used in the DC
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
     - "latitude" 
     - "longitude"
@@ -151,13 +186,15 @@ sources:  # lists all datasets used in the DC
     connection_type: 
     url: 
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
       - "LATITUDE"
       - "LONGITUDE"
       - "TIME"
       - "PSAL"
+      - "N_POINTS"
       #- "PSAL_QC"
-      #- "PRES"
+      - "PRES_ADJUSTED"
       #- "PRES_QC"
       - "TEMP"
       #- "TEMP_QC"
@@ -186,6 +223,7 @@ sources:  # lists all datasets used in the DC
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
       - "time"
       #- "data_01__time_tai"
@@ -197,33 +235,7 @@ sources:  # lists all datasets used in the DC
     eval_variables:
       - "data_01__ku__ssha"
 
-  - dataset: saral
-    observation_dataset: true
-    metrics:
-      - "rmsd"
-    time_tolerance: 12   # time tolerance for matching with observations (hours)
-    config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC2/Nadir_altimetry/Saral"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
-    file_pattern: "**/*.nc"
-    keep_variables:
-    - "time"
-    - "lat"
-    - "lon"
-    #- "alt"
-    - "mean_topography"
-    #- "wind_speed_alt"
-    - "mdt"
-    #- "bathymetry"
-    - "i_num_pixel"
-    - "i_num_line"   # dimension variables
-    - "ssha"
-    eval_variables:
-    - "ssha"
+
 
   - dataset: SST_fields
     observation_dataset: true
@@ -234,6 +246,7 @@ sources:  # lists all datasets used in the DC
     connection_type:
     cmems_product_name: "cmems_obs-sst_glo_phy_l3s_pir_P1D-m"
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
     #- "crs"
     - "sea_surface_temperature"
@@ -258,6 +271,7 @@ sources:  # lists all datasets used in the DC
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
     - "time"
     - "lat"
@@ -284,6 +298,7 @@ sources:  # lists all datasets used in the DC
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
     - "time"
     - "lat"
@@ -314,6 +329,7 @@ sources:  # lists all datasets used in the DC
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.nc"
+    ignore_geometry: true
     keep_variables:
     - "time"
     #- "data_01__time_tai"
@@ -339,6 +355,7 @@ sources:  # lists all datasets used in the DC
     s3_folder: "public/glonet_full_2024"
     file_pattern: "**/*.nc"
     full_day_data: true
+    ignore_geometry: true
     keep_variables:
       - "so"
       - "thetao"
@@ -365,6 +382,7 @@ sources:  # lists all datasets used in the DC
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.zarr"
+    ignore_geometry: true
     keep_variables:
       - "so"
       - "thetao"

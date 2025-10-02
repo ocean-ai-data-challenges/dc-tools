@@ -4,13 +4,23 @@
 """Misc. functions to aid in the processing xr.Datasets and DataArrays."""
 
 import ast
+import os
+import traceback
 from typing import Any, Dict, List, Optional, Union
 
+# Nouveau (compatible avec les dernières versions)
+#from pangeo_forge_recipes.recipes.xarray.zarr import XarrayZarrRecipe
+#from pangeo_forge_recipes.patterns import FilePattern
+#from pangeo_forge_recipes.executors.python import PythonPipelineExecutor
 import cftime
+import dask
 from loguru import logger
 import numpy as np
 import pandas as pd
+from pathlib import Path
+import shutil
 import xarray as xr
+import zarr
 
 
 
@@ -852,68 +862,127 @@ def filter_dataset_by_depth(ds: xr.Dataset, depth_vals, depth_tol=1) -> xr.Datas
     else:  # aligné sur n_points
         return ds.isel(N_POINTS=mask)
 
+def promote_pres_adjusted_to_depth_with_npoints(ds: xr.Dataset) -> xr.Dataset:
+    # Renommer PRES_ADJUSTED en depth
+    if "PRES_ADJUSTED" in ds.variables:
+        ds = ds.rename({"PRES_ADJUSTED": "depth"})
+    # Définir depth comme coordonnée
+    if "depth" in ds.variables:
+        ds = ds.set_coords("depth")
+    # Swap la dimension principale si besoin
+    if "N_POINTS" in ds.dims and "depth" in ds.coords:
+        ds = ds.swap_dims({"N_POINTS": "depth"})
+        # Dupliquer N_POINTS comme coordonnée (index) sur depth
+        ds = ds.assign_coords(N_POINTS=("depth", np.arange(ds.sizes["depth"])))
+        ds = ds.set_coords("N_POINTS")
+    return ds
 
-def interp_single_argo_profile(ds: xr.Dataset, target_depths, method="linear") -> xr.Dataset:
+def interp_single_argo_profile(ds: xr.Dataset, target_depths: np.ndarray) -> xr.Dataset:
     """
-    Interpolate ARGO dataset onto target depth levels, preserving structure.
+    Interpolate all profile variables onto a given set of depths.
+    Renames 'PRES' to 'depth' and makes it a coordinate.
+    Preserves all other dataset variables, coordinates, and dimensions.
 
     Parameters
     ----------
     ds : xr.Dataset
-        Input ARGO dataset. Can be single profile (N_POINTS) or multiple profiles (N_PROF, N_POINTS).
-        Must contain a coordinate 'depth'.
+        Input Argo profiles dataset with a vertical dimension (usually 'PRES').
     target_depths : array-like
-        Target depth values (same units as ds.depth).
-    method : str
-        Interpolation method ('linear', 'nearest', ...).
+        Target depths to interpolate onto (1D array, e.g. np.linspace(0, 2000, 101)).
 
     Returns
     -------
     xr.Dataset
-        Same as input but with 'depth' resampled on target_depths.
+        New dataset with variables interpolated on 'depth',
+        preserving all metadata, coordinates, and dimensions.
     """
-    target_depths = np.sort(np.asarray(target_depths))
-
-    # Cas 1 : un seul profil (N_POINTS seulement)
-    if "N_PROF" not in ds.dims:
-        # variables dépendant de N_POINTS
-        depth_vars = [v for v in ds.data_vars if "N_POINTS" in ds[v].dims]
-
-        out_vars = {}
-        for v in depth_vars:
-            da = ds[v].swap_dims({"N_POINTS": "depth"}).sortby("depth")
-            out_vars[v] = da.interp(depth=target_depths, method=method)
-
-        # on garde les variables indépendantes
-        for v in ds.data_vars:
-            if v not in depth_vars:
-                out_vars[v] = ds[v]
-
-        # reconstruit le Dataset
-        out = xr.Dataset(out_vars, coords={"depth": target_depths})
-        for coord in ["LATITUDE", "LONGITUDE", "TIME"]:
-            if coord in ds:
-                out[coord] = ds[coord]
-
-        return out
-
-    # Cas 2 : plusieurs profils (N_PROF, N_POINTS)
+    ds = promote_pres_adjusted_to_depth_with_npoints(ds)
+    # Detect vertical dimension
+    if "PRES_ADJUSTED" in ds.dims or "PRES_ADJUSTED" in ds.coords or "PRES_ADJUSTED" in ds.data_vars:
+        zdim = "PRES_ADJUSTED"
+    elif "DEPTH" in ds.dims or "DEPTH" in ds.coords:
+        zdim = "DEPTH"
     else:
-        def _interp_prof(prof):
-            depth_vars = [v for v in prof.data_vars if "N_POINTS" in prof[v].dims]
-            out_vars = {}
-            for v in depth_vars:
-                da = prof[v].swap_dims({"N_POINTS": "depth"}).sortby("depth")
-                out_vars[v] = da.interp(depth=target_depths, method=method)
-            # reconstruction du Dataset
-            return xr.Dataset(out_vars, coords={"depth": target_depths})
+        raise ValueError("Dataset must contain a vertical coordinate named 'PRES_ADJUSTED' or 'DEPTH'")
 
-        # on applique profil par profil
-        out = ds.groupby("N_PROF").map(_interp_prof)
+    # Create target depth array
+    target_depths_da = xr.DataArray(
+        target_depths,
+        dims=("depth",),
+        coords={"depth": target_depths},
+        attrs={"units": "dbar", "long_name": "Interpolated depth levels"}
+    )
 
-        # on garde les coordonnées au niveau N_PROF
-        for coord in ["LATITUDE", "LONGITUDE", "TIME"]:
-            if coord in ds:
-                out[coord] = ds[coord]
+    # Interpolation
+    ds_interp = ds.interp({zdim: target_depths_da}, kwargs={"fill_value": "extrapolate"})
 
-        return out
+    # Rename vertical dimension to 'depth'
+    ds_interp = ds_interp.rename({zdim: "depth"})
+
+    # Ensure depth is a coordinate (not just a dimension)
+    ds_interp = ds_interp.assign_coords(depth=target_depths_da)
+
+    # Preserve global attributes
+    ds_interp.attrs.update(ds.attrs)
+
+    return ds_interp
+
+def sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
+    # ds = ds_init.copy()
+    try:
+        for v in ds.variables:
+            var = ds[v]
+            # Si la variable contient des NaN, cast en float
+            if np.any(pd.isnull(var.values)):
+                if not np.issubdtype(var.dtype, np.floating):
+                    ds[v] = var.astype("float32")
+            # Nettoyer l'encoding existant
+            enc = dict(ds[v].encoding)
+            # Supprimer tous les encodings NetCDF hérités qui posent problème
+            for key in ["_FillValue", "dtype", "scale_factor", "add_offset", "zlib", "complevel", "shuffle", "fletcher32", "preferred_chunks", "source", "original_shape"]:
+                if key in enc:
+                    del enc[key]
+            # Correction spécifique pour les variables de temps
+            if v.lower() == "time":
+                if "units" in enc:
+                    del enc["units"]
+                if "calendar" in enc:
+                    del enc["calendar"]
+            # Si float → ajouter FillValue explicite
+            if np.issubdtype(ds[v].dtype, np.floating):
+                enc["_FillValue"] = np.nan
+            # Si int → ajouter FillValue entier si besoin
+            elif np.issubdtype(ds[v].dtype, np.integer):
+                enc["_FillValue"] = -9999
+            ds[v].encoding = enc
+        return ds
+    except Exception as e:
+        logger.error(f"Error sanitizing dataset for Zarr: {e}")
+        traceback.print_exc()
+        return ds
+
+def netcdf_to_zarr(
+    ds: xr.Dataset, zarr_path: str,
+    overwrite: bool = True,
+    chunk_size: dict = None,
+    compression: str = 'zlib',
+    compression_level: int = 3,
+):
+    """
+    Convert NetCDF file to Zarr (fully written, no lazy graph left).
+    Saves in the same folder with suffix `.zarr`.
+    """
+    try:
+
+        if overwrite and Path(zarr_path).exists():
+            shutil.rmtree(zarr_path)
+        #ds = xr.open_dataset(nc_path, decode_cf=True)
+        ds_clean = sanitize_for_zarr(ds)
+        ds_clean = ds_clean.chunk()  # chunk automatique, compatible Zarr
+        ds_clean.to_zarr(str(zarr_path), mode="w", consolidated=True)
+        return str(zarr_path)
+
+    except Exception as e:
+        logger.error(f"Error converting NetCDF file to Zarr {zarr_path}: {e}")
+        traceback.print_exc()
+        return None

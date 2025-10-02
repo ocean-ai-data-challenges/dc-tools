@@ -1,6 +1,7 @@
 
 from argparse import Namespace
 import gc
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 import dask
@@ -9,44 +10,22 @@ from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
 import traceback
 
+import json
+
 
 # from dctools.data.datasets.dataloader import DatasetLoader
-from dctools.data.connection.config import (
-    ARGOConnectionConfig, GlonetConnectionConfig,
-    WasabiS3ConnectionConfig, S3ConnectionConfig, 
-    FTPConnectionConfig, CMEMSConnectionConfig,
-    LocalConnectionConfig
-)
 from dctools.data.connection.connection_manager import (
-    ArgoManager, GlonetManager,
-    LocalConnectionManager, S3WasabiManager,
-    S3Manager, FTPManager, CMEMSManager, clean_for_serialization,
+    create_worker_connect_config
 )
+from dctools.data.connection.connection_manager import clean_for_serialization
 from dctools.data.datasets.dataloader import EvaluationDataloader, ObservationDataViewer, filter_by_time
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.metrics import MetricComputer
-from dctools.utilities.misc_utils import deep_copy_object, make_fully_serializable
-
-
-CONNECTION_REGISTRY = {
-    "argo": ArgoManager,
-    "cmems": CMEMSManager,
-    "ftp": FTPManager,
-    "glonet": GlonetManager,
-    "local": LocalConnectionManager,
-    "s3": S3Manager,
-    "wasabi": S3WasabiManager,
-}
-
-CONNECTION_CONFIG_REGISTRY = {
-    "argo": ARGOConnectionConfig,
-    "cmems": CMEMSConnectionConfig,
-    "ftp": FTPConnectionConfig,
-    "glonet": GlonetConnectionConfig,
-    "local": LocalConnectionConfig,
-    "s3": S3ConnectionConfig,
-    "wasabi": WasabiS3ConnectionConfig,
-}
+from dctools.utilities.misc_utils import (
+    deep_copy_object, make_serializable,
+    nan_to_none, transform_in_place,
+    serialize_structure
+)
 
 
 def compute_metric(
@@ -69,69 +48,20 @@ def compute_metric(
         ref_is_observation = entry.get("ref_is_observation")
         logger.info(f"Process forecast: {forecast_reference_time}, lead time: {lead_time}")
 
-        pred_source = entry["pred_data"]
-        ref_source = entry["ref_data"]
-    
         pred_protocol = pred_source_config.protocol
         ref_protocol = ref_source_config.protocol
 
-
-        if ref_protocol == 'cmems':
-            if hasattr(ref_source_config, 'fs') and hasattr(ref_source_config.fs, '_session'):
-                try:
-                    if hasattr(ref_source_config.fs._session, 'close'):
-                        ref_source_config.fs._session.close()
-                except:
-                    pass
-                ref_source_config.fs = None
-
-        pred_source_config.dataset_processor = None,
-        ref_source_config.dataset_processor = None,
-
-        # Recrée l'objet de lecture dans le worker
-        pred_config_cls = CONNECTION_CONFIG_REGISTRY[pred_protocol]
-        pred_connection_cls = CONNECTION_REGISTRY[pred_protocol]
-        delattr(pred_source_config, "protocol")
-        pred_config = pred_config_cls(**vars(pred_source_config))
-
-        # remove fsspec handler 'fs' from Config, otherwise: serialization
-        if pred_protocol == 'cmems': 
-            if hasattr(
-                pred_config.params, 'fs') and hasattr(pred_config.params.fs, '_session'
-            ):
-                try:
-                    if hasattr(pred_config.params.fs._session, 'close'):
-                        pred_config.params.fs._session.close()
-                except:
-                    pass
-                pred_config.params.fs = None
-
-
-        pred_connection_manager = pred_connection_cls(pred_config)
-        open_pred_func = pred_connection_manager.open
-
-        ref_config_cls = CONNECTION_CONFIG_REGISTRY[ref_protocol]
-        ref_connection_cls = CONNECTION_REGISTRY[ref_protocol]
-        delattr(ref_source_config, "protocol")
-        ref_config = ref_config_cls(**vars(ref_source_config))
-
-        if ref_protocol == 'cmems':
-            if hasattr(ref_config.params, 'fs'):
-                try:
-                    if hasattr(ref_config.params.fs, '_session'):
-                        if hasattr(ref_config.params.fs._session, 'close'):
-                            ref_config.params.fs._session.close()
-                except:
-                    pass
-                delattr(ref_config.params, "fs")
-
-
-        if ref_protocol == "argo":
-            ref_connection_manager = ref_connection_cls(ref_config, argo_index=argo_index)
-        else:
-            ref_connection_manager = ref_connection_cls(ref_config)
-        open_ref_func = ref_connection_manager.open
-
+        pred_source = entry["pred_data"]
+        ref_source = entry["ref_data"]
+    
+        open_pred_func = create_worker_connect_config(
+            pred_source_config,
+            argo_index,
+        )
+        open_ref_func = create_worker_connect_config(
+            ref_source_config,
+            argo_index,
+        )
 
         if isinstance(pred_source, str):
             if pred_protocol == "cmems":
@@ -142,6 +72,7 @@ def compute_metric(
                 pred_data = open_pred_func(pred_source)
         else:
             pred_data = pred_source
+
 
         pred_data_selected = pred_data.sel(time=valid_time, method="nearest")
         
@@ -293,6 +224,7 @@ class Evaluator:
         dataloader: Dict[str, EvaluationDataloader],
         ref_aliases: List[str],
         dataset_processor: DatasetProcessor,
+        results_dir: str = None,
     ):
         """
         Initialise l'évaluateur.
@@ -306,8 +238,9 @@ class Evaluator:
         self.dataset_processor = dataset_processor
         self.metrics = metrics
         self.dataloader = dataloader
-        self.results = []
+        # self.results = []
         self.ref_aliases = ref_aliases
+        self.results_dir = results_dir
 
         self.ref_managers, self.ref_catalogs, self.ref_connection_params = dataset_manager.get_config()
 
@@ -319,7 +252,7 @@ class Evaluator:
             List[Dict[str, Any]]: Résultats des métriques pour chaque lot et chaque référence.
         """
         try:
-            for batch in self.dataloader:
+            for batch_idx, batch in enumerate(self.dataloader):
                 pred_alias =self.dataloader.pred_alias
                 ref_alias = batch[0].get("ref_alias")
                 # Extraire les informations nécessaires
@@ -339,9 +272,12 @@ class Evaluator:
                 )
                 if batch_results is None:
                     continue
-                serial_results = [make_fully_serializable(res) for res in batch_results if res is not None]
-                self.results.extend(serial_results) 
-            return self.results
+                serial_results = [serialize_structure(res) for res in batch_results if res is not None]
+
+                # Sauvegarde batch par batch
+                batch_file = os.path.join(self.results_dir, f"results_{pred_alias}_batch_{batch_idx}.json")
+                with open(batch_file, "w") as f:
+                    json.dump(serial_results, f, indent=2, ensure_ascii=False)
 
         except Exception as exc:
             logger.error(f"Evaluation failed: {traceback.format_exc()}")
