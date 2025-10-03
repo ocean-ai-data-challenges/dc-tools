@@ -27,7 +27,7 @@ dependencies = [
     "json-handler>=2.0.1",
     "loguru>=0.7.3",
     "memory-profiler>=0.61.0",
-    "netcdf4 (>=1.5.8,<=1.6.5)", # (>=1.7.2,<2.0.0)",
+    "netcdf4 (>=1.7.2,<2.0.0)",
     "nbformat>=5.10.4",
     "numpy (>=1.25,<2.0.0)",
     "python-json-logger>=3.3.0",
