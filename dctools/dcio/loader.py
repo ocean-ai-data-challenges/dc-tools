@@ -194,8 +194,9 @@ class FileLoader:
 
             # Filtrage des variables après ouverture
             if variables and ds is not None:
-                available_vars = list(ds.variables.keys())
-                vars_to_drop = [v for v in available_vars if v not in variables]
+                # available_vars = list(ds.variables.keys())
+                available_data_vars = list(ds.data_vars.keys())
+                vars_to_drop = [v for v in available_data_vars if v not in variables]
                 if vars_to_drop:
                     ds = ds.drop_vars(vars_to_drop, errors="ignore")
 

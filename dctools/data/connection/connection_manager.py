@@ -972,7 +972,7 @@ class S3Manager(BaseConnectionManager):
             remote_base_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}"
             remote_path = f"{remote_base_path}/{self.params.file_pattern}"
 
-            total_files =  len(self._list_files) if hasattr(self, "_list_files") and self._list_files is not None else None
+            '''total_files =  len(self._list_files) if hasattr(self, "_list_files") and self._list_files is not None else None
             limit = self.params.max_samples if self.params.max_samples else total_files
             # Utiliser fsspec pour accéder aux fichiers
             if limit is not None:
@@ -980,8 +980,8 @@ class S3Manager(BaseConnectionManager):
                     files = self.list_first_n_files(self.params.fs, remote_base_path, n=limit)
                 except RecursionExit as e:
                     files = e.value
-            else:
-                files = sorted(self.params.fs.glob(remote_path))
+            else:'''
+            files = sorted(self.params.fs.glob(remote_path))
             # files = files[-limit:]
             files_urls = [
                 f"s3://{file}"
@@ -1397,20 +1397,20 @@ class ArgoManager(BaseConnectionManager):
                 batch_results = self.dataset_processor.compute_delayed_tasks(
                     delayed_tasks, sync=False
                 )
-                valid_results = [meta for meta in batch_results if meta is not None]
+                valid_metadata = [meta for meta in batch_results if meta is not None]
                 # metadata_list.extend(valid_results)
 
                 # Sauvegarde le batch dans un fichier temporaire
                 batch_file = f"{temp_dir}/metadata_batch_{i:08d}.json"
                 with open(batch_file, "w") as f:
-                    json.dump([meta.to_dict() for meta in valid_results], f, default=str, indent=2)
+                    json.dump([meta.to_dict() for meta in valid_metadata], f, default=str, indent=2)
                 temp_files.append(batch_file)
 
                 percent = int(100 * (i + 1) / n_batches)
-                logger.info(f"Batch {i+1}/{n_batches} traité ({percent}%) : {len(valid_results)} fichiers")
+                logger.info(f"Batch {i+1}/{n_batches} traité ({percent}%) : {len(valid_metadata)} fichiers")
 
                 # Nettoyage mémoire
-                del batch_results, valid_results
+                del batch_results, valid_metadata
                 gc.collect()
 
             # Concatène tous les fichiers JSON en une seule metadata_list
@@ -1420,7 +1420,7 @@ class ArgoManager(BaseConnectionManager):
                     batch_data = json.load(f)
                     for meta_dict in batch_data:
                         metadata_list.append(CatalogEntry(**meta_dict))
-            logger.info(f"Finished processing ARGO data: {len(valid_results)}/{len(list_dates)} items processed")
+            logger.info(f"Finished indexing ARGO data: {len(metadata_list)}/{len(list_dates)} items processed")
 
             #self.dataset_processor.cleanup_worker_memory()
 

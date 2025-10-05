@@ -179,7 +179,7 @@ class DC2Evaluation:
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            if source_name != "glonet" and source_name != "saral": # and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
+            if source_name != "glonet" and source_name != "argo_profiles": # and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
                 logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
     
@@ -242,7 +242,7 @@ class DC2Evaluation:
 
         # json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
         for alias in self.dataset_references.keys():
-            dataset_json_path = os.path.join(self.args.catalog_dir, f"results_{alias}.json")
+            dataset_json_path = os.path.join(self.args.data_directory, f"results_{alias}.json")
             results_files_dir = os.path.join(self.args.data_directory, "results_batches")
 
             # Vérifier si le répertoire existe

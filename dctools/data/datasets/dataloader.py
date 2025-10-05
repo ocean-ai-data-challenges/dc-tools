@@ -32,7 +32,7 @@ from dctools.data.connection.connection_manager import (
     S3WasabiManager,
 )
 from dctools.utilities.xarray_utils import (
-    filter_variables, interp_single_argo_profile,
+    filter_variables,
 )
 
 
@@ -242,6 +242,64 @@ def filter_by_time(df: pd.DataFrame, t0: pd.Timestamp, t1: pd.Timestamp) -> pd.D
     return df_copy[mask]
 
 
+def extrapolate_to_surface(var_name, valid_depths, valid_vals):
+    if len(valid_vals) == 0:
+        return np.nan
+    
+    if var_name in ["TEMP", "temperature"]:
+        # Température : gradient réduit vers la surface
+        if len(valid_depths) >= 2:
+            # Chercher une profondeur différente de valid_depths[0]
+            depth_diff = 0
+            i = 1
+            while i < len(valid_depths) and abs(depth_diff) < 1e-6:
+                depth_diff = valid_depths[i] - valid_depths[0]
+                i += 1
+            
+            if abs(depth_diff) < 1e-6:  # Toutes les profondeurs sont identiques
+                surface_val = valid_vals[0]
+            else:
+                gradient = (valid_vals[i-1] - valid_vals[0]) / depth_diff
+                surface_val = valid_vals[0] - gradient * 0.5 * valid_depths[0]
+        else:
+            surface_val = valid_vals[0]
+    
+    elif var_name in ["PSAL", "salinity"]:
+        # Même logique pour la salinité
+        if len(valid_depths) >= 2:
+            depth_diff = 0
+            i = 1
+            while i < len(valid_depths) and abs(depth_diff) < 1e-6:
+                depth_diff = valid_depths[i] - valid_depths[0]
+                i += 1
+            
+            if abs(depth_diff) < 1e-6:
+                surface_val = valid_vals[0]
+            else:
+                gradient = (valid_vals[i-1] - valid_vals[0]) / depth_diff
+                surface_val = valid_vals[0] - gradient * 0.3 * valid_depths[0]
+        else:
+            surface_val = valid_vals[0]
+    
+    else:
+        # Variables autres : extrapolation linéaire standard
+        if len(valid_depths) >= 2:
+            depth_diff = 0
+            i = 1
+            while i < len(valid_depths) and abs(depth_diff) < 1e-6:
+                depth_diff = valid_depths[i] - valid_depths[0]
+                i += 1
+            
+            if abs(depth_diff) < 1e-6:
+                surface_val = valid_vals[0]
+            else:
+                gradient = (valid_vals[i-1] - valid_vals[0]) / depth_diff
+                surface_val = valid_vals[0] - gradient * valid_depths[0]
+        else:
+            surface_val = valid_vals[0]
+    
+    return surface_val
+
 def preprocess_argo_profiles(
     profile_sources: List[str],
     open_func: Callable[[str, Optional[str]], xr.Dataset],
@@ -252,6 +310,7 @@ def preprocess_argo_profiles(
 ):
     interp_profiles = []
     time_vals = []
+    threshold_list_profiles = 10     # TODO : remove this after storing preprocessed profiles to avoid reprocessing them at each timestep
 
     def process_one_profile(profile_source):
         try:
@@ -281,9 +340,36 @@ def preprocess_argo_profiles(
                 mean_time = pd.to_datetime(time).mean()
             else:
                 mean_time = pd.to_datetime(time[0] if isinstance(time, (np.ndarray, list)) else time)
+
             depths = ds["depth"].values
 
             data_dict = {}
+            for v in ds.data_vars:
+                if v == "depth":
+                    continue
+                vals = ds[v].values
+                # Filtrer les NaN
+                valid_mask = ~np.isnan(vals)
+                if not np.any(valid_mask):
+                    # Si toutes les valeurs sont NaN, créer un array de NaN
+                    interp_vals = np.full_like(depth_levels, np.nan, dtype=float)
+                else:
+                    # Filtrer les valeurs et les profondeurs correspondantes
+                    valid_vals = vals[valid_mask]
+                    valid_depths = depths[valid_mask]
+
+                    # Extrapolation vers la surface
+                    surface_val = extrapolate_to_surface(v, valid_depths, valid_vals)
+        
+                    interp_vals = np.interp(
+                        depth_levels,
+                        valid_depths,
+                        valid_vals,
+                        left=surface_val,
+                        right=np.nan
+                    )
+                data_dict[v] = ("depth", interp_vals)
+
             for v in ds.data_vars:
                 if v == "depth":
                     continue
@@ -317,11 +403,8 @@ def preprocess_argo_profiles(
 
     # Parallélisation avec ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as executor:  # adapte max_workers à ton CPU
-        futures = [executor.submit(process_one_profile, src) for src in profile_sources[0:10]] # TODO remove this shortcut after optimizing the processing: thousands of files to preprocess at each timestep !
-        p = 0
+        futures = [executor.submit(process_one_profile, src) for src in profile_sources[0:threshold_list_profiles]] # TODO remove this shortcut after optimizing the processing: thousands of files to preprocess at each timestep !
         for future in as_completed(futures):
-            p += 1
-            print(f"Processing profile {p}/{len(futures)}")
             interp_ds, mean_time = future.result()
             if interp_ds is not None:
                 interp_profiles.append(interp_ds)
@@ -770,16 +853,8 @@ class ObservationDataViewer:
                 if load_to_memory:
                     result = result.compute()
 
-
-
-
-
-
-
-
-                # sauvegarde du dataset pré&traité dans un fichier Zarr
-                argo_dir = "/home/k24aitmo/IMT/software/dc-tools/tests/data/ARGO"
-                from datetime import datetime
+                '''# sauvegarde du dataset prétraité dans un fichier Zarr
+                argo_dir = "..."
                 time_val = result.coords["time"].values
 
                 # Si c'est un tableau avec une seule valeur
@@ -790,17 +865,7 @@ class ObservationDataViewer:
                 argo_name = f"argo_profiles_{time_str}.zarr"
                 import os
                 argo_path = os.path.join(argo_dir, argo_name)
-                result.to_zarr(argo_path, mode="w", consolidated=True)
-
-
-
-
-
-
-
-
-
-
+                result.to_zarr(argo_path, mode="w", consolidated=True)'''
 
                 return result
             except Exception as e:

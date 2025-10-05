@@ -1,8 +1,8 @@
 # This file lists variables used in configuring dc2 evaluation 
 ################################# WASABI ###############################
 ##  WASABI credentials
-define: &WASABI_KEY 
-define: &WASABI_SECRET_KEY 
+define: &WASABI_KEY "A10PTBP92GOXQW8OPE8G"
+define: &WASABI_SECRET_KEY "1C1Iscst7rfDnXp5eM8DtL7AkFiUAycINzctMEGQ" 
 ############################# GENERAL DC PARAMETERS ###################################
 
 n_days_forecast: 2
@@ -15,17 +15,17 @@ max_cache_files: 1000  # max files to store (older files are deleted)
 ############################# PARALLELIZATION ###################################
 
 batch_size: 64
-n_parallel_workers: 8
-nthreads_per_worker: 4
+n_parallel_workers: 1
+nthreads_per_worker: 1
 memory_limit_per_worker: "6GB"
 ############################# DATA FILTERS ###################################
 
 ## start time
-start_time: "2024-01-04"
-# start_time: "2023-12-25"
+start_time: "2024-01-03"
+#start_time: "2023-12-25"
 #start_time: "2022-12-15"
 ## end time
-end_time: "2024-01-13"
+end_time: "2024-02-13"
 #end_time: "2024-03-15"
 #end_time: "2025-01-15"
 
@@ -55,10 +55,10 @@ sources:  # lists all datasets used in the DC
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
     s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC2/Nadir_altimetry/Saral"
+    s3_folder: "DC2/ZARR/Saral"
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
-    file_pattern: "**/*.nc"
+    file_pattern: "**/*.zarr"
     ignore_geometry: true
     keep_variables:
     - "time"
@@ -75,7 +75,7 @@ sources:  # lists all datasets used in the DC
     eval_variables:
     - "ssha"
 
-  - dataset: glorys
+  - dataset: glorys_cmems
     observation_dataset: false
     metrics:
       - "rmsd"
@@ -98,7 +98,7 @@ sources:  # lists all datasets used in the DC
       - "vo"
       - "zos"
 
-  - dataset: glorys_wasabi
+  - dataset: glorys
     observation_dataset: false
     metrics:
       - "rmsd"
@@ -106,7 +106,7 @@ sources:  # lists all datasets used in the DC
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
     s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC2/Glorys12"
+    s3_folder: "DC2/ZARR/Glorys"
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
     file_pattern: "**/*.zarr"
@@ -138,10 +138,10 @@ sources:  # lists all datasets used in the DC
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
     s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC2/Nadir_altimetry/Swot"
+    s3_folder: "DC2/ZARR/Swot"
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
-    file_pattern: "**/*.nc"
+    file_pattern: "**/*.zarr"
     ignore_geometry: true
     keep_variables:
       - "num_pixels"
@@ -226,10 +226,10 @@ sources:  # lists all datasets used in the DC
     connection_type: "wasabi"
     url: "https://s3.eu-west-2.wasabisys.com"
     s3_bucket: "ppr-ocean-climat"
-    s3_folder: "DC2/Nadir_altimetry/Jason-3"
+    s3_folder: "DC2/ZARR/Jason3"
     s3_key: *WASABI_KEY
     s3_secret_key: *WASABI_SECRET_KEY
-    file_pattern: "**/*.nc"
+    file_pattern: "**/*.zarr"
     ignore_geometry: true
     keep_variables:
       - "time"
@@ -356,6 +356,34 @@ sources:  # lists all datasets used in the DC
     metrics:
       - "rmsd"
     config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/ZARR/Glonet"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.zarr"
+    full_day_data: true
+    ignore_geometry: true
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+
+
+  - dataset: glonet_edito
+    observation_dataset: false
+    metrics:
+      - "rmsd"
+    config: "s3"
     connection_type: "anonymous"
     url: "https://minio.dive.edito.eu"
     s3_bucket: "project-oceanbench"
@@ -376,8 +404,7 @@ sources:  # lists all datasets used in the DC
       - "vo"
       - "zos"
 
-
-  - dataset: glonet_wasabi
+  - dataset: glonet_wasabi_2
     observation_dataset: false
     metrics:
       - "rmsd"
