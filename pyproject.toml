@@ -73,6 +73,8 @@ optional = false
 [tool.poetry.group.custom.dependencies]
 #oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
 #oceanbench = { git = "https://github.com/aitmohandk/oceanbench.git", branch = "main" }
+# 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
+oceanbench = { git = "git@github.com:ppr-ocean-ia/oceanbench.git", branch = "main" }
 #xrpatcher = { git = "ssh://git@github.com/jejjohnson/xrpatcher.git", branch = "main" }
 xrpatcher = { git = "https://github.com/jejjohnson/xrpatcher.git", branch = "main" }
 #xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
@@ -142,3 +144,5 @@ test = "pytest --capture=no --cov=dctools --cov-fail-under=80 tests/"
 # run all
 all = [ {ref="lint"}, {ref="types"}, {ref="test"} ]
 
+[[tool.poetry.packages]]
+include = "dctools"

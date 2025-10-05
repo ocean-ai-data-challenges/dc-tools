@@ -92,12 +92,50 @@ docker build \
 docker push ghcr.io/ppr-ocean-ia/dc-tools:latest
 ```
 ---
+## Avec oceanBench
+
+Utilisation d'une clé ssh, transmise en tant que secret
+```
+DOCKER_BUILDKIT=1 docker buildx build \
+  --ssh oceanbench_ssh_key=./secrets/oceanbench-deploy \
+  --progress=plain \
+  --no-cache \
+  -f edito/py3.13-claude/Dockerfile \
+  --build-arg BASE_IMAGE=inseefrlab/onyxia-jupyter-python:py3.13.7-gpu \
+  -t ghcr.io/ppr-ocean-ia/dc-tools:py3.13-oc \
+  .
+```
+
+Charger la clé
+``` bash
+# Vérifier si l'agent tourne
+echo $SSH_AUTH_SOCK
+
+# Démarrer l'agent et add key
+eval $(ssh-agent); ssh-add ./secrets/oceanbench-deploy
+
+# Vérifier les clés chargées
+ssh-add -l
+```
+
+lancement du build, utilisant la clé
+``` bash
+DOCKER_BUILDKIT=1 docker buildx build \
+  --ssh default \
+  --progress=plain \
+  --no-cache \
+   -f edito/py3.13-claude/Dockerfile \
+  --build-arg BASE_IMAGE=inseefrlab/onyxia-jupyter-python:py3.13.7-gpu  \
+  -t ghcr.io/ppr-ocean-ia/dc-tools:py3.13-oc \
+  .
+```
+---
 ## Publication pour service sur edito
 
 ``` bash
 docker tag ghcr.io/ppr-ocean-ia/dc-tools:latest ghcr.io/ppr-ocean-ia/dc-tools:edito-gpu-latest
 
-docker tag ghcr.io/ppr-ocean-ia/dc-tools:py3.13-claude-latest ghcr.io/ppr-ocean-ia/dc-tools:edito-gpu-latest
+docker tag ghcr.io/ppr-ocean-ia/dc-tools:py3.13-oc ghcr.io/ppr-ocean-ia/dc-tools:edito-gpu-latest
 docker push ghcr.io/ppr-ocean-ia/dc-tools:edito-gpu-latest
 ```
 
@@ -227,4 +265,28 @@ Les source-list sont fausses ....
 3.220 W: https://apt.postgresql.org/pub/repos/apt/dists/noble-pgdg/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
 ------
 
+```
+---
+## Oceanbench
+```bash
+#19 [15/18] RUN poetry install --only-root &&     poetry cache clear pypi --all -n || true &&     poetry cache clear _default_cache --all -n || true &&     pip cache purge || true &&     rm -rf /root/.cache /home/*/.cache 2>/dev/null || true
+#19 0.656 Updating dependencies
+#19 0.656 Resolving dependencies...
+#19 7.090 
+#19 7.090 The current project's supported Python range (>=3.11.0,<3.14.0) is not compatible with some of the required packages Python requirement:
+#19 7.090   - oceanbench requires Python >=3.12.9, so it will not be installable for Python >=3.11.0,<3.12.9
+#19 7.090 
+#19 7.090 Because dctools depends on oceanbench (0.0.2) @ git+https://github.com/mercator-ocean/oceanbench.git@main which requires Python >=3.12.9, version solving failed.
+#19 7.090 
+#19 7.090   * Check your dependencies Python requirement: The Python requirement can be specified via the `python` or `markers` properties
+#19 7.090 
+#19 7.090     For oceanbench, a possible solution would be to set the `python` property to ">=3.12.9,<3.14.0"
+#19 7.090 
+#19 7.090     https://python-poetry.org/docs/dependency-specification/#python-restricted-dependencies,
+#19 7.090     https://python-poetry.org/docs/dependency-specification/#using-environment-markers
+#19 7.090 
+#19 7.644 WARNING: No matching packages
+#19 7.644 Files removed: 0 (0 bytes)
+#19 7.687 warning  libmamba Failed to remove file '/home/onyxia/.cache/mamba/proc/1.json' : Success
+#19 DONE 7.7s
 ```
