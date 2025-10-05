@@ -46,10 +46,14 @@ class CatalogEntry:
             dct = asdict(self)
             dct["date_start"] = self.date_start.isoformat()
             dct["date_end"] = self.date_end.isoformat()
-            dct["geometry"] = mapping(self.geometry)
+            if self.geometry is not None:
+                dct["geometry"] = mapping(self.geometry)
+            else:
+                dct["geometry"] = None
             return dct
         except Exception as exc:
             logger.error(f"Error converting CatalogEntry to dict: {exc}")
+            traceback.print_exc()
             raise
 
     @classmethod
@@ -57,7 +61,8 @@ class CatalogEntry:
         data_copy = data.copy()
         data_copy["date_start"] = pd.to_datetime(data_copy["date_start"])
         data_copy["date_end"] = pd.to_datetime(data_copy["date_end"])
-        data_copy["geometry"] = shape(data_copy["geometry"])
+        if data_copy["geometry"] is not None:
+            data_copy["geometry"] = shape(data_copy["geometry"])
         return cls(**data_copy)
 
 
@@ -96,8 +101,20 @@ class DatasetCatalog:
                     logger.warning(f"Ignoring invalid entry: {entry}")
 
             # Convertir les entrées en GeoDataFrame
+            data_dicts = []
+            for entry in self.entries:
+                entry_dict = asdict(entry)
+                # Convert geometry dict back to Shapely object if needed
+                geometry_data = entry_dict.get('geometry')
+                if isinstance(geometry_data, dict):
+                    entry_dict['geometry'] = shape(geometry_data)
+                elif geometry_data is None:
+                    entry_dict['geometry'] = None
+                # If it's already a Shapely object, keep it as is
+                data_dicts.append(entry_dict)
+            
             self.gdf = gpd.GeoDataFrame(
-                [asdict(entry) for entry in self.entries],
+                data_dicts,
                 geometry="geometry",
                 crs="EPSG:4326",
             )

@@ -201,7 +201,7 @@ def add_time_dim(
 
         if len(unique_times) == 1:
             # Only one unique time → add as scalar dimension if not already there
-            if "time" in ds.dims:
+            if "time" in ds.dims or "time" in ds.coords:
                 return ds  # already present
             else:
                 return ds.expand_dims(time=[unique_times[0]])
@@ -259,6 +259,10 @@ def preprocess_argo_profiles(
             ds = open_func(profile_source, alias) if alias is not None else open_func(profile_source)
             if ds is None:
                 return None, None
+
+            # ds = ds.argo.interp_std_levels(target_dimensions['depth']) # inutilisable sur un profil unique
+            # ds = ds.argo.filter_qc()   # inutile dans le mode "research" d'argopy
+            # ds_filtered = filter_variables(ds, keep_variables_list)
 
             ds = ds.rename({"PRES_ADJUSTED": "depth"})
             ds = ArgoManager.filter_argo_profile_by_time(
@@ -364,10 +368,6 @@ def preprocess_one_npoints(
         if ds is None:
             return None
 
-        # ds = ds.argo.interp_std_levels(target_dimensions['depth']) # inutilisable sur un profil unique
-        # ds = ds.argo.filter_qc()   # inutile dans le mode "research" d'argopy
-        # ds_filtered = filter_variables(ds, keep_variables_list)
-
         if is_swath:
             coords_to_keep = [
                 coordinates.get('time', None),
@@ -379,6 +379,7 @@ def preprocess_one_npoints(
             ds = swath_to_points(
                 ds,
                 coords_to_keep=list(coordinates.keys()),
+                n_points_dim=n_points_dim,
             )
 
         # Chercher une coordonnée/variable temporelle
@@ -393,7 +394,7 @@ def preprocess_one_npoints(
             return None
 
         ds_with_time = add_time_dim(
-            ds, filtered_df, points_dim=n_points_dim, time_coord=time_coord, idx=idx
+            ds, filtered_df, n_points_dim=n_points_dim, time_coord=time_coord, idx=idx
         )
 
         ds_interp = ds_with_time
@@ -768,6 +769,39 @@ class ObservationDataViewer:
                         f"{len(result.data_vars)} variables")
                 if load_to_memory:
                     result = result.compute()
+
+
+
+
+
+
+
+
+                # sauvegarde du dataset pré&traité dans un fichier Zarr
+                argo_dir = "/home/k24aitmo/IMT/software/dc-tools/tests/data/ARGO"
+                from datetime import datetime
+                time_val = result.coords["time"].values
+
+                # Si c'est un tableau avec une seule valeur
+                if isinstance(time_val, (np.ndarray, list)) and len(time_val) == 1:
+                    time_str = str(pd.to_datetime(time_val[0]))
+                else:
+                    time_str = str(pd.to_datetime(time_val))
+                argo_name = f"argo_profiles_{time_str}.zarr"
+                import os
+                argo_path = os.path.join(argo_dir, argo_name)
+                result.to_zarr(argo_path, mode="w", consolidated=True)
+
+
+
+
+
+
+
+
+
+
+
                 return result
             except Exception as e:
                 logger.error(f"Argo preprocessing failed: {e}")

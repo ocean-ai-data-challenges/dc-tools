@@ -137,7 +137,6 @@ class BaseDataset(ABC):
                 self.std_eval_variables = [
                     vars_rename_dict[var] if var in vars_rename_dict else None for var in self.eval_variables
                 ]
-        logger.debug(f"self.std_eval_variables: {self.std_eval_variables}")
 
     def list_paths(self) -> List[str]:
         """
@@ -168,7 +167,7 @@ class BaseDataset(ABC):
         coord_rename_dict: Dict[str, str],
         variable_rename_dict: Dict[str, str],
     ) -> None:
-        logger.info(f"Standardizing names for dataset {self.alias}")
+        # logger.info(f"Standardizing names for dataset {self.alias}")
         if isinstance(coord_rename_dict, str):
             coord_rename_dict = ast.literal_eval(coord_rename_dict)
         if isinstance(variable_rename_dict, str):

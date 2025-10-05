@@ -321,6 +321,18 @@ class SubsetCoordTransform:
                 return data
         return transf_dataset
 
+class ToSurfaceTransform:
+    """
+    Réduit la dimension 'depth' à sa première valeur (la plus proche de la surface).
+    """
+    def __init__(self, depth_coord_name: str = "depth"):
+        self.depth_coord_name = depth_coord_name
+
+    def __call__(self, ds: xr.Dataset):
+        if self.depth_coord_name in ds.dims:
+            # Sélectionne la première valeur de la dimension depth
+            return ds.isel({self.depth_coord_name: 0})
+        return ds
 
 class CustomTransforms:
     def __init__(
@@ -366,6 +378,10 @@ class CustomTransforms:
                 )
             case "to_epsg3413":
                 return self.transform_to_epsg3413(
+                    dataset
+                )
+            case "standardize_to_surface":
+                return self.transform_standardize_to_surface(
                     dataset
                 )
             case _:
@@ -508,4 +524,39 @@ class CustomTransforms:
 
         # Add x and y as coordinates to the dataset
         transf_dataset = dataset.assign_coords(x=("n_points", x), y=("n_points", y))
+        return transf_dataset
+
+
+    def transform_standardize_to_surface(
+        self,
+        dataset: xr.Dataset,
+    ) -> xr.Dataset:
+        """
+        Applique la standardisation puis réduit à la surface (première valeur de depth).
+        """
+        assert(hasattr(self, "coords_rename_dict") and hasattr(self, "vars_rename_dict"))
+        assert(hasattr(self, "list_vars"))
+        depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
+
+        # Convert string representations of dictionaries to actual dictionaries
+        if isinstance(self.coords_rename_dict, str):
+            coords_rename_dict = ast.literal_eval(self.coords_rename_dict)
+        else:
+            coords_rename_dict = self.coords_rename_dict
+        if isinstance(self.vars_rename_dict, str):
+            vars_rename_dict = ast.literal_eval(self.vars_rename_dict)
+        else:
+            vars_rename_dict = self.vars_rename_dict
+
+        transform = transforms.Compose([
+            SelectVariablesTransform(self.list_vars),
+            RenameCoordsVarsTransform(
+                coords_rename_dict=coords_rename_dict,
+                vars_rename_dict=vars_rename_dict,
+            ),
+            StdLongitudeTransform(),
+            ToSurfaceTransform(depth_coord_name=depth_coord_name),
+        ])
+
+        transf_dataset = transform(dataset)
         return transf_dataset

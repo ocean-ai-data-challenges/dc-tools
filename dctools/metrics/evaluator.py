@@ -105,13 +105,15 @@ def compute_metric(
                         "ref_alias": ref_alias,
                         "result": None,
                     }
-
+                n_points_dim = "n_points"   # default
+                if hasattr(ref_coords.coordinates, "n_points"):
+                        n_points_dim=ref_coords.coordinates["n_points"]
                 ref_raw_data = ObservationDataViewer(
                     ref_df,
                     open_ref_func, ref_alias,
                     keep_vars, target_dimensions, metadata,
                     time_bounds,
-                    n_points_dim=ref_coords.coordinates["n_points"],
+                    n_points_dim = n_points_dim,
                     dataset_processor=None,
                 )
                 # load immediately before increasing Dask graph size
@@ -207,7 +209,7 @@ def compute_metric(
         gc.collect()
         return res
     except Exception as exc:
-        logger.error(f"Error computing metrics for date {forecast_reference_time}: {repr(exc)}")
+        logger.error(f"Error computing metrics for dataset {ref_alias} and date {forecast_reference_time}: {repr(exc)}")
         import traceback
         traceback.print_exc()
         return {

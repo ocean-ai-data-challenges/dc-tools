@@ -8,7 +8,8 @@ from glob import glob
 import json
 import os
 # from typing import Any, Optional
-
+import warnings
+warnings.simplefilter("ignore", UserWarning)
 
 from datetime import timedelta
 import geopandas as gpd
@@ -48,7 +49,7 @@ class DC2Evaluation:
 
         self.dataset_references = {
             "glonet": [
-                "jason3", "saral", "swot", "glorys_wasabi", "argo_profiles", "argo_velocities",
+                "jason3", "saral", "swot", "glorys", "argo_profiles", "argo_velocities",
                 "SSS_fields", "SST_fields",
             ]
         }
@@ -88,10 +89,10 @@ class DC2Evaluation:
         """Fixture pour configurer les transformations."""
         transforms_dict = {}
         for alias in aliases:
-            if alias == "glorys":
-                transforms_dict["glorys"] = dataset_manager.get_transform(
+            if alias == "glorys_cmems":
+                transforms_dict["glorys_cmems"] = dataset_manager.get_transform(
                     "standardize_glorys",
-                    dataset_alias="glorys",
+                    dataset_alias="glorys_cmems",
                     interp_ranges=TARGET_DIM_RANGES,
                     weights_path=self.args.regridder_weights,
                     depth_coord_vals=TARGET_DEPTH_VALS,
@@ -124,28 +125,31 @@ class DC2Evaluation:
         catalog_cfg: dict,
     ):
         import fsspec
-        def get_storage_options(catalog_cfg):
-            # Si les clés sont présentes, utilise-les
-            if catalog_cfg.get("s3_key") and catalog_cfg.get("s3_secret_key"):
-                return {
-                    "key": catalog_cfg["s3_key"],
-                    "secret": catalog_cfg["s3_secret_key"],
-                    "client_kwargs": {"endpoint_url": catalog_cfg["url"]},
-                }
-            # Sinon, connexion anonyme
-            return {
-                "anon": True,
-                "client_kwargs": {"endpoint_url": catalog_cfg["url"]},
-            }
+
         def download_catalog_file(
                 remote_path: str,
                 local_path: str,
-                storage_options: dict = None
             ):
-            """Télécharge un fichier distant (S3/Wasabi) vers un chemin local."""
-            with fsspec.open(remote_path, mode="rb", **(storage_options or {})) as remote_file:
-                with open(local_path, "wb") as local_file:
-                    local_file.write(remote_file.read())
+        
+            def create_fs(catalog_cfg):
+                key = catalog_cfg.get("s3_key", None)
+                secret_key = catalog_cfg.get("s3_secret_key", None)
+                endpoint_url = catalog_cfg.get("url", None)
+
+                client_kwargs={'endpoint_url': endpoint_url}
+                if key is None or secret_key is None:
+                    fs = fsspec.filesystem('s3', anon=True, client_kwargs=client_kwargs)
+                else:
+                    fs = fsspec.filesystem(
+                        "s3", key=key, secret=secret_key, client_kwargs=client_kwargs
+                    )
+                return fs
+            """Télécharge le fichier distant (S3) vers un fichier local."""
+            fs = create_fs(catalog_cfg)
+            data = fs.cat_file(remote_path)   # lit tout le fichier en mémoire
+            with open(local_path, "wb") as local_file:
+                local_file.write(data)
+
         # check if local file exists
         local_catalog_path = os.path.join(local_catalog_dir, f"{dataset_name}.json")
         if os.path.isfile(local_catalog_path) and os.path.getsize(local_catalog_path) > 0:
@@ -154,13 +158,7 @@ class DC2Evaluation:
             # Get catalog from server if no local file exists
             remote_catalog_path = f"s3://{catalog_cfg['s3_bucket']}/{catalog_cfg['s3_folder']}/{dataset_name}.json"
 
-            '''storage_options = {
-                "key": catalog_cfg["s3_key"],
-                "secret": catalog_cfg["s3_secret_key"],
-                "client_kwargs": {"endpoint_url": catalog_cfg["endpoint_url"]},
-            }'''
-            storage_options = get_storage_options(catalog_cfg)
-            #################download_catalog_file(remote_catalog_path, local_catalog_path, storage_options)
+            #############download_catalog_file(remote_catalog_path, local_catalog_path)
 
     def setup_dataset_manager(self, list_all_references: list[str]) -> None:
 
@@ -181,7 +179,7 @@ class DC2Evaluation:
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            if source_name != "glonet" and source_name != "argo_profiles": #  and source_name != "glorys_wasabi" and source_name != "swot" and source_name != "saral" and source_name != "jason3":
+            if source_name != "glonet" and source_name != "saral": # and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
                 logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
     
@@ -208,7 +206,7 @@ class DC2Evaluation:
                 "max_lat": self.args.max_lat,
             }
 
-            logger.debug(f"\n\nSetup dataset {source_name}\n")
+            logger.info(f"\n========= Setup dataset {source_name} =========\n")
             datasets[source_name] = get_dataset_from_config(
                 **kwargs
             )

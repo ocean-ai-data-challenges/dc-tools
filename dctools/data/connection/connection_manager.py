@@ -1,9 +1,12 @@
 
 from abc import ABC, abstractmethod
+import gc
 import logging
+import math
 import pickle
 from pydoc import Helper
 import re
+import tempfile
 import traceback
 from types import SimpleNamespace
 from typing import (
@@ -15,13 +18,14 @@ from argopy import set_options as argo_set_options
 from argparse import Namespace
 import copernicusmarine
 import datetime
-
 import dask
 from loguru import logger
 import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import json
+from tqdm import tqdm
 import xarray as xr
 
 
@@ -285,9 +289,10 @@ class BaseConnectionManager(ABC):
             # logger.debug(f"Opening local file: {local_path}")
 
             ds = FileLoader.open_dataset_auto(
-                local_path, self,
+                local_path, adaptive_chunking=False,
                 groups=self.params.groups,
                 variables=self.params.keep_variables,
+                file_storage=self.params.fs,
             )
             return ds
         return None
@@ -310,10 +315,12 @@ class BaseConnectionManager(ABC):
             extension = Path(path).suffix
             if extension != '.zarr':
                 return None
+            
             return FileLoader.open_dataset_auto(
-                path, self,
+                path, adaptive_chunking=False,
                 groups=self.params.groups,
                 variables=self.params.keep_variables,
+                file_storage=self.params.fs,
             )
         except Exception as exc:
             logger.warning(
@@ -500,13 +507,12 @@ class BaseConnectionManager(ABC):
             CatalogEntry: Metadata for the specific file as a CatalogEntry.
         """
         try:
-            logger.debug("FUCK")
             open_func = create_worker_connect_config(
                 connection_params,
                 argo_index,
             )
 
-            if class_name == "CMEMSManager":
+            if class_name == "CMEMSManager" or class_name == "GlonetManager":
                 # cmems not compatible with Dask workers (pickling errors)
                 with dask.config.set(scheduler='synchronous'):
                     ds = open_func(path, "rb")
@@ -527,8 +533,10 @@ class BaseConnectionManager(ABC):
             )
             
             # Fermer explicitement le dataset
-            if hasattr(ds, 'close'):
-                ds.close()
+            #if hasattr(ds, 'close'):
+            ds.close()
+            del ds
+            gc.collect()
 
             if global_metadata.get("full_day_data", False):
                 if date_start and date_end:
@@ -627,7 +635,7 @@ class BaseConnectionManager(ABC):
         if hasattr(self, "argo_index") and self.argo_index is not None:
             scattered_argo_index = self.dataset_processor.scatter_data(
                 self.argo_index,
-                broadcast_item=True,
+                broadcast_item=False,
             )
         else:
             scattered_argo_index = None
@@ -635,23 +643,56 @@ class BaseConnectionManager(ABC):
         try:
             connection_conf = self.get_config_clean_copy()
 
-            futures = [
-                self.dataset_processor.client.submit(
-                    self.extract_metadata_worker,
-                    path, self._global_metadata,
-                    connection_conf,
-                    self.__class__.__name__,
-                    scattered_argo_index,
+            n_batches = math.ceil(len(file_list) / self.batch_size)
+            temp_dir = tempfile.mkdtemp(prefix="metadata_batches_")
+            empty_folder(temp_dir, extension=".json")
+            temp_files = []
+
+            logger.info(f"Processing {len(file_list)} files in {n_batches} batches (batch_size={self.batch_size})")
+
+            for i in tqdm(range(n_batches), desc="Batches"):
+                batch_paths = file_list[i * self.batch_size : (i + 1) * self.batch_size]
+                
+                delayed_tasks = [
+                    dask.delayed(self.extract_metadata_worker)(
+                        path, self._global_metadata,
+                        connection_conf,
+                        self.__class__.__name__,
+                        scattered_argo_index,
+                    )
+                    for path in batch_paths
+                ]
+                #batch_results = self.dataset_processor.client.gather(futures)
+
+                batch_results = self.dataset_processor.compute_delayed_tasks(
+                    delayed_tasks, sync=False
                 )
-                for path in file_list
-            ]
-            batch_results = self.dataset_processor.client.gather(futures)
-            valid_results = [meta for meta in batch_results if meta is not None]
-            metadata_list.extend(valid_results)
+                valid_results = [meta for meta in batch_results if meta is not None]
+                # metadata_list.extend(valid_results)
 
-            logger.info(f"Finished processing ARGO data: {len(valid_results)}/{len(file_list)} items processed")
+                # Sauvegarde le batch dans un fichier temporaire
+                batch_file = f"{temp_dir}/metadata_batch_{i:08d}.json"
+                with open(batch_file, "w") as f:
+                    json.dump([meta.to_dict() for meta in valid_results], f, default=str, indent=2)
+                temp_files.append(batch_file)
 
-            self.dataset_processor.cleanup_worker_memory()
+                percent = int(100 * (i + 1) / n_batches)
+                logger.info(f"Batch {i+1}/{n_batches} traité ({percent}%) : {len(valid_results)} fichiers")
+
+                # Nettoyage mémoire
+                del batch_results, valid_results
+                gc.collect()
+
+            metadata_list = []
+            for batch_file in temp_files:
+                with open(batch_file, "r") as f:
+                    batch_data = json.load(f)
+                    for meta_dict in batch_data:
+                        metadata_list.append(CatalogEntry(**meta_dict))
+
+            logger.info(f"Finished processing data: {len(metadata_list)}/{len(file_list)} items processed")
+            return metadata_list
+            #self.dataset_processor.cleanup_worker_memory()
 
         except Exception as exc:
             logger.error(f"Dask metadata extraction failed: {exc}")
@@ -909,8 +950,9 @@ class S3Manager(BaseConnectionManager):
             for f in files:
                 if fnmatch.fnmatch(f, pattern):
                     out.append(f"{root}/{f}")
-                    if len(out) >= n:
-                        raise RecursionExit(out)
+                    if n is not None:
+                        if len(out) >= n:
+                            raise RecursionExit(out)
         return out
 
     def list_files(self) -> List[str]:
@@ -930,7 +972,8 @@ class S3Manager(BaseConnectionManager):
             remote_base_path = f"s3://{self.params.bucket}/{self.params.bucket_folder}"
             remote_path = f"{remote_base_path}/{self.params.file_pattern}"
 
-            limit = self.params.max_samples if self.params.max_samples else len(files)
+            total_files =  len(self._list_files) if hasattr(self, "_list_files") and self._list_files is not None else None
+            limit = self.params.max_samples if self.params.max_samples else total_files
             # Utiliser fsspec pour accéder aux fichiers
             if limit is not None:
                 try:
@@ -985,9 +1028,9 @@ class S3Manager(BaseConnectionManager):
                 return None
             return(
                 FileLoader.open_dataset_auto(
-                    path, self, groups=self.params.groups,
+                    path, adaptive_chunking=False, groups=self.params.groups,
                     variables=self.params.keep_variables,
-                    file_storage = self.params.fs,
+                    file_storage=self.params.fs,
                 )
             )
         except Exception as exc:
@@ -1027,9 +1070,9 @@ class S3WasabiManager(S3Manager):
                 return None
             return(
                 FileLoader.open_dataset_auto(
-                    path, self, groups=self.params.groups,
+                    path, adaptive_chunking=False, groups=self.params.groups,
                     variables=self.params.keep_variables,
-                    file_storage = self.params.fs,
+                    file_storage=self.params.fs,
                 )
             )
         except Exception as exc:
@@ -1274,10 +1317,11 @@ class ArgoManager(BaseConnectionManager):
         connection_params: dict,
         global_metadata: dict,
         argo_index: Any,
+        extract_geometry: bool = False,
     ) -> Optional[CatalogEntry]:
         """Version pour worker Dask - ARGO."""
         try:
-            logger.debug(f"Process ARGO item: {path}")
+            # logger.debug(f"Process ARGO item: {path}")
             # Recréer le manager
             manager = ArgoManager(
                 connection_params, call_list_files=False, argo_index=argo_index
@@ -1292,9 +1336,12 @@ class ArgoManager(BaseConnectionManager):
             date_start, date_end = time_bounds
             # Extraction des coordonnées ARGO
             coord_sys = global_metadata.get('coord_system', {})
-
-            geometry = get_dataset_geometry(ds, coord_sys)
+            geometry = None
+            if extract_geometry:
+                geometry = get_dataset_geometry(ds, coord_sys)
             ds.close()
+            del ds
+            gc.collect()
             
             # Créer l'entrée
             metadata = CatalogEntry(
@@ -1321,6 +1368,12 @@ class ArgoManager(BaseConnectionManager):
         logger.info(f"Processing {len(list_dates)} ARGO dates with Dask")
 
         metadata_list = []
+        n_batches = math.ceil(len(list_dates) / self.batch_size)
+        temp_dir = tempfile.mkdtemp(prefix="metadata_batches_")
+        empty_folder(temp_dir, extension=".json")
+        temp_files = []
+        logger.info(f"Processing {len(list_dates)} files in {n_batches} batches (batch_size={self.batch_size})")
+
         
         try:
             # Scatter une seule fois les objets volumineux
@@ -1330,24 +1383,46 @@ class ArgoManager(BaseConnectionManager):
             scattered_metadata = self.dataset_processor.scatter_data(
                 self._global_metadata, broadcast_item=False)
             scattered_argo_index = self.dataset_processor.scatter_data(
-                self.argo_index, broadcast_item=False)
+                self.argo_index, broadcast_item=True)
 
-            delayed_tasks = [
-                dask.delayed(self._extract_argo_metadata)(
-                    start_date, scattered_config, scattered_metadata, scattered_argo_index
+            for i in tqdm(range(n_batches), desc="Batches"):
+                batch_paths = list_dates[i * self.batch_size : (i + 1) * self.batch_size]
+                delayed_tasks = [
+                    dask.delayed(self._extract_argo_metadata)(
+                        start_date, scattered_config, scattered_metadata, scattered_argo_index
+                    )
+                    for start_date in batch_paths
+                ]
+
+                batch_results = self.dataset_processor.compute_delayed_tasks(
+                    delayed_tasks, sync=False
                 )
-                for start_date in list_dates
-            ]
+                valid_results = [meta for meta in batch_results if meta is not None]
+                # metadata_list.extend(valid_results)
 
-            batch_results = self.dataset_processor.compute_delayed_tasks(
-                delayed_tasks, sync=False
-            )
-            valid_results = [meta for meta in batch_results if meta is not None]
-            metadata_list.extend(valid_results)
+                # Sauvegarde le batch dans un fichier temporaire
+                batch_file = f"{temp_dir}/metadata_batch_{i:08d}.json"
+                with open(batch_file, "w") as f:
+                    json.dump([meta.to_dict() for meta in valid_results], f, default=str, indent=2)
+                temp_files.append(batch_file)
 
+                percent = int(100 * (i + 1) / n_batches)
+                logger.info(f"Batch {i+1}/{n_batches} traité ({percent}%) : {len(valid_results)} fichiers")
+
+                # Nettoyage mémoire
+                del batch_results, valid_results
+                gc.collect()
+
+            # Concatène tous les fichiers JSON en une seule metadata_list
+            metadata_list = []
+            for batch_file in temp_files:
+                with open(batch_file, "r") as f:
+                    batch_data = json.load(f)
+                    for meta_dict in batch_data:
+                        metadata_list.append(CatalogEntry(**meta_dict))
             logger.info(f"Finished processing ARGO data: {len(valid_results)}/{len(list_dates)} items processed")
 
-            self.dataset_processor.cleanup_worker_memory()
+            #self.dataset_processor.cleanup_worker_memory()
 
         except Exception as exc:
             logger.error(f"Dask ARGO metadata extraction failed: {exc}")

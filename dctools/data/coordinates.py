@@ -71,7 +71,10 @@ VARIABLES_ALIASES = {
             "sea_surface_height_above_geoid",
             "sea_surface_height_above_reference_ellipsoid"
         ],
-        "aliases": ["ssh", "sea_level", "surface_height", "ssha_filtered", "zos", "data_01__ku__ssha"]
+        "aliases": [
+            "ssh", "sea_level", "surface_height",
+            "ssha_filtered", "zos", "data_01__ku__ssha",  "ssha",
+        ]
     },
     "temperature": {
         "standard_names": ["sea_water_potential_temperature", "sea_water_temperature"],
@@ -170,12 +173,21 @@ TARGET_DEPTH_VALS = [0.494025, 47.37369, 92.32607, 155.8507, 222.4752, 318.1274,
         453.9377, 541.0889, 643.5668, 763.3331, 902.3393, 1245.291, 1684.284, 
         2225.078, 3220.82, 3597.032, 3992.484, 4405.224, 4833.291, 5274.784]
 
+TARGET_DEPTH_VALS_SURFACE = [0.494025]
+
 GLONET_TIME_VALS = range(0, 10)
 
 TARGET_DIM_RANGES = {
     "lat": np.arange(-78, 90, 0.25),
     "lon": np.arange(-180, 180, 0.25),
     "depth": TARGET_DEPTH_VALS,
+    #"time": GLONET_TIME_VALS,
+}
+
+TARGET_DIM_RANGES_SURFACE = {
+    "lat": np.arange(-78, 90, 0.25),
+    "lon": np.arange(-180, 180, 0.25),
+    "depth": TARGET_DEPTH_VALS_SURFACE,
     #"time": GLONET_TIME_VALS,
 }
 
