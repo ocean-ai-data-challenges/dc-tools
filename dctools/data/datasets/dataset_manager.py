@@ -489,6 +489,20 @@ class MultiSourceDatasetManager:
                         transform_standardize,
                     ]
                 )
+            case "standardize_to_surface":
+                transform_std = CustomTransforms(
+                    transform_name="standardize_to_surface",
+                    dataset_processor=None,  # self.dataset_processor,
+                    list_vars=keep_vars,
+                    coords_rename_dict=coords_rename_dict,
+                    vars_rename_dict=vars_rename_dict,
+                )
+                transform = transform_std
+                self.standardize_names(
+                    dataset_alias,
+                    coords_rename_dict,
+                    vars_rename_dict,
+                )
             case _:
                 transform = None
 

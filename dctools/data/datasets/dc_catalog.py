@@ -170,7 +170,7 @@ class DatasetCatalog:
         def process_feature(feat):
             try:
                 props = feat.get("properties", {})
-                if alias == "glorys" and "path" in props:
+                '''if alias == "glorys" and "path" in props:
                     try:
                         # Convertir le path string en datetime
                         path_value = props["path"]
@@ -193,7 +193,7 @@ class DatasetCatalog:
                                         traceback.print_exc()
                     except Exception as exc:
                         logger.warning(f"Error converting path to datetime for glorys: {exc}")
-                        traceback.print_exc()
+                        traceback.print_exc()'''
 
                 if not ignore_geometry:
                     if feat["geometry"] is not None:

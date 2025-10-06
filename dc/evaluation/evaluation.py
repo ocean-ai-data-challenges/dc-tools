@@ -158,7 +158,7 @@ class DC2Evaluation:
             # Get catalog from server if no local file exists
             remote_catalog_path = f"s3://{catalog_cfg['s3_bucket']}/{catalog_cfg['s3_folder']}/{dataset_name}.json"
 
-            #############download_catalog_file(remote_catalog_path, local_catalog_path)
+            download_catalog_file(remote_catalog_path, local_catalog_path)
 
     def setup_dataset_manager(self, list_all_references: list[str]) -> None:
 
@@ -179,7 +179,7 @@ class DC2Evaluation:
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            if source_name != "glonet" and source_name != "argo_profiles": # and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
+            if source_name != "glonet" and source_name != "argo_profiles" and source_name != "swot" and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
                 logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
     

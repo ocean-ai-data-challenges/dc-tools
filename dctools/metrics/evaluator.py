@@ -8,6 +8,7 @@ import dask
 
 from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
+import pandas as pd
 import traceback
 
 import json
@@ -101,7 +102,6 @@ def compute_metric(
                 if ref_df.empty:
                     logger.warning(f"No {ref_alias} Data for time interval: {t0}/{t1}]")
                     return {
-                        "model": model,
                         "ref_alias": ref_alias,
                         "result": None,
                     }
@@ -146,7 +146,6 @@ def compute_metric(
         if ref_is_observation:
             if ref_data is None:
                 return {
-                    "model": model,
                     "ref_alias": ref_alias,
                     "result": None,
                 }
@@ -166,7 +165,6 @@ def compute_metric(
 
                 if len(return_res) == 0:
                     return {
-                        "model": model,
                         "ref_alias": ref_alias,
                         "result": None,
                     }
@@ -183,10 +181,13 @@ def compute_metric(
 
                 results[metric.get_metric_name()] = res_dict
 
+        # print(f"RESULTS: {results}")
+        results = results.compute() if hasattr(results, "compute") else results
+        if isinstance(results, pd.DataFrame):
+            results = results.to_dict('records')
         res = {
-            "model": model,
             "ref_alias": ref_alias,
-            "result": results.compute() if hasattr(results, "compute") else results,
+            "result": results
         }
         # Ajoute les champs forecast si présents
         if forecast_reference_time is not None:
@@ -195,16 +196,6 @@ def compute_metric(
             res["lead_time"] = lead_time
         if valid_time is not None:
             res["valid_time"] = valid_time
-
-        # Libérer les objets volumineux
-        '''if ref_data is not None:
-            if hasattr(ref_data, "close"):
-                ref_data.close()
-            if isinstance(ref_data, list):
-                for item in ref_data:
-                    if hasattr(item, "close"):
-                        item.close()
-            # del ref_data'''
 
         gc.collect()
         return res

@@ -188,6 +188,23 @@ class OceanbenchMetrics(DCMetric):
                     variables=self.eval_variables,
                     ref_coords=ref_coords,
                 )
+
+                '''import pandas as pd
+                with pd.option_context('display.max_rows', None, 
+                                    'display.max_columns', None,
+                                    'display.width', None,
+                                    'display.max_colwidth', None):
+                    print(res)'''
+                # Affichage en format Markdown
+                from IPython.display import display, Markdown
+                
+                # Convertir le DataFrame en Markdown
+                markdown_table = res.to_markdown(index=True, tablefmt="grid")
+                print("## Résultats des métriques Class4\n")
+                print(markdown_table)
+
+
+
                 return res
 
             except Exception as exc:

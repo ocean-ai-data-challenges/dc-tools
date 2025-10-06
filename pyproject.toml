@@ -71,7 +71,7 @@ optional = false
 
 [tool.poetry.group.custom.dependencies]
 oceanbench = { git = "ssh://git@github.com/aitmohandk/oceanbench", branch = "main" }
-# oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench", develop = true }
+#oceanbench = { path = "/home/k24aitmo/IMT/software/oceanbench", develop = true }
 xrpatcher = { git = "ssh://git@github.com/jejjohnson/xrpatcher.git", branch = "main" }
 xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
 
