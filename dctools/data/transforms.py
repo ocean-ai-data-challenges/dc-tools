@@ -330,8 +330,9 @@ class ToSurfaceTransform:
 
     def __call__(self, ds: xr.Dataset):
         if self.depth_coord_name in ds.dims:
-            # Sélectionne la première valeur de la dimension depth
-            return ds.isel({self.depth_coord_name: 0})
+            # Sélectionne la première valeur de la dimension depth en gardant la dimension
+            surface_ds = ds.isel({self.depth_coord_name: slice(0, 1)})
+            return surface_ds
         return ds
 
 class CustomTransforms:

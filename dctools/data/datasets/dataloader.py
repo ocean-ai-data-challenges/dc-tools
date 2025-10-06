@@ -310,7 +310,7 @@ def preprocess_argo_profiles(
 ):
     interp_profiles = []
     time_vals = []
-    threshold_list_profiles = 10     # TODO : remove this after storing preprocessed profiles to avoid reprocessing them at each timestep
+    threshold_list_profiles = 20     # TODO : remove this after storing preprocessed profiles to avoid reprocessing them at each timestep
 
     def process_one_profile(profile_source):
         try:
@@ -836,7 +836,7 @@ class ObservationDataViewer:
         # si profils argo, prétraitement particulier :
 
         if self.alias == "argo_profiles":
-            logger.info("Argo profiles detected - special preprocessing")
+            # logger.info("Argo profiles detected - special preprocessing")
             try:
                 result = preprocess_argo_profiles(
                     profile_sources=dataset_paths,
@@ -848,8 +848,8 @@ class ObservationDataViewer:
                 if result is None:
                     logger.error("No Argo profiles could be processed")
                     return None
-                logger.info(f"Final Argo result: {result.sizes.get('profile', 1)} profiles, "
-                        f"{len(result.data_vars)} variables")
+                # logger.info(f"Final Argo result: {result.sizes.get('profile', 1)} profiles, "
+                #        f"{len(result.data_vars)} variables")
                 if load_to_memory:
                     result = result.compute()
 
@@ -911,11 +911,11 @@ class ObservationDataViewer:
                 # Concaténer le long de la dimension temporelle
                 if len(cleaned_datasets) == 1:
                     result = cleaned_datasets[0]
-                    logger.info("Single n_points dataset - no concatenation needed")
+                    # logger.info("Single n_points dataset - no concatenation needed")
                 else:
                     try:
                         result = concat_with_dim(cleaned_datasets, dim="time")
-                        logger.info(f"Successfully concatenated {len(cleaned_datasets)} n_points datasets")
+                        # logger.info(f"Successfully concatenated {len(cleaned_datasets)} n_points datasets")
                     except Exception as e:
                         logger.error(f"N_points concatenation failed: {e}")
                         result = cleaned_datasets[0]  # Fallback au premier
@@ -929,8 +929,8 @@ class ObservationDataViewer:
                     'time_steps': result.sizes.get('time', 1),
                 })
                 
-                logger.info(f"Final n_points result: {result.sizes.get('time', 1)} time steps, "
-                        f"{len(result.data_vars)} variables")
+                # logger.info(f"Final n_points result: {result.sizes.get('time', 1)} time steps, "
+                #        f"{len(result.data_vars)} variables")
                 if load_to_memory:
                     result = result.compute()
                 return result
@@ -942,7 +942,7 @@ class ObservationDataViewer:
 
         # Données Swath
         elif reduced_swath_dims.issubset(first_ds.dims):
-            logger.info("Swath data detected - reshaping and filtering to n_points")
+            # logger.info("Swath data detected - reshaping and filtering to n_points")
             
             try:
                 is_swath_data = True
@@ -980,7 +980,7 @@ class ObservationDataViewer:
                 target_n_points = first_ds.sizes['n_points']
                 target_vars = set(first_ds.data_vars.keys())
                 
-                logger.info(f"Target structure: {target_n_points:,} points, variables: {target_vars}")
+                # logger.info(f"Target structure: {target_n_points:,} points, variables: {target_vars}")
                 
                 # Filtrer les datasets compatibles
                 compatible_datasets = []
@@ -996,7 +996,7 @@ class ObservationDataViewer:
                     logger.error("No compatible datasets after filtering")
                     return cleaned_datasets[0]  # Retourner au moins le premier
                 
-                logger.info(f"Found {len(compatible_datasets)} compatible datasets")
+                # logger.info(f"Found {len(compatible_datasets)} compatible datasets")
                 
                 # concaténation
                 try:

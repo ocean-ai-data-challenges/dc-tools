@@ -2,7 +2,7 @@
 from argparse import Namespace
 import gc
 import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import dask
 
@@ -23,10 +23,11 @@ from dctools.data.datasets.dataloader import EvaluationDataloader, ObservationDa
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.metrics import MetricComputer
 from dctools.utilities.misc_utils import (
-    deep_copy_object, make_serializable,
-    nan_to_none, transform_in_place,
+    deep_copy_object,
     serialize_structure
 )
+from dctools.utilities.format_converter import convert_format1_to_format2
+
 
 
 def compute_metric(
@@ -153,7 +154,10 @@ def compute_metric(
                 pred_data, ref_data,
                 pred_coords, ref_coords,
             )
+            if isinstance(results, pd.DataFrame):
+                results = results.to_dict('records')
         else:
+            # results = {}
             results = {}
             for metric in list_metrics:
                 return_res = metric.compute(
@@ -161,30 +165,24 @@ def compute_metric(
                     pred_coords, ref_coords,
                 )
 
-                res_dict = {}
-
                 if len(return_res) == 0:
                     return {
                         "ref_alias": ref_alias,
                         "result": None,
                     }
+                
                 # Convertir chaque ligne du DataFrame en dictionnaire
+                res_dict = {}
                 for var_depth_label in return_res.index:
-                    # Nettoyer le nom de la variable/profondeur pour en faire une clé valide
-                    clean_key = var_depth_label.lower().replace(" ", "_")
-                    
                     # Extraire les valeurs des métriques pour tous les lead days
                     metric_values = return_res.loc[var_depth_label].to_dict()
-                    
-                    # Structure : {variable: {lead_day: metric_value}}
-                    res_dict[clean_key] = metric_values['Lead day 1']
+                    # Structure : {variable: metric_value}
+                    res_dict[var_depth_label] = metric_values['Lead day 1']
 
                 results[metric.get_metric_name()] = res_dict
 
-        # print(f"RESULTS: {results}")
-        results = results.compute() if hasattr(results, "compute") else results
-        if isinstance(results, pd.DataFrame):
-            results = results.to_dict('records')
+            # Convertir du Format1 imbriqué au Format2
+            results = convert_format1_to_format2(results)
         res = {
             "ref_alias": ref_alias,
             "result": results
@@ -204,7 +202,6 @@ def compute_metric(
         import traceback
         traceback.print_exc()
         return {
-            "model": model,
             "ref_alias": ref_alias,
             "result": None,
         }

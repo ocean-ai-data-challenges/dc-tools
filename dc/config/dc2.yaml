@@ -5,7 +5,7 @@ define: &WASABI_KEY "A10PTBP92GOXQW8OPE8G"
 define: &WASABI_SECRET_KEY "1C1Iscst7rfDnXp5eM8DtL7AkFiUAycINzctMEGQ" 
 ############################# GENERAL DC PARAMETERS ###################################
 
-n_days_forecast: 10
+n_days_forecast: 2
 n_days_interval: 7
 
 delta_time: 12   # delta time (hours) when matching observation data
@@ -15,7 +15,7 @@ max_cache_files: 1000  # max files to store (older files are deleted)
 ############################# PARALLELIZATION ###################################
 
 batch_size: 64
-n_parallel_workers: 10
+n_parallel_workers: 8
 nthreads_per_worker: 4
 memory_limit_per_worker: "6GB"
 ############################# DATA FILTERS ###################################
