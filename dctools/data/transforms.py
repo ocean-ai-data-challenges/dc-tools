@@ -61,6 +61,22 @@ def detect_and_normalize_longitude_system(
         logger.warning(f"Unknown longitude system: {lon_system}, returning original dataset")
         return ds
 
+def normalize_percentage_variable(
+    ds: xr.Dataset,
+    var_name: str
+) -> xr.Dataset:
+    """
+    Bring var_name to a 0 to 1 range if it represents a percentage from 0 to 100.
+    """
+    # Verify that the variable looks like a percentage in the 0 to 100 range
+    if ds[var_name].max() >= 100.1:
+        logger.warning(f"Percentage variable: {var_name} goes beyond 100, returning original dataset")
+        return ds
+    if ds[var_name].min() < 0:
+        logger.warning(f"Percentage variable: {var_name} goes below 0, returning original dataset")
+        return ds
+    ds[var_name] = ds[var_name] / 100
+    return ds
 
 def _detect_longitude_system(lon_min: float, lon_max: float) -> str:
     """Détecte le système de coordonnées longitude basé sur les valeurs min/max."""
@@ -328,6 +344,20 @@ class SubsetCoordTransform:
                 return data
         return transf_dataset
 
+class StdPercentageTransform:
+    """A custom transform to bring a percentage variable between 0 and 1."""
+    def __init__(
+        self,
+        var_name: str
+    ):
+        self.var_name = var_name
+
+    def __call__(self, data):
+        data = normalize_percentage_variable(
+            data,
+            self.var_name
+        )
+        return data
 
 class CustomTransforms:
     def __init__(
@@ -373,6 +403,10 @@ class CustomTransforms:
                 )
             case "to_epsg3413":
                 return self.transform_to_epsg3413(
+                    dataset
+                )
+            case "normalize_siconc":
+                return self.transform_normalize_siconc(
                     dataset
                 )
             case _:
@@ -518,3 +552,13 @@ class CustomTransforms:
         # Add x and y as coordinates to the dataset
         transf_dataset = dataset.assign_coords(x=("n_points", x), y=("n_points", y))
         return transf_dataset
+
+    def transform_normalize_siconc(
+            self,
+            ds: xr.Dataset,
+        ) -> xr.Dataset:
+            assert("siconc" in ds.data_vars)
+
+            transform=StdPercentageTransform("siconc")
+            transf_dataset = transform(ds)
+            return transf_dataset
