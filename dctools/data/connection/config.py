@@ -21,7 +21,6 @@ class BaseConnectionConfig(ABC):
             logger.error(f"Invalid path : {self.params.local_root}")
             raise FileNotFoundError()
 
-    #@abstractmethod
     def to_dict(self) -> dict:
         return self.params
 

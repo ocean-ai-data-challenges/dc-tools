@@ -43,32 +43,7 @@ def setup_dask(args: Optional[Namespace] = None):
     
     # Utiliser threads au lieu de processes pour éviter les conflits
     dask.config.set(scheduler='threads')
-    dask.config.set({"temporary-directory": "/tmp/dask",
-                     # Configuration mémoire plus agressive pour éviter les fuites
-                     #"distributed.worker.memory.target": 0.5,      # Réduction de 0.6 à 0.5
-                     #"distributed.worker.memory.pause": 0.6,       # Réduction de 0.7 à 0.6  
-                     #"distributed.worker.memory.spill": 0.7,       # Réduction de 0.8 à 0.7
-                     #"distributed.worker.memory.terminate": 0.85,  # Réduction de 0.95 à 0.85
-                     
-                     # Nettoyage mémoire plus fréquent
-                     #"distributed.worker.memory.monitor-interval": "100ms",  # Surveillance plus fréquente
-                     #"distributed.worker.memory.rebalance.measure": "optimistic",
-                     
-                     # Réduire le parallélisme pour éviter trop de requêtes simultanées
-                     #"distributed.comm.timeouts.tcp": "300s",
-                     
-                     # Paramètres spécifiques pour S3
-                     #"distributed.worker.connections.outgoing": 2,  # Limite les connexions
-                     #"distributed.worker.connections.incoming": 2,
-                     
-                     # Chunking plus gros pour réduire le nombre de requêtes
-                     #"array.chunk-size": "128MB",  # Réduction de 256MB à 128MB
-                     
-                     # Forcer le garbage collection
-                     #"distributed.worker.memory.spill-compression": False,  # Désactiver compression pour perf
-    })
-    # Forcer le nettoyage mémoire au niveau système
-    #dask.config.set({"distributed.nanny.pre-spawn-environ.MALLOC_TRIM_THRESHOLD_": 65536})  # Force malloc trim
+    dask.config.set({"temporary-directory": "/tmp/dask"})
     
     cluster = LocalCluster(
         n_workers=num_workers,

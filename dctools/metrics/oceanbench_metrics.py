@@ -96,7 +96,6 @@ class OceanbenchMetrics(DCMetric):
         self,
         eval_variables: Optional[List[str]] = None,
         oceanbench_eval_variables: Optional[List[str]] = None,
-        #dataset_processor: DatasetProcessor,
         is_class4: Optional[bool] = None,
         class4_kwargs: Optional[dict] = None,
         **kwargs: Optional[Dict[str, Any]],
@@ -157,7 +156,6 @@ class OceanbenchMetrics(DCMetric):
             )
 
 
-    #@profile
     def compute_metric(
         self, 
         eval_dataset: xr.Dataset,
