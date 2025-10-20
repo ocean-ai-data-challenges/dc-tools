@@ -18,7 +18,6 @@ class MetricComputer(OceanbenchMetrics):
             self,
             eval_variables: List[str] = None,
             oceanbench_eval_variables: List[str] = None,
-            #dataset_processor: DatasetProcessor,
             is_class4: bool = False,
             class4_kwargs: dict = None,
             **kwargs,
@@ -31,7 +30,6 @@ class MetricComputer(OceanbenchMetrics):
         self.class4_kwargs = class4_kwargs or {}
         self.eval_variables = eval_variables
         self.oceanbench_eval_variables = oceanbench_eval_variables
-        # self.eval_variables = kwargs.get("eval_variables", None)
         self.add_noise = kwargs.get("add_noise", False)
 
     #@profile
@@ -39,26 +37,8 @@ class MetricComputer(OceanbenchMetrics):
         self, pred_data: xr.Dataset, ref_data: xr.Dataset,
         pred_coords: CoordinateSystem, ref_coords: CoordinateSystem,
     ):
-        '''try:
-            if "sla" in ref_data.data_vars:
-                # Renommer 'sla' en 'ssh' si nécessaire
-                ref_data = ref_data.rename(name_dict={'sla': 'ssh'})    # TODO : compute sla from ssh
-            if "ssh" in pred_data.data_vars:
-                # TODO Renommer 'sla' en 'ssh' si nécessaire
-                # TODO : compute SST from "temperature" (surface value)
-                pred_data = pred_data.rename(name_dict={'sla': 'ssh'})    # TODO : compute sla from ssh
-        except ValueError as exc:
-            logger.warning("Cannot rename SLA")'''
 
         try:
-            # Restriction des variables à celles présentes dans les deux datasets
-            '''pred_vars = set(pred_data.data_vars)
-            ref_vars = set(ref_data.data_vars)
-            common_vars = [v for v in self.eval_variables if v in pred_vars and v in ref_vars]
-            if not common_vars:
-                logger.warning("No common variables found between pred_data and ref_data for evaluation.")
-                return {}
-            self.eval_variables = common_vars'''
             if self.is_class4:
                 # Appel harmonisé pour la classe 4
                 result = self.compute_metric(

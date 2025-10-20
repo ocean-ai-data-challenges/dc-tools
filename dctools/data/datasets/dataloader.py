@@ -12,10 +12,8 @@ from loguru import logger
 import numpy as np
 from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
-# from pathlib import Path
 import xarray as xr
 import torch
-# import xbatcher as xb
 from xrpatcher import XRDAPatcher
 
 from dctools.utilities.misc_utils import log_memory
@@ -272,8 +270,6 @@ def preprocess_one_npoints(
             if np.issubdtype(ds_float32[var].dtype, np.floating):
                 ds_float32[var] = ds_float32[var].astype(np.float32)
 
-        # ds = ds.argo.interp_std_levels(target_dimensions['depth']) # inutilisable sur un profil unique
-        # ds = ds.argo.filter_qc()   # inutile dans le mode "research" d'argopy
         ds_filtered = filter_variables(ds_float32, keep_variables_list)
 
         if is_swath:

@@ -19,7 +19,6 @@ from dctools.data.datasets.forecast import build_forecast_index_from_catalog
 from dctools.data.transforms import CustomTransforms, WrapLongitudeTransform
 from dctools.data.datasets.dc_catalog import DatasetCatalog
 from dctools.data.datasets.dataloader import EvaluationDataloader
-# from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.file_utils import FileCacheManager
 
 class MultiSourceDatasetManager:
@@ -211,7 +210,6 @@ class MultiSourceDatasetManager:
         """
         aliases_to_remove = []
         for alias, _ in self.datasets.items():
-            # logger.debug(f"Filtrage du dataset '{alias}' par variables : {variables}")
             res = self.filter_by_variable(alias, variables)
             aliases_to_remove.append(res)
         for alias in aliases_to_remove:

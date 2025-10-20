@@ -246,7 +246,6 @@ class DatasetCatalog:
                         f"Expected a gpd.GeoSeries for {key}, got {type(roi)}"
                     )
                 gdf = gdf[roi]
-                #logger.debug(f"Filtered DataFrame shape: {gdf.shape}")
 
             if not key in gdf.columns:
                 raise KeyError(f"{key} not found in catalog columns")
@@ -416,7 +415,6 @@ class DatasetCatalog:
                         logger.warning("Using original region without reprojection")
             
             logger.debug("Applying spatial filter using intersects method")
-            # mask = self.gdf.geometry.intersects(region)
             mask = self.gdf.intersects(region)
             self.gdf = self.gdf[mask]
             

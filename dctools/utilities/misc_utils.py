@@ -46,13 +46,10 @@ def get_dates_from_startdate(start_date: str, ndays: int) -> List[str]:
 
 def get_home_path():
     if 'HOME' in os.environ:
-        #logger.info(f"HOME: {os.environ['HOME']}")
         home_path = os.environ['HOME']
     elif 'USERPROFILE' in os.environ:
-        #logger.info(f"USER: {os.environ['USERPROFILE']}")
         home_path = os.environ['USERPROFILE']
     elif 'HOMEPATH' in os.environ:
-        #logger.info(f"HOME: {os.environ['HOMEPATH']}")
         home_path = os.environ['HOMEPATH']
     return home_path
 

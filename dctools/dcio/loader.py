@@ -228,7 +228,7 @@ class FileLoader:
                     "cache": False,  # Évite les conflits de cache entre workers
                 })
             
-            # Note: variables filtering doit être fait APRÈS ouverture du dataset
+            # NOTE: variables filtering doit être fait APRÈS ouverture du dataset
             # pour éviter les erreurs avec des variables non définies
             
             if file_path.endswith(".nc"):

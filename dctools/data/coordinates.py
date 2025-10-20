@@ -23,7 +23,7 @@ COORD_ALIASES = {
     "depth": {
         "depth", "lev", "level", "bottom", # "z" # z also used by `siconc`
         "deptht", "isodepth",
-        # "pres", "pres_adjusted",   # for argo data (pressure = depth)
+        # NOTE: for argo data pressure = depth (pres_adjusted)
     },
     "quadrant": {"quadrant", "sector"},
     "time": {"time", "date", "datetime", "valid_time", "forecast_time", "time_counter"},
@@ -35,18 +35,15 @@ VARIABLES_ALIASES = {
         "standard_names": ["sea_surface_height_above_sea_level"],
         "aliases": ["sla", "data_01__ku__ssha", "ssha"]
     },
-    #"sst": {
-    #    "standard_names": ["sea_surface_temperature"],
-    #    "aliases": ["sst", "surface_temperature", "temperature_surface"]
-    #},
-    #"sst_foundation": {
+    # "sst_foundation": {
     #    "standard_names": ["sea_surface_foundation_temperature"],
     #    "aliases": [
     #        "sst_foundation", "sst_fnd",
     #        "sstfoundation", "sstfnd", "sst_ref",
     #        "foundation_temperature", "t_surf_foundation",
     #    ]
-    #},  TODO : check about mixing sst and sst_fnd
+    # },
+    # TODO : check mixing sst and sst_fnd
     "sst": {
         "standard_names": ["sea_surface_temperature", "sea_surface_foundation_temperature"],
         "aliases": [
@@ -214,17 +211,17 @@ TARGET_DIM_RANGES = {
     #"time": GLONET_TIME_VALS,
 }
 
-"""
-GLONET_ENCODING = {"depth": {"dtype": "float32"},
-                   "lat": {"dtype": "float64"},
-                   "lon": {"dtype": "float64"},
-                   "time": {"dtype": "str"},
-                   "so": {"dtype": "float32"},
-                   "thetao": {"dtype": "float32"},
-                   "uo": {"dtype": "float32"},
-                   "vo": {"dtype": "float32"},
-                   "zos": {"dtype": "float32"},
-"""
+GLONET_ENCODING = {
+    "depth": {"dtype": "float32"},
+    "lat": {"dtype": "float64"},
+    "lon": {"dtype": "float64"},
+    "time": {"dtype": "str"},
+    "so": {"dtype": "float32"},
+    "thetao": {"dtype": "float32"},
+    "uo": {"dtype": "float32"},
+    "vo": {"dtype": "float32"},
+    "zos": {"dtype": "float32"},
+}
 
 
 def get_standardized_var_name(name: str):
@@ -246,13 +243,11 @@ class CoordinateSystem:
         coord_level: str,     # "grid", "point", "sparse", etc.
         coordinates: Dict[str, str],
         crs: str,
-        # is_observation: bool
     ):
         self.coord_type = coord_type
         self.coord_level = coord_level
         self.coordinates = coordinates
         self.crs = crs
-        # self.is_observation = is_observation
 
     def to_dict(self) -> dict:
         """
@@ -263,7 +258,6 @@ class CoordinateSystem:
             "coord_level": self.coord_level,
             "coordinates": self.coordinates,
             "crs": self.crs,
-            # "is_observation": self.is_observation,
         }
 
     def is_polar(self) -> bool:
@@ -388,9 +382,6 @@ class CoordinateSystem:
                     if alias.lower() in var_names_lower:
                         standardized[key] = var_names_lower[alias.lower()]
 
-        dims = set(ds.dims)
-        # has_depth_dim = "depth" in standardized and standardized["depth"] in dims
-
         has_lat = "lat" in standardized
         has_lon = "lon" in standardized
         has_x = "x" in standardized
@@ -407,14 +398,6 @@ class CoordinateSystem:
         # Détection du niveau de structuration
         coord_level = CoordinateSystem.detect_data_level(ds, standardized)
 
-        # N'inclure depth dans coordinates que si pertinent
-        '''coords_out = {}
-        for key in std_keys:
-            if key in standardized:
-                if key == "depth" and not (has_depth_dim or (coord_level in ["grid_3d", "point_3d"])):
-                    continue
-                coords_out[key] = standardized[key]'''
-
         crs = ds.attrs.get("crs", None)
         if crs is None:
             crs = ds.attrs.get("srid", None)
@@ -423,7 +406,6 @@ class CoordinateSystem:
             coord_level=coord_level,
             coordinates=standardized,
             crs=crs,
-            # is_observation=is_observation,
         )
 
     @staticmethod
@@ -477,9 +459,8 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
     Robustly extract a geometry from a dataset, avoiding memory errors for huge point clouds.
     If the number of points is too large, subsample before computing the geometry.
     """
-    # logger.debug("Extracting geometry from dataset coordinates.")
+
     coords = coord_sys.coordinates
-    #logger.debug(f"Coordinates mapping: {coords}")
     if coord_sys.is_polar():
         lat = ds.coords[coords.get("y")].values
         lon = ds.coords[coords.get("x")].values
@@ -505,7 +486,6 @@ def get_dataset_geometry(ds: xr.Dataset, coord_sys: dict, max_points: int = 5000
 
         # Sous-échantillonnage si trop de points
         if n_points > max_points:
-            #logger.warning(f"Too many points ({n_points}), subsampling to {max_points} for geometry computation.")
             idx = np.random.choice(n_points, size=max_points, replace=False)
             coords_arr = coords_arr[idx]
 

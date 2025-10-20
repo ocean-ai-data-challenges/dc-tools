@@ -9,8 +9,6 @@ from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
 import traceback
 
-
-# from dctools.data.datasets.dataloader import DatasetLoader
 from dctools.data.connection.config import (
     ARGOConnectionConfig, GlonetConnectionConfig,
     WasabiS3ConnectionConfig, S3ConnectionConfig, 
@@ -234,16 +232,6 @@ def compute_metric(
         if valid_time is not None:
             res["valid_time"] = valid_time
 
-        # Libérer les objets volumineux
-        '''if ref_data is not None:
-            if hasattr(ref_data, "close"):
-                ref_data.close()
-            if isinstance(ref_data, list):
-                for item in ref_data:
-                    if hasattr(item, "close"):
-                        item.close()
-            # del ref_data'''
-
         gc.collect()
         return res
     except Exception as exc:
@@ -303,30 +291,6 @@ class Evaluator:
             logger.error(f"Evaluation failed: {traceback.format_exc()}")
             raise
 
-    '''def clean_namespace(self, namespace: Namespace) -> Namespace:
-        try:
-            # Crée une copie pour éviter les effets de bord
-            ns = Namespace(**vars(namespace))
-            # remove these from config to avoid serialization issues with Dask
-
-            for key in ['dask_cluster', 'fs', 'dataset_processor']:
-                if hasattr(ns, key):
-                    delattr(ns, key)
-
-                if key == 'fs':
-                    if hasattr(ns.fs.params.fs, '_session'):
-                        try:
-                            if hasattr(ns.fs.params.fs._session, 'close'):
-                                ns.fs.params.fs._session.close()
-                        except:
-                            pass
-                        ns.fs.params.fs = None
-            return ns
-        except Exception as exc:
-            logger.error(f"Error cleaning namespace: {exc}")
-            # Retourne la version originale si erreur
-            return namespace'''
-
     def clean_namespace(self, namespace: Namespace) -> Namespace:
         ns = Namespace(**vars(namespace))
         # Supprime les attributs non picklables
@@ -346,13 +310,11 @@ class Evaluator:
     ) -> List[Dict[str, Any]]:
         delayed_tasks = []
 
-        #cmems_logout
-
         pred_connection_params = deep_copy_object(
             dataloader.pred_connection_params, skip_list=['dataset_processor', 'fs']
         )
         pred_connection_params = clean_for_serialization(pred_connection_params)
-        pred_connection_params = self.clean_namespace(pred_connection_params) #dataloader.pred_connection_params)
+        pred_connection_params = self.clean_namespace(pred_connection_params)
 
         pred_transform=dataloader.pred_transform
         ref_transforms = None
@@ -367,7 +329,7 @@ class Evaluator:
             dataloader.ref_connection_params.get(ref_alias, None), skip_list=['dataset_processor', 'fs']
         )
         ref_connection_params = clean_for_serialization(ref_connection_params)
-        ref_connection_params = self.clean_namespace(ref_connection_params) #dataloader.ref_connection_params.get(ref_alias, None))
+        ref_connection_params = self.clean_namespace(ref_connection_params)
 
 
         argo_index = None

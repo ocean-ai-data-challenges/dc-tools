@@ -75,14 +75,12 @@ class DatasetConfig:
             connection_config (BaseConnectionConfig): Configuration de connexion.
             catalog_options (Optional[Dict[str, Any]]): Options pour le catalogue (e.g., filtres par défaut).
         """
-        # logger.info(f"DatasetConfig __init__: {alias}")
         self.alias = alias
         self.connection_config = connection_config
         self.catalog_options = catalog_options or {}
         self.keep_variables = keep_variables
         self.eval_variables = eval_variables
         self.observation_dataset = observation_dataset
-        # self.connection_manager = self._create_connection_manager()
         self.use_catalog = use_catalog
 
 
@@ -125,7 +123,6 @@ class BaseDataset(ABC):
 
             self._paths = [entry.path for entry in self._metadata]
             self.build_catalog()  # Construire le catalogue à partir des métadonnées
-            # self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
             self.catalog_type = "from_data"
         
         self.filter_catalog_by_variable(self.keep_variables)  # Filtrer les variables si spécifié
@@ -342,7 +339,6 @@ class BaseDataset(ABC):
         """
         try:
             logger.info(f"Exportation de BaseDataset en JSON dans {path}")
-            # logger.debug(f"Catalogue : {self.catalog}")
             # Sauvegarder le catalogue en JSON
             self.catalog.to_json(str(path))
             # Construire un dictionnaire pour les attributs de BaseDataset
@@ -374,8 +370,7 @@ class RemoteDataset(BaseDataset):
 
 class LocalDataset(BaseDataset):
     """Dataset pour les fichiers locaux (NetCDF ou autres)."""
-    #def __init__(self, config: DatasetConfig):
-    #    super().__init__(config)
+
     def empty_fct(self):
         """
         Fonction vide.
@@ -402,7 +397,6 @@ def get_dataset_from_config(
     file_pattern = source.get('file_pattern', None)
     observation_dataset = source.get('observation_dataset', None)
     full_day_data = source.get('full_day_data', False)
-    # connection_type = source['connection_type']
 
     data_root = os.path.join(
         root_data_folder,
@@ -474,7 +468,6 @@ def get_dataset_from_config(
             # Création du dataset
             dataset = RemoteDataset(argo_config)
         case "s3":
-            # logger.debug(f"Creating S3 dataset with config: {source}")
             if source["connection_type"] == "wasabi":
                 s3_connection_config = WasabiS3ConnectionConfig(
                     dataset_processor=dataset_processor,
