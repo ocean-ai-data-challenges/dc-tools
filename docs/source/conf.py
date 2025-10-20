@@ -24,6 +24,10 @@ autodoc_typehints = 'description'
 # Mock imports of pyinterp and numpy to avoid bugs on RtD.
 # Issues with C libraries like libeigen3 and libboost prevent compiling the docs
 autodoc_mock_imports = [
+    "oceanbench",
+    "netcdf4",
+    "numpy",
+    "torch",
     "fsspec",
     "loguru",
     "dask",
