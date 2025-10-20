@@ -93,13 +93,13 @@ def load_configs(
 def load_args_and_config(
     config_filepath: str, args: Namespace | None = None
 ) -> Optional[Namespace]:
-    """Load config file and parsing comman-line arguments.
+    """Load config file and parse command-line arguments.
 
     Args:
         args (Namespace, optional): Namespace of parsed arguments.
 
     Returns:
-        args(Namespace): a Namespace with variables from config file and command-line 
+        args(Namespace): a Namespace with variables from config file and command-line.
     """
 
     if args is None:
