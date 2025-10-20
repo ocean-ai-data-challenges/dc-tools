@@ -1,8 +1,3 @@
-# Configuration file for the Sphinx documentation builder.
-#
-# For the full list of built-in configuration values, see the documentation:
-# https://www.sphinx-doc.org/en/master/usage/configuration.html
-
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
@@ -43,3 +38,17 @@ myst_links_external_new_tab = True
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
 #html_logo = "_static/Logo_PPR.jpg" # TODO: draw a logo for the DCs
+
+# Mock imports of pyinterp and numpy to avoid bugs on RtD.
+# Issues with C libraries like libeigen3 and libboost prevent compiling the docs
+import sys
+from unittest.mock import MagicMock
+
+class Mock(MagicMock):
+    @classmethod
+    def __getattr__(cls, name):
+        return Mock()
+
+# Mock heavy or compiled dependencies
+MOCK_MODULES = ["pyinterp", "numpy"]
+sys.modules.update((mod_name, Mock()) for mod_name in MOCK_MODULES)
