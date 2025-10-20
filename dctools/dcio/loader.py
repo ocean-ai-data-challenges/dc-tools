@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-"""Classes and functions for loading xarray datasets."""
+"""Classes and functions for loading xarray Datasets."""
 
 import gc
 import os

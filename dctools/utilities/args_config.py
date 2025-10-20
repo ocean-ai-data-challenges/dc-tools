@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
 """Read config files and parse command-line arguments."""
@@ -89,16 +88,20 @@ def load_configs(
 
 
 def load_args_and_config(
-    config_filepath: str, args: Namespace = parse_arguments()
+    config_filepath: str, args: Namespace | None = None
 ) -> Optional[Namespace]:
-    """Load config file and parsing comman-line arguments.
+    """Load config file and parse command-line arguments.
 
     Args:
         args (Namespace, optional): Namespace of parsed arguments.
 
     Returns:
-        args(Namespace): a Namespace with variables from config file and command-line 
+        args(Namespace): a Namespace with variables from config file and command-line.
     """
+
+    if args is None:
+        args = parse_arguments()
+
     try:
         # init logger and exception handler
         device = 'cuda' if torch.cuda.is_available() else 'cpu'

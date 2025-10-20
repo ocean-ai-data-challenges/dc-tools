@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-"""Classes and functions for saving xarray datasets."""
+"""Classes and functions for saving xarray Datasets."""
 from typing import Any, Dict, Optional
 
 from loguru import logger

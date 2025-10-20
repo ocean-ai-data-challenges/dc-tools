@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-"""Tools for handling Copernicus Marine data."""
+"""Tools for handling CMEMS data."""
 
 import os
 import re

@@ -1,1 +1,1 @@
-"""Miscellaneous utilities."""
+"""Various utility functions."""
