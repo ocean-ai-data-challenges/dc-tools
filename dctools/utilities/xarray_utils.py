@@ -412,35 +412,44 @@ def subsample_dataset(
     tolerance: Optional[Dict[str, float]] = None
 ) -> xr.Dataset:
     """
-    Sous-échantillonne un dataset xarray sur une ou plusieurs dimensions.
+    Subsamples an xarray Dataset over one or many dimensions.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset
+    subsample_values : Dict[str, Union[List, np.ndarray, slice]], optional
+        Dictionary specifying the values to keep for each dimension, by default
+        None. The keys of the dictionary are the dimension names, while the
+        values can be a list, array, or slice object. If a dimension name is
+        not among the dimensions all values are kept.
+    method : str, optional
+        Selection method (one of "nearest", "exact", "ffill", "bfill"), by
+        default "nearest"
+    tolerance : Optional[Dict[str, float]], optional
+        Dictionary containing dimension name as keys and selection tolerances
+        as values, by default None.
+
+    Returns
+    -------
+    xr.Dataset
+        Subset dataset.
+
+    Examples
+    --------
+    >>> subsample_values = {
+    ...     'time': pd.date_range('2024-01-01', '2024-01-10', freq='2D'),
+    ...     'depth': [0, 10, 50, 100]
+    ... }
+    ... ds_sub = subsample_dataset(ds, subsample_values)
     
-    Args:
-        ds (xr.Dataset): Dataset xarray d'entrée
-        subsample_values (Dict[str, Union[List, np.ndarray, slice]]): 
-            Dictionnaire spécifiant les valeurs à garder pour chaque dimension.
-            - Clé : nom de la dimension (ex: 'time', 'lat', 'lon', 'depth')
-            - Valeur : liste/array des valeurs à sélectionner, ou slice object
-            Si une dimension n'est pas dans le dictionnaire, toutes ses valeurs sont gardées.
-        method (str): Méthode de sélection ('nearest', 'exact', 'ffill', 'bfill')
-        tolerance (Optional[Dict[str, float]]): Tolérance pour chaque dimension lors de la sélection
-        
-    Returns:
-        xr.Dataset: Dataset sous-échantillonné
-        
-    Examples:
-        # Sous-échantillonner temps et profondeur
-        subsample_values = {
-            'time': pd.date_range('2024-01-01', '2024-01-10', freq='2D'),
-            'depth': [0, 10, 50, 100]
-        }
-        ds_sub = subsample_dataset(ds, subsample_values)
-        
-        # Utiliser des slices pour sous-échantillonner
-        subsample_values = {
-            'lat': slice(-60, 60, 2),  # Latitudes de -60 à 60 avec pas de 2
-            'time': slice('2024-01-01', '2024-01-10')
-        }
-        ds_sub = subsample_dataset(ds, subsample_values)
+    Using slices for subsetting.
+
+    >>> subsample_values = {
+    ...     'lat': slice(-60, 60, 2),  # Latitudes de -60 à 60 avec pas de 2
+    ...     'time': slice('2024-01-01', '2024-01-10')
+    ... }
+    ... ds_sub = subsample_dataset(ds, subsample_values)
     """
     
     if subsample_values is None:
@@ -506,23 +515,29 @@ def subsample_dataset_by_indices(
     subsample_indices: Dict[str, Union[List[int], np.ndarray, slice]] = None
 ) -> xr.Dataset:
     """
-    Sous-échantillonne un dataset xarray en utilisant des indices plutôt que des valeurs.
-    
-    Args:
-        ds (xr.Dataset): Dataset xarray d'entrée
-        subsample_indices (Dict[str, Union[List[int], np.ndarray, slice]]): 
-            Dictionnaire spécifiant les indices à garder pour chaque dimension.
-            
-    Returns:
-        xr.Dataset: Dataset sous-échantillonné
-        
-    Examples:
-        # Garder seulement certains indices temporels et de profondeur
-        subsample_indices = {
-            'time': [0, 2, 4, 6],  # Garder les indices 0, 2, 4, 6
-            'depth': slice(0, 10, 2)  # Garder les indices 0, 2, 4, 6, 8
-        }
-        ds_sub = subsample_dataset_by_indices(ds, subsample_indices)
+    Subsample an xarray Dataset using indices instead of values.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input xarray Dataset.
+    subsample_indices : dict of {str: list of int or np.ndarray or slice}, optional
+        Dictionary specifying which indices to keep for each dimension.
+
+    Returns
+    -------
+    xr.Dataset
+        Subsampled xarray Dataset.
+
+    Examples
+    --------
+    Keep only certain time and depth indices:
+
+    >>> subsample_indices = {
+    ...     'time': [0, 2, 4, 6],      # Keep indices 0, 2, 4, 6
+    ...     'depth': slice(0, 10, 2)   # Keep indices 0, 2, 4, 6, 8
+    ... }
+    >>> ds_sub = subsample_dataset_by_indices(ds, subsample_indices)
     """
     
     if subsample_indices is None:
@@ -562,27 +577,33 @@ def subsample_dataset_uniform(
     subsample_steps: Dict[str, int] = None
 ) -> xr.Dataset:
     """
-    Sous-échantillonne un dataset xarray de manière uniforme avec un pas donné.
-    
-    Args:
-        ds (xr.Dataset): Dataset xarray d'entrée
-        subsample_steps (Dict[str, int]): 
-            Dictionnaire spécifiant le pas pour chaque dimension.
-            Par exemple: {'time': 2, 'depth': 3} prendra 1 valeur sur 2 pour le temps
-            et 1 valeur sur 3 pour la profondeur.
-            
-    Returns:
-        xr.Dataset: Dataset sous-échantillonné
-        
-    Examples:
-        # Prendre 1 valeur sur 2 pour le temps, 1 sur 3 pour la profondeur
-        subsample_steps = {
-            'time': 2,
-            'depth': 3,
-            'lat': 4,
-            'lon': 4
-        }
-        ds_sub = subsample_dataset_uniform(ds, subsample_steps)
+    Uniformly subsample an xarray Dataset using a specified step size for each dimension.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input xarray Dataset.
+    subsample_steps : dict of {str: int}, optional
+        Dictionary specifying the step size for each dimension.
+        For example, {'time': 2, 'depth': 3} will keep every 2nd time value
+        and every 3rd depth value.
+
+    Returns
+    -------
+    xr.Dataset
+        Subsampled xarray Dataset.
+
+    Examples
+    --------
+    Take every 2nd time value, every 3rd depth value, and every 4th latitude and longitude value:
+
+    >>> subsample_steps = {
+    ...     'time': 2,
+    ...     'depth': 3,
+    ...     'lat': 4,
+    ...     'lon': 4
+    ... }
+    >>> ds_sub = subsample_dataset_uniform(ds, subsample_steps)
     """
     
     if subsample_steps is None:
@@ -767,14 +788,8 @@ def preview_display_dataset(ds, variables=None, max_values=500000):
 
 def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
     """
-    Return a dataset that keeps only the variables (data_vars and/or coords)
-    listed in `keep_vars`. Unknown names in keep_vars are ignored (but printed).
-    The returned dataset preserves:
-      - the selected data variables,
-      - any coordinates explicitly requested,
-      - any coordinates required by the kept data variables,
-      - global attributes.
-
+    Filter an xarray Dataset by keeping only some variables/coordinates.
+    
     Parameters
     ----------
     ds : xr.Dataset
@@ -785,6 +800,9 @@ def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
     Returns
     -------
     xr.Dataset
+        The filtered Dataset containing the selected data vars, any explicitly
+        requested coords, and any coords required by the data vars, as well as
+        global attributes.
     """
     # Normalise et retire doublons (on garde l'ordre d'apparition)
     keep_vars = [str(v) for v in keep_vars]

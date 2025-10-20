@@ -33,38 +33,40 @@ def interpolate_scipy(
     zarr_target_chunks: dict = None,
 ) -> xr.Dataset:
     """
-    Applique la fonction callable_fct sur un Dataset en utilisant un maillage cible.
+    Interpolate an xarray Dataset onto a target grid using SciPy interpolation.
+
     Parameters
     ----------
-    ds: xr.Dataset
-        Dataset d'entrée (doit contenir lat/lon)
-    callable_fct: Callable
-        Fonction à appliquer. Doit avoir la signature:
-            fct(data2d, lat_src, lon_src, target_lat, target_lon, **kwargs)
-        où data2d est une tranche 2D (lat, lon) de la variable.
-    target_grid: Dict[str, Sequence]
-        Dictionnaire avec 'lat' et 'lon' comme clés et les valeurs cibles.
-    var_names: Optional[Sequence[str]]
-        Liste des noms de variables à traiter. Si None, toutes les variables avec lat/lon sont utilisées.
-    depth_name, lat_name, lon_name: str
-        Noms des dimensions dans le Dataset.
-    callable_kwargs: Optional[Dict[str, Any]]
-        Arguments supplémentaires à passer à callable_fct.
-    dask_gufunc_kwargs: Optional[Dict[str, Any]]
-        Arguments supplémentaires pour dask.apply_ufunc.
-    tol_depth: float
-        Tolérance pour la sélection de profondeur.
-    output_mode: str
-        Mode de sortie: 'zarr' pour écrire dans un fichier Zarr, 'lazy' pour un Dataset paresseux, 'inmemory' pour un Dataset en mémoire.
-    output_path: str
-        Chemin du fichier de sortie si output_mode est 'zarr'. Si None, un fichier temporaire est créé.
-    zarr_target_chunks: dict
-        Spécification des chunks pour l'écriture Zarr.
+    ds : xr.Dataset
+        Input xarray Dataset (must contain latitude and longitude dimensions).
+    target_grid : dict of {str: Sequence}
+        Dictionary defining the target grid coordinates. Must include keys for latitude and longitude.
+    var_names : sequence of str, optional
+        List of variable names to interpolate. If None, all variables with latitude and longitude dimensions are used.
+    depth_name : str, default="depth"
+        Name of the depth dimension in the Dataset.
+    lat_name : str, default="latitude"
+        Name of the latitude dimension in the Dataset.
+    lon_name : str, default="longitude"
+        Name of the longitude dimension in the Dataset.
+    tol_depth : float, default=1e-3
+        Tolerance for depth selection during interpolation.
+    output_mode : {'zarr', 'lazy', 'inmemory'}, default='zarr'
+        Output mode:
+        - 'zarr': write to a Zarr file,
+        - 'lazy': return a lazily evaluated Dataset,
+        - 'inmemory': return an in-memory Dataset.
+    output_path : str, optional
+        Path to the output file if `output_mode` is 'zarr'. If None, a temporary file is created.
+    zarr_target_chunks : dict, optional
+        Chunking configuration for writing to Zarr.
+
     Returns
     -------
     xr.Dataset
-        Dataset résultant après application de la fonction.
+        Interpolated xarray Dataset on the target grid.
     """
+
     # target grid
     tgt_lat = np.asarray(target_grid["lat"])
     tgt_lon = np.asarray(target_grid["lon"])
@@ -130,42 +132,38 @@ def apply_over_time_depth(
     lon_src: np.ndarray,
     tgt_lat: np.ndarray,
     tgt_lon: np.ndarray,
-    #callable_kwargs: Dict[str, Any],
-    #dask_gufunc_kwargs: Dict[str, Any],
     tol_depth: float = 1e-3,
 ) -> Dict[str, xr.DataArray]:
     """
-    Generic loop over time/depth that applies a callable either on one or two datasets.
+    Apply an operation over time and depth dimensions for selected variables in an xarray Dataset.
+
     Parameters
     ----------
-    ds: xr.Dataset
-        Dataset d'entrée (doit contenir lat/lon)
-    var_names: Sequence[str]
-        Liste des noms de variables à traiter.
-    depth_name, lat_name, lon_name: str
-        Noms des dimensions dans le Dataset.
-    lat_src, lon_src: np.ndarray
-        Coordonnées source (1D arrays).
-    tgt_lat, tgt_lon: np.ndarray
-        Coordonnées cibles (1D arrays).
-    callable_fct: Callable
-        Fonction à appliquer. Doit avoir la signature:
-            fct(data2d, lat_src, lon_src, target_lat, target_lon, **kwargs)
-        où data2d est une tranche 2D (lat, lon) de la variable.
-    callable_kwargs: Dict[str, Any]
-        Arguments supplémentaires à passer à callable_fct.
-    dask_gufunc_kwargs: Dict[str, Any]
-        Arguments supplémentaires pour dask.apply_ufunc.
-    tol_depth: float
-        Tolérance pour la sélection de profondeur.
-    mode: str
-        "single" pour une seule dataset, "double" pour deux datasets (ds2 requis).
-    ds2: Optional[xr.Dataset]
-        Second dataset si mode="double".
+    ds : xr.Dataset
+        Input xarray Dataset (must contain latitude and longitude dimensions).
+    var_names : sequence of str
+        List of variable names to process.
+    depth_name : str
+        Name of the depth dimension in the Dataset.
+    lat_name : str
+        Name of the latitude dimension in the Dataset.
+    lon_name : str
+        Name of the longitude dimension in the Dataset.
+    lat_src : np.ndarray
+        Source latitude coordinates (1D array).
+    lon_src : np.ndarray
+        Source longitude coordinates (1D array).
+    tgt_lat : np.ndarray
+        Target latitude coordinates (1D array).
+    tgt_lon : np.ndarray
+        Target longitude coordinates (1D array).
+    tol_depth : float, default=1e-3
+        Tolerance for depth selection during processing.
+
     Returns
     -------
-    Dict[str, xr.DataArray]
-        Dictionnaire des variables résultantes après application de la fonction.
+    dict of {str: xr.DataArray}
+        Dictionary containing the resulting variables after applying the operation.
     """
     out_vars = {}
 
