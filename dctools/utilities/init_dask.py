@@ -1,3 +1,5 @@
+"""Dask initialization and configuration functions."""
+
 from argparse import Namespace
 import logging
 import multiprocessing

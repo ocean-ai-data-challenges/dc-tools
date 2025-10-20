@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-"""Miscellaneous utils functions."""
+"""Miscellaneous utility functions."""
 
 from argparse import Namespace
 import os

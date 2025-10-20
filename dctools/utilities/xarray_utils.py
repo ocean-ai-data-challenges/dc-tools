@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-"""Misc. functions to aid in the processing xr.Datasets and DataArrays."""
+"""Functions for processing `xr.Datasets` and `DataArrays`."""
 
 import ast
 from typing import Any, Dict, List, Optional, Union
@@ -789,7 +789,7 @@ def preview_display_dataset(ds, variables=None, max_values=500000):
 def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
     """
     Filter an xarray Dataset by keeping only some variables/coordinates.
-    
+
     Parameters
     ----------
     ds : xr.Dataset
