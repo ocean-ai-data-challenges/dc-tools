@@ -1,0 +1,369 @@
+# This file lists variables used in configuring dc2 evaluation 
+################################# WASABI ###############################
+##  WASABI credentials
+define: &WASABI_KEY 
+define: &WASABI_SECRET_KEY 
+############################# GENERAL DC PARAMETERS ###################################
+
+n_days_forecast: 2
+n_days_interval: 7
+
+delta_time: 12   # delta time (hours) when matching observation data
+max_samples: 5
+max_cache_files: 1000  # max files to store (older files are deleted)
+
+
+
+############################# PARALLELIZATION ###################################
+
+batch_size: 64
+n_parallel_workers: 5
+nthreads_per_worker: 4
+memory_limit_per_worker: "6GB"
+############################# DATA FILTERS ###################################
+
+## start time
+start_time: "2024-01-04"
+#start_time: "2023-12-25"
+#start_time: "2022-12-15"
+## end time
+end_time: "2024-01-12"
+#end_time: "2024-03-15"
+#end_time: "2025-01-15"
+
+
+# Target region coordinates
+min_lon: -180
+max_lon: 180
+min_lat: -90
+max_lat: 90
+
+############################# DATASETS ###################################
+
+sources:  # lists all datasets used in the DC
+  - dataset: glorys
+    observation_dataset: false
+    metrics:
+      - "rmsd"
+    config: "cmems"
+    connection_type:
+    cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
+    file_pattern: "**/*.nc"
+    full_day_data: true
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+
+  - dataset: swot
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Nadir_altimetry/Swot"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+      - "time"
+      - "latitude"
+      - "longitude"
+      - "mdt"
+      - "ssha_filtered"
+      #- "ssha_unfiltered"
+      #- "i_num_line"
+      #- "i_num_pixel"
+    eval_variables:
+      - "ssha_filtered"
+
+  - dataset: argo_velocities
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Argo_velocities"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+    - "latitude" 
+    - "longitude"
+    - "depth"
+    - "n_points"
+    - "U"
+    - "V"
+    - "ID"
+    eval_variables:
+      - "U"
+      - "V"
+  
+  - dataset: argo_profiles
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
+    config: "argopy"
+    connection_type: 
+    url: 
+    file_pattern: "**/*.nc"
+    keep_variables:
+      - "LATITUDE"
+      - "LONGITUDE"
+      - "TIME"
+      - "PSAL"
+      #- "PSAL_QC"
+      #- "PRES"
+      #- "PRES_QC"
+      - "TEMP"
+      #- "TEMP_QC"
+      #- "TIME_QC"
+    
+    eval_variables:
+      - "PSAL"  # Utiliser les variables ajustées
+      - "TEMP"
+
+  - dataset: jason3
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    interpolation_method: "pyinterp"
+    time_tolerance: 12   # time tolerance for matching with observations (hours)
+    metrics: 
+      - "rmsd"
+    groups:
+      - "ku"
+      - "data_01"
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Nadir_altimetry/Jason-3"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+      - "time"
+      #- "data_01__time_tai"
+      - "latitude"
+      - "longitude"
+      #- "data_01__depth_or_elevation"
+      - "data_01__ku__ssha"
+      - "data_01__mean_dynamic_topography"
+    eval_variables:
+      - "data_01__ku__ssha"
+
+  - dataset: saral
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # time tolerance for matching with observations (hours)
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Nadir_altimetry/Saral"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+    - "time"
+    - "lat"
+    - "lon"
+    #- "alt"
+    - "mean_topography"
+    #- "wind_speed_alt"
+    - "ssha"
+    #- "bathymetry"
+    eval_variables:
+    - "ssha"
+
+  - dataset: SST_fields
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
+    config: "cmems"
+    connection_type:
+    cmems_product_name: "cmems_obs-sst_glo_phy_l3s_pir_P1D-m"
+    file_pattern: "**/*.nc"
+    keep_variables:
+    #- "crs"
+    - "sea_surface_temperature"
+    #- "or_number_of_pixels"
+    #- "sea_surface_temperature_stddev"
+    - "quality_level"
+    #- "adjusted_sea_surface_temperature"
+    eval_variables:
+    - "sea_surface_temperature"
+    #- "adjusted_sea_surface_temperature"
+
+  - dataset: jason1
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Nadir_altimetry/Jason-1"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+    - "time"
+    - "lat"
+    - "lon" 
+    #- "alt"
+    - "mean_sea_surface"
+    - "mean_topography"
+    #- "bathymetry"
+    #- "wind_speed_alt"
+    - "ssha"
+    eval_variables:
+    - "ssha"
+
+  - dataset: jason2
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/Nadir_altimetry/Jason-2"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+    - "time"
+    - "lat"
+    - "lon" 
+    #- "surface_type"
+    #- "alt"
+    - "mean_sea_surface"
+    - "mean_topography"
+    #- "bathymetry"
+    #- "wind_speed_alt"
+    - "ssha"
+    eval_variables:
+    - "ssha"
+
+  - dataset: SSS_fields
+    observation_dataset: true
+    metrics:
+      - "rmsd"
+    time_tolerance: 12   # tolerance for matching the observations (hours)
+    groups:
+      - "ku"
+      - "data_01"
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC2/SSS_fields"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.nc"
+    keep_variables:
+    - "time"
+    #- "data_01__time_tai"
+    - "lat"
+    - "lon"
+    #- "data_01__altitude"
+    #- "data_01__mean_sea_surface_cnescls"
+    #- "data_01__wind_speed_alt"
+    #- "data_01__ku__ssha"
+    - Sea_Surface_Salinity_Rain_Corrected
+    eval_variables:
+    #- "data_01__ku__ssha"
+    - Sea_Surface_Salinity_Rain_Corrected
+
+  - dataset: glonet
+    observation_dataset: false
+    metrics:
+      - "rmsd"
+    config: "s3"
+    connection_type: "anonymous"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-oceanbench"
+    s3_folder: "public/glonet_full_2024"
+    file_pattern: "**/*.nc"
+    full_day_data: true
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+
+
+  - dataset: glonet_wasabi
+    observation_dataset: false
+    metrics:
+      - "rmsd"
+    config: "s3"
+    connection_type: "wasabi"
+    url: "https://s3.eu-west-2.wasabisys.com"
+    s3_bucket: "ppr-ocean-climat"
+    s3_folder: "DC1/Glonet_forecast"
+    s3_key: *WASABI_KEY
+    s3_secret_key: *WASABI_SECRET_KEY
+    file_pattern: "**/*.zarr"
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+
+
+  #- dataset: amsr2
+    #observation_dataset: true
+    #metrics:
+    #  - "rmsd"
+    #time_tolerance: 12   # tolerance for matching the observations (hours)
+    #config: "s3"
+    #connection_type: "wasabi"
+    #url: "https://s3.eu-west-2.wasabisys.com"
+    #s3_bucket: "ppr-ocean-climat"
+    #s3_folder: "DC3/AMSR2"
+    #s3_key: *WASABI_KEY
+    #s3_secret_key: *WASABI_SECRET_KEY
+    #file_pattern: "**/*.zarr"
+    #keep_variables:
+    #- "time"
+    #- "latitude" 
+    #- "longitude"
+    #- "data_01__ku__ssha"
+    #eval_variables:
+    #- "data_01__ku__ssha"

@@ -19,7 +19,7 @@ COPY ./environment.yml ${HOME_PREFIX}
 # install packages
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
-    build-essential ssh-client sudo git
+    build-essential ssh-client sudo git-all
 
 # user permissions
 RUN echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
@@ -32,7 +32,7 @@ RUN micromamba update -n base micromamba -y
 ENV PATH /opt/micromaba/bin:$PATH
 
 # Create environment
-RUN micromamba env create --file ${HOME_PREFIX}/environment.yml -y --root-prefix=${HOME_PREFIX}
+RUN micromamba env create --file ${HOME_PREFIX}/environment.yml -y --root-prefix=${HOME_PREFIX} #python=3.11.8
 
 
 # Set up environment
@@ -44,6 +44,4 @@ USER ${USER}
 WORKDIR ${HOME_PREFIX}
 
 ENTRYPOINT ["tail", "-f", "/dev/null"]
-
-
 

@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 import numpy as np
 import xarray as xr
 
-from dctools.utilities.xarray_utils import get_grid_coord_names
+from dctools.data.coordinates import CoordinateSystem
 
 
 class NadirDataProcessor:
@@ -20,6 +20,7 @@ class NadirDataProcessor:
         lat_range: Optional[Tuple[float, float]] = None,
         lon_range: Optional[Tuple[float, float]] = None,
         time_range: Optional[Tuple[np.datetime64, np.datetime64]] = None,
+        coord_name_dict: Optional[dict[str, str]] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.
@@ -40,7 +41,9 @@ class NadirDataProcessor:
         result = data
         # Use .sel only for time subsetting since nadir altimetry data is
         # indexed only by time
-        coord_name_dict = get_grid_coord_names(data)
+        if not coord_name_dict:
+            coord_sys = CoordinateSystem.get_coordinate_system(data)
+            coord_name_dict = coord_sys.coordinates
         if time_range is not None:
             result = result.sel(
                 {coord_name_dict["time"]: slice(time_range[0], time_range[1])}
