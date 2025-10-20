@@ -23,7 +23,24 @@ exclude_patterns = []
 autodoc_typehints = 'description'
 # Mock imports of pyinterp and numpy to avoid bugs on RtD.
 # Issues with C libraries like libeigen3 and libboost prevent compiling the docs
-autodoc_mock_imports = ["numpy", "pyinterp"]
+autodoc_mock_imports = [
+    "fsspec",
+    "loguru",
+    "dask",
+    "memory_profiler",
+    "xarray",
+    "psutil",
+    "cftime",
+    # "argo_data",
+    # "cmems_data",
+    # "interpolation",
+    # "nadir_data",
+    # "args_config",
+    # "file_utils",
+    # "init_dask",
+    # "misc_utils",
+    # "xarray_utils"
+]
 
 # Stolen from weatherbench2:
 # https://stackoverflow.com/a/66295922/809705
