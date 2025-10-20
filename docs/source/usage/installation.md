@@ -13,9 +13,8 @@ git clone git@github.com:ppr-ocean-ia/dc-tools.git
 Then, inside the newly-created `dc-tools` directory:
 
 ```bash
-conda create -n dctools
+conda create -n dctools python=3.13 esmpy poetry
 conda activate dctools
-conda install xesmf -c confa-forge
 poetry install --with dev
 ```
 
