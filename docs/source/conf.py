@@ -1,17 +1,3 @@
-# Mock imports of pyinterp and numpy to avoid bugs on RtD.
-# Issues with C libraries like libeigen3 and libboost prevent compiling the docs
-import sys
-from unittest.mock import MagicMock
-
-class Mock(MagicMock):
-    @classmethod
-    def __getattr__(cls, name):
-        return Mock()
-
-# Mock heavy or compiled dependencies
-MOCK_MODULES = ["pyinterp", "numpy", "oceanbench", "xesmf", "esmpy"]
-sys.modules.update((mod_name, Mock()) for mod_name in MOCK_MODULES)
-
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
@@ -35,6 +21,9 @@ exclude_patterns = []
 
 # Autodocs/Autosummary config
 autodoc_typehints = 'description'
+# Mock imports of pyinterp and numpy to avoid bugs on RtD.
+# Issues with C libraries like libeigen3 and libboost prevent compiling the docs
+autodoc_mock_imports = ["numpy", "pyinterp"]
 
 # Stolen from weatherbench2:
 # https://stackoverflow.com/a/66295922/809705
