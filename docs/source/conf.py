@@ -25,25 +25,11 @@ autodoc_typehints = 'description'
 # Issues with C libraries like libeigen3 and libboost prevent compiling the docs
 autodoc_mock_imports = [
     "oceanbench",
-    "netcdf4",
+    "pyinterp",
     "numpy",
-    "torch",
-    "fsspec",
-    "loguru",
-    "dask",
-    "memory_profiler",
     "xarray",
-    "psutil",
-    "cftime",
-    # "argo_data",
-    # "cmems_data",
-    # "interpolation",
-    # "nadir_data",
-    # "args_config",
-    # "file_utils",
-    # "init_dask",
-    # "misc_utils",
-    # "xarray_utils"
+    "xesmf",
+    "xrpatcher"
 ]
 
 # Stolen from weatherbench2:
