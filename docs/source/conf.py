@@ -50,5 +50,5 @@ class Mock(MagicMock):
         return Mock()
 
 # Mock heavy or compiled dependencies
-MOCK_MODULES = ["pyinterp", "numpy"]
+MOCK_MODULES = ["pyinterp", "numpy", "oceanbench", "xesmf", "esmpy"]
 sys.modules.update((mod_name, Mock()) for mod_name in MOCK_MODULES)
