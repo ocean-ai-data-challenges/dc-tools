@@ -41,8 +41,6 @@ from dctools.utilities.misc_utils import (
     ensure_timestamp,
     deep_copy_object,
 )
-# from dctools.dcio.saver import DataSaver
-# from dctools.utilities.init_dask import setup_dask
 
 
 def get_time_bound_values(ds: xr.Dataset) -> tuple:
@@ -159,10 +157,6 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
 def clean_for_serialization(obj):
     """Nettoie les objets non-sérialisables avant pickle."""
     # Fermer/nettoyer les objets argopy
-    #if hasattr(obj, '_argo_index'):
-    #    obj._argo_index = None
-    #if hasattr(obj, '_argopy_fetcher'):
-    #    obj._argopy_fetcher = None
     if isinstance(obj, SimpleNamespace):
         # Nettoyer fsspec
         if hasattr(obj, 'fs') and hasattr(obj.fs, '_session'):
@@ -175,10 +169,6 @@ def clean_for_serialization(obj):
 
         # Nettoyer dataset_processor
         if hasattr(obj, 'dataset_processor'):
-            #try:
-            #    obj.params.dataset_processor.close()
-            #except:
-            #    pass
             obj.dataset_processor = None
     else:
         # Nettoyer fsspec
@@ -192,10 +182,6 @@ def clean_for_serialization(obj):
 
         # Nettoyer dataset_processor
         if hasattr(obj.params, 'dataset_processor'):
-            #try:
-            #    obj.params.dataset_processor.close()
-            #except:
-            #    pass
             obj.params.dataset_processor = None
     return obj
 
@@ -765,7 +751,6 @@ class CMEMSManager(BaseConnectionManager):
                 maximum_longitude=1.0,
                 minimum_latitude=0.0,
                 maximum_latitude=1.0,
-                #variables=["zos"],
                 credentials_file=self.params.cmems_credentials_path,
             )
             
@@ -831,12 +816,6 @@ class CMEMSManager(BaseConnectionManager):
                 start_datetime=start_datetime,
                 end_datetime=end_datetime,
                 vertical_axis='depth',
-                #minimum_longitude=self.params.filter_values.get("min_lon"),
-                #maximum_longitude=self.params.filter_values.get("max_lon"),
-                #minimum_latitude=self.params.filter_values.get("min_lat"),
-                #maximum_latitude=self.params.filter_values.get("max_lat"),
-                # variables=[],
-                #file_format='zarr',
                 credentials_file=self.params.cmems_credentials_path,
             ) 
 
@@ -914,7 +893,6 @@ class FTPManager(BaseConnectionManager):
 
             # Lister les fichiers correspondant au motif
             files = sorted(fs.glob(remote_path))
-            # logger.info(f"Files found in {remote_path} : {files}")
 
             if not files:
                 logger.warning(f"Aucun fichier trouvé sur le serveur FTP avec le motif : {self.params.file_pattern}")
@@ -986,7 +964,6 @@ class S3Manager(BaseConnectionManager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            # logger.debug(f"Open S3 file: {path}")
             extension = Path(path).suffix
             if extension != '.zarr':
                 return None
@@ -1063,8 +1040,6 @@ class GlonetManager(BaseConnectionManager):
                 date_str = date.strftime("%Y%m%d")
                 list_f.append(
                     f"{self.params.endpoint_url}/{self.params.glonet_s3_bucket}/{self.params.s3_glonet_folder}/{date_str}.zarr"
-                    #f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
-                    #f"s3://project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
                 )
                 date = date + datetime.timedelta(days=7)
             else:
@@ -1094,8 +1069,6 @@ class GlonetManager(BaseConnectionManager):
         """
         try:
             glonet_ds = xr.open_zarr(path)
-            # glonet_ds = FileLoader.open_dataset_auto(path, self)
-            # logger.debug(f"Opened Glonet file: {path}")
             return glonet_ds
 
         except Exception as exc:
@@ -1454,18 +1427,18 @@ class ArgoManager(BaseConnectionManager):
             try:
                 profile_ds = profile.load().data
             except Exception as e:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} failed to load: {e}")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} failed to load: {e}")
                 return None
 
             # Vérifier si dataset est valide
             if profile_ds is None:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} returned None")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} returned None")
                 return None
             if not profile_ds.dims:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} has no dimensions")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} has no dimensions")
                 return None
             if "N_POINTS" not in profile_ds.sizes or profile_ds.sizes["N_POINTS"] == 0:
-                # logger.warning(f"Profile WMO={wmo}, cycle={cycle} has zero points")
+                logger.warning(f"Profile WMO={wmo}, cycle={cycle} has zero points")
                 return None
 
             # Vérifier si toutes les variables sont vides
@@ -1483,7 +1456,7 @@ class ArgoManager(BaseConnectionManager):
             # chunking
             profile_ds = profile_ds.chunk({"N_POINTS": 10})
 
-            # logger.debug(f"Opened ARGO profile WMO={wmo}, cycle={cycle} with {profile_ds.dims['N_POINTS']} points")
+            logger.debug(f"Opened ARGO profile WMO={wmo}, cycle={cycle} with {profile_ds.dims['N_POINTS']} points")
             return profile_ds
 
         except Exception as e:

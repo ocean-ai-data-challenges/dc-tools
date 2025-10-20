@@ -36,27 +36,6 @@ def create_glorys_ndays_forecast(
         `glorys_data` (xr.Dataset): Glorys forecast dataset
     """
 
-    """dim_lat = len(TARGET_DIM_RANGES['lat'])
-    dim_lon = len(TARGET_DIM_RANGES['lon'])
-    dim_depth = len(TARGET_DIM_RANGES['depth'])
-    dim_time = len(TARGET_DIM_RANGES['time'])
-    times = [dat.strftime('%Y-%m-%d') for dat in pd.date_range(start=start_date,freq='1D',periods=dim_time)]
-    glorys_data = xr.Dataset(
-        data_vars=dict(
-            thetao=(["time", "depth", "lat", "lon"], np.random.randn(dim_time, dim_depth, dim_lat, dim_lon)),
-            zos=(["time", "lat", "lon"], np.random.randn(dim_time, dim_lat, dim_lon)),
-            uo=(["time", "depth", "lat", "lon"], np.random.randn(dim_time, dim_depth, dim_lat, dim_lon)),
-            vo=(["time", "depth", "lat", "lon"], np.random.randn(dim_time, dim_depth, dim_lat, dim_lon)),
-            so=(["time", "depth", "lat", "lon"], np.random.randn(dim_time, dim_depth, dim_lat, dim_lon)),
-
-        ),
-        coords=dict(
-            lon=("lon", TARGET_DIM_RANGES['lon']),
-            lat=("lat", TARGET_DIM_RANGES['lat']),
-            depth=("depth", TARGET_DIM_RANGES['depth']),
-            time=times, #TARGET_DIM_RANGES['time'], "attrs", get_glonet_time_attrs(start_date)),
-        ),
-    )"""
     logger.info(f"Concatenate {len(list_nc_files)} Glorys forecast files.")
     time_step = 0
     try:
@@ -83,7 +62,6 @@ def create_glorys_ndays_forecast(
                     file_format="zarr", mode="a", append_dim='time',
                     compute=True,
                 )
-            #tmp_ds.close()
             time_step += 1
 
         glorys_data = FileLoader.lazy_load_dataset(zarr_path)

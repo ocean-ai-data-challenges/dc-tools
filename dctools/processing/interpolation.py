@@ -15,7 +15,6 @@ from scipy.interpolate import RegularGridInterpolator
 from dctools.data.coordinates import (
     GEO_STD_COORDS
 )
-# from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.xarray_utils import rename_coords_and_vars, create_empty_dataset
 
 
@@ -82,7 +81,6 @@ def interpolate_scipy(
     out_vars = apply_over_time_depth(
         ds, var_names, depth_name, lat_name, lon_name,
         lat_src, lon_src, tgt_lat, tgt_lon,
-        #safe_kwargs, dask_gufunc_kwargs,
         tol_depth=tol_depth,
     )
 
@@ -269,16 +267,7 @@ def interpolate_dataset(
         if dim not in out_dict.keys():
             out_dict[dim] = ds.coords.get(dim, ds.sizes.get(dim))
     
-    # Filtrer seulement les dimensions qui existent dans le dataset
-    # ranges = {k: v for k, v in target_grid.items() if k in ds.sizes}
-
-    # Choisir la méthode d'interpolation
-    '''if interpolation_lib == 'scipy':
-        method = kwargs.get('method', 'linear')
-        ds_out = interpolate_scipy_optimized(ds, target_grid, method)'''
-    
     if interpolation_lib == 'pyinterp':
-        # ds_out = interpolate_dataset_time_depth_vars(ds, target_grid)
 
         ds_renamed, coord_mapping = rename_to_standard_pyinterp(ds, 'lat', 'lon')
         if dataset_processor is not None:
@@ -294,28 +283,6 @@ def interpolate_dataset(
                 output_mode="zarr",
             )
         ds_interp = rename_back(ds, ds_renamed, coord_mapping)
-    #elif interpolation_lib == "xesmf":
-    #    if weights_filepath and Path(weights_filepath).is_file():
-    #        # Use precomputed weights
-    #        logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
-    #        #regridder = xe.Regridder(
-    #        #    ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
-    #        #)
-    #        ds_interp = interpolate_xesmf(
-    #            ds,
-    #            target_grid=out_dict,
-    #            reuse_weights=True,
-    #            weights_file=weights_filepath,
-    #            method="bilinear",
-    #        )
-    #    else:
-    #        ds_interp = interpolate_xesmf(
-    #            ds,
-    #            target_grid=out_dict,
-    #            reuse_weights=False,
-    #            weights_file=weights_filepath,
-    #            method="bilinear",
-    #        )
     else:
         raise ValueError(f"Unknown interpolation library: {interpolation_lib}")
         
@@ -460,7 +427,7 @@ def interpolate_xesmf(  # TODO : check and uncomment
             out_dict[dim] = ds.coords[dim].values
     ds_out = create_empty_dataset(out_dict)
 
-    # TODO : adapt chunking depending on the dataset type
+    # TODO: adapt chunking depending on the dataset type
     ds_out = ds_out.chunk(chunks={"lat": -1, "lon": -1, "time": 1})
 
     if weights_filepath and Path(weights_filepath).is_file():

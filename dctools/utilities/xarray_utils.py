@@ -152,9 +152,6 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
     if coords_to_set:
         subset = subset.set_coords(coords_to_set)
 
-    # Supprime les coordonnées orphelines (non utilisées)
-    # subset = subset.reset_coords(drop=True)
-
     for variable_name in subset.variables:
         var_std_name = subset[variable_name].attrs.get("standard_name",'').lower()
         if not var_std_name:
@@ -553,7 +550,6 @@ def subsample_dataset_by_indices(
             continue
         
         try:
-            # logger.debug(f"Subsampling dimension '{dim_name}' with indices: {indices}")
             ds_result = ds_result.isel({dim_name: indices})
             
         except Exception as e:

@@ -79,9 +79,6 @@ def load_configs(
     try:
         with open(config_filepath, 'r') as fp:
             config = yaml.safe_load(fp)
-            # for time_var in TIME_VARIABLES:
-            #    if time_var in config.keys():
-            #        config[time_var] = config[time_var]
     except Exception as err:
         logger.error(
             f"Error while loading config from {config_filepath}: {repr(err)}"

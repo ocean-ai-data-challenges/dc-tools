@@ -5,7 +5,6 @@ import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 import ast
-# import kornia
 from loguru import logger
 from memory_profiler import profile
 import numpy as np
@@ -18,7 +17,6 @@ from pyproj import Transformer
 from dctools.data.coordinates import (
     LIST_VARS_GLONET,
 )
-# from dctools.processing.distributed import ParallelExecutor
 from dctools.utilities.xarray_utils import (
     rename_coordinates,
     rename_coords_and_vars,
@@ -378,7 +376,6 @@ class CustomTransforms:
             case _:
                 return dataset
 
-    #@profile
     def transform_rename_subset_vars(
         self,
         dataset: xr.Dataset,
@@ -395,7 +392,6 @@ class CustomTransforms:
         transf_dataset = transform(dataset)
         return transf_dataset
 
-    #@profile
     def transform_standardize_dataset(
         self,
         dataset: xr.Dataset,
@@ -423,11 +419,9 @@ class CustomTransforms:
         ])
 
         transf_dataset = transform(dataset)
-        # new_vars = list(transf_dataset.data_vars)
 
         return transf_dataset
 
-    #@profile
     def transform_interpolate(
         self, dataset: xr.Dataset,
     ) -> xr.Dataset:
@@ -441,7 +435,6 @@ class CustomTransforms:
         interp_dataset = transform(dataset)
         return interp_dataset
 
-    #@profile
     def transform_glorys_to_glonet(
         self, dataset: xr.Dataset
     ) -> xr.Dataset:
@@ -459,7 +452,6 @@ class CustomTransforms:
         transf_dataset = transform(dataset)
         return transf_dataset
 
-    #@profile
     def transform_subset_dataset(
         self, dataset: xr.Dataset,
     ) -> xr.Dataset:
@@ -472,7 +464,6 @@ class CustomTransforms:
         transf_dataset = transform(dataset)
         return transf_dataset
     
-    #@profile
     def to_timestamp(
         self,
         ds: xr.Dataset,

@@ -6337,7 +6337,7 @@ torch = ["torch"]
 
 [[package]]
 name = "xesmf"
-version = "0.8.11.dev3+gf2eeeb207"
+version = "0.8.11.dev7+g336424a17"
 description = "Universal Regridder for Geospatial Data"
 optional = false
 python-versions = ">=3.8"
