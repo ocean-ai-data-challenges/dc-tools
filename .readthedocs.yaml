@@ -8,8 +8,8 @@ version: 2
 # Set the OS, Python version and other tools you might need
 build:
   os: ubuntu-22.04
-  apt_packages:
-    - libeigen3-dev # Needed for pyinterp
+  # apt_packages:
+  #   - libeigen3-dev # Needed for pyinterp
   tools:
     python: "miniconda3-3.12-24.9"
 
@@ -24,7 +24,8 @@ build:
       - BOOST_CFG=$(head -n1 /tmp/boost-config-paths || true)
         # pick the first match (empty if none)
 
-      - if [ -n "$BOOST_CFG" ]; then \
+      - |
+        if [ -n "$BOOST_CFG" ]; then \
           BOOST_DIR=$(dirname "$BOOST_CFG"); \
           echo "Found BoostConfig at $BOOST_CFG -> setting Boost_DIR=$BOOST_DIR"; \
           export Boost_DIR="$BOOST_DIR"; \
