@@ -12,28 +12,23 @@ build:
     - libboost-all-dev # Needed for pyinterp
     - libeigen3-dev # Needed for pyinterp
   tools:
-    python: "miniconda3-4.7"
+    python: "miniconda3-3.12-24.9"
+
+conda:
+  environment: docs/doc_env.yml
 
 # The following comes from here:
   # https://docs.readthedocs.com/platform/stable/build-customization.html#install-dependencies-with-poetry
-  # jobs:
-  #   post_install:
-  #     # Install poetry
-  #     # https://python-poetry.org/docs/#installing-manually
-  #     - pip install poetry
-  #     # Install dependencies with 'docs' dependency group
-  #     # https://python-poetry.org/docs/managing-dependencies/#dependency-groups
-  #     # VIRTUAL_ENV needs to be set manually for now.
-  #     # See https://github.com/readthedocs/readthedocs.org/pull/11152/
-  #     - VIRTUAL_ENV=$READTHEDOCS_VIRTUALENV_PATH poetry install --with docs
-
-  commands:
-    - conda create -n dctools python=3.13 esmpy poetry -y -c conda-forge
-    - conda activate dctools
-    - poetry install --with docs -y
-    - cd docs; make html; cd ..
-    - cp -r docs/build/html/* $READTHEDOCS_OUTPUT/html/
-    # - pelican --settings docs/pelicanconf.py --output $READTHEDOCS_OUTPUT/html/ docs/
+  jobs:
+    post_install:
+      # Install poetry
+      # https://python-poetry.org/docs/#installing-manually
+      # - pip install poetry
+      # Install dependencies with 'docs' dependency group
+      # https://python-poetry.org/docs/managing-dependencies/#dependency-groups
+      # VIRTUAL_ENV needs to be set manually for now.
+      # See https://github.com/readthedocs/readthedocs.org/pull/11152/
+      - VIRTUAL_ENV=$READTHEDOCS_VIRTUALENV_PATH poetry install --with docs
 
 # Build documentation in the "docs/" directory with Sphinx
 sphinx:

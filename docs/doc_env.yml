@@ -1,0 +1,8 @@
+name: dctools-docs
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - poetry
+  - esmpy
+prefix: /home/g22cossi/.miniforge3/envs/dctools-docs
