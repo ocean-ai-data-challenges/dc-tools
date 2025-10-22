@@ -14,9 +14,6 @@ build:
   tools:
     python: "miniconda3-3.12-24.9"
 
-conda:
-  environment: docs/doc_env.yml
-
 # The following comes from here:
   # https://docs.readthedocs.com/platform/stable/build-customization.html#install-dependencies-with-poetry
   jobs:
@@ -35,3 +32,6 @@ sphinx:
   configuration: docs/source/conf.py
   # Fail on all warnings to avoid broken references
   fail_on_warning: true
+
+conda:
+  environment: docs/doc_env.yml
