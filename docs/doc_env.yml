@@ -6,4 +6,5 @@ dependencies:
   - poetry
   - esmpy
   - libboost>=1.79
+  - cmake
 prefix: /home/g22cossi/.miniforge3/envs/dctools-docs
