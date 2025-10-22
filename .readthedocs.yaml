@@ -12,7 +12,7 @@ build:
     - libboost-all-dev # Needed for pyinterp
     - libeigen3-dev # Needed for pyinterp
   tools:
-    python: "3.13"
+    python: "miniconda3-4.7"
 
 # The following comes from here:
   # https://docs.readthedocs.com/platform/stable/build-customization.html#install-dependencies-with-poetry
