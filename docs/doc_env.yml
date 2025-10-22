@@ -5,5 +5,5 @@ dependencies:
   - python=3.13
   - poetry
   - esmpy
-  - libboost=1.79
+  - libboost>=1.79
 prefix: /home/g22cossi/.miniforge3/envs/dctools-docs
