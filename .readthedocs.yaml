@@ -22,7 +22,7 @@ build:
       - export BOOST_ROOT=$CONDA_PREFIX
       - export BOOST_INCLUDEDIR=$CONDA_PREFIX/include
       - export BOOST_LIBRARYDIR=$CONDA_PREFIX/lib
-      - cmake -DBoost_NO_SYSTEM_PATHS=ON -DBOOST_ROOT=$CONDA_PREFIX .
+
 
       # Install poetry
       # https://python-poetry.org/docs/#installing-manually
