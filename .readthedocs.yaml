@@ -21,12 +21,14 @@ build:
       - export BOOST_ROOT=$CONDA_PREFIX
       - export BOOST_INCLUDEDIR=$CONDA_PREFIX/include
       - export BOOST_LIBRARYDIR=$CONDA_PREFIX/lib
-      - cmake -DBOOST_ROOT=$CONDA_PREFIX \
+      - |
+        cmake -DBOOST_ROOT=$CONDA_PREFIX \
               -DBoost_NO_SYSTEM_PATHS=ON \
               -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
               -DCMAKE_LIBRARY_PATH=$CONDA_PREFIX/lib \
               -DCMAKE_INCLUDE_PATH=$CONDA_PREFIX/include \
               .
+
       
       # ChatGPT's second solution
       # - export BOOST_ROOT=$CONDA_PREFIX
