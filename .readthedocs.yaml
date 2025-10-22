@@ -28,7 +28,7 @@ build:
   #     - VIRTUAL_ENV=$READTHEDOCS_VIRTUALENV_PATH poetry install --with docs
 
   commands:
-    - conda create -n dctools python=3.13 esmpy poetry -y
+    - conda create -n dctools python=3.13 esmpy poetry -y -c conda-forge
     - conda activate dctools
     - poetry install --with docs -y
     - cd docs; make html; cd ..
