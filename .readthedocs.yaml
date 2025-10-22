@@ -17,7 +17,7 @@ build:
   # https://docs.readthedocs.com/platform/stable/build-customization.html#install-dependencies-with-poetry
   jobs:
     post_install:
-      - export CONDA_PREFIX="$HOME/.conda/envs/docs"
+      - CONDA_PREFIX="$HOME/.conda/envs/docs"
       - echo "searching for BoostConfig.cmake..."
       - find $CONDA_PREFIX -type f -name 'BoostConfig.cmake' -print | tee /tmp/boost-config-paths || true
         # find any BoostConfig.cmake under the conda prefix (lists zero or more paths)
