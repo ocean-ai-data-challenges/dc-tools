@@ -8,6 +8,9 @@ version: 2
 # Set the OS, Python version and other tools you might need
 build:
   os: ubuntu-22.04
+  apt_packages:
+    - libboost-all-dev # Needed for pyinterp
+    - libeigen3-dev # Needed for pyinterp
   tools:
     python: "3.13"
 
