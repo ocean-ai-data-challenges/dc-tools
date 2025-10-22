@@ -9,7 +9,7 @@ version: 2
 build:
   os: ubuntu-22.04
   apt_packages:
-    - libboost-all-dev # Needed for pyinterp
+    - libboost1.83-dev # Needed for pyinterp
     - libeigen3-dev # Needed for pyinterp
   tools:
     python: "miniconda3-3.12-24.9"
