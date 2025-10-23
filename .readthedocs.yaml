@@ -37,6 +37,7 @@ build:
         fi
 
         hash -r
+        poetry config virtualenvs.create false
         poetry install --with docs --without custom
       
 
