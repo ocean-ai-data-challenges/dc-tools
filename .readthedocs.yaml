@@ -8,8 +8,8 @@ version: 2
 # Set the OS, Python version and other tools you might need
 build:
   os: ubuntu-22.04
-  # apt_packages:
-  #   - libeigen3-dev # Needed for pyinterp
+  apt_packages:
+    - libeigen3-dev # Needed for pyinterp
   tools:
     python: "miniconda3-3.12-24.9"
 
