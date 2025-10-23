@@ -37,7 +37,7 @@ build:
         fi
 
         hash -r
-        poetry install --with docs
+        poetry install --with docs --without custom
       
 
       # Install dependencies with 'docs' dependency group

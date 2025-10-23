@@ -21,13 +21,10 @@ exclude_patterns = []
 
 # Autodocs/Autosummary config
 autodoc_typehints = 'description'
-# Mock imports of pyinterp and numpy to avoid bugs on RtD.
-# Issues with C libraries like libeigen3 and libboost prevent compiling the docs
+# Mock oceanbench and xrpatcher to prevent errors in readthedocs
 autodoc_mock_imports = [
-    # "oceanbench",
-    # "pyinterp",
-    # "xesmf",
-    # "xrpatcher"
+    "oceanbench",
+    "xrpatcher",
 ]
 
 # Stolen from weatherbench2:
