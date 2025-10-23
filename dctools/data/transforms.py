@@ -33,8 +33,13 @@ def detect_and_normalize_longitude_system(
     lon_name: str = "lon"
 ) -> xr.Dataset:
     """
-    Détecte et normalise les systèmes de coordonnées longitude pour assurer la compatibilité.
+    Detect the longitude coordinate system and normalize it in the -180° to 180° range.
     """
+    
+    # Do nothing if ds is gridded in x/y and not lat/lon
+    if "x" in ds.dims and "y" in ds.dims:
+        return ds
+
     # Vérifier que la coordonnée longitude existe
     if lon_name not in ds.dims and lon_name not in ds.coords and lon_name not in ds.data_vars:
         logger.warning(f"Longitude coordinate '{lon_name}' not found in dataset")
