@@ -7,7 +7,7 @@
 First, clone the repository:
 
 ```bash
-git clone git@github.com:ppr-ocean-ia/dc-tools.git
+git clone git@github.com:ocean-ai-data-challenges/dc-tools.git
 ```
 
 Then, inside the newly-created `dc-tools` directory:

@@ -8,9 +8,43 @@ version: 2
 # Set the OS, Python version and other tools you might need
 build:
   os: ubuntu-22.04
+  apt_packages:
+    - libeigen3-dev # Needed for pyinterp
   tools:
-    python: "3.13"
+    python: "miniconda3-3.12-24.9"
 
+# The following comes from here:
+  # https://docs.readthedocs.com/platform/stable/build-customization.html#install-dependencies-with-poetry
+  jobs:
+    post_install:
+      # Fix Boost problems when building pyinterp
+      - |
+        export CONDA_PREFIX="$HOME/.conda/envs/docs"
+        echo "searching for BoostConfig.cmake..."
+        find "$CONDA_PREFIX" -type f -name 'BoostConfig.cmake' -print | tee /tmp/boost-config-paths || true
+
+        BOOST_CFG=$(head -n1 /tmp/boost-config-paths || true)
+        if [ -n "$BOOST_CFG" ]; then
+          BOOST_DIR=$(dirname "$BOOST_CFG")
+          echo "Found BoostConfig at $BOOST_CFG -> setting Boost_DIR=$BOOST_DIR"
+          export Boost_DIR="$BOOST_DIR"
+        else
+          echo "No BoostConfig found; setting CMAKE_PREFIX_PATH to $CONDA_PREFIX and using FindBoost hints"
+          export CMAKE_PREFIX_PATH="$CONDA_PREFIX${CMAKE_PREFIX_PATH:+:}$CMAKE_PREFIX_PATH"
+          export BOOST_ROOT="$CONDA_PREFIX"
+          export BOOST_INCLUDEDIR="$CONDA_PREFIX/include"
+          export BOOST_LIBRARYDIR="$CONDA_PREFIX/lib"
+        fi
+
+        hash -r
+        poetry config virtualenvs.create false
+        poetry install --with docs --without custom
+      
+
+      # Install dependencies with 'docs' dependency group
+      # VIRTUAL_ENV needs to be set manually for now.
+      # See https://github.com/readthedocs/readthedocs.org/pull/11152/
+      # - VIRTUAL_ENV=$READTHEDOCS_VIRTUALENV_PATH poetry install --with docs
 
 # Build documentation in the "docs/" directory with Sphinx
 sphinx:
@@ -18,15 +52,5 @@ sphinx:
   # Fail on all warnings to avoid broken references
   fail_on_warning: true
 
-
-# Optional but recommended, declare the Python requirements required
-# to build your documentation
-# See https://docs.readthedocs.io/en/stable/guides/reproducible-builds.html
-
-# python:
-#   install:
-#     - requirements: docs/requirements.txt
-
-# TODO: Check out how to build automatic API docs with sphinx.ext.autosummary
-# and sphinx.ext.autodoc
-# See https://docs.readthedocs.com/platform/stable/tutorial/#installing-python-dependencies
+conda:
+  environment: docs/doc_env.yml

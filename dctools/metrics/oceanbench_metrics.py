@@ -39,7 +39,7 @@ OCEANBENCH_VARIABLES = {
 }
 
 
-def get_variable_alias(variable: str) -> Variable | None:
+def get_variable_alias(variable: str) -> "Variable | None":
     """Get the alias for a given variable.
 
     Args:

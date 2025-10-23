@@ -1,8 +1,3 @@
-# Configuration file for the Sphinx documentation builder.
-#
-# For the full list of built-in configuration values, see the documentation:
-# https://www.sphinx-doc.org/en/master/usage/configuration.html
-
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
@@ -26,6 +21,12 @@ exclude_patterns = []
 
 # Autodocs/Autosummary config
 autodoc_typehints = 'description'
+# Mock oceanbench and xrpatcher to prevent errors in readthedocs
+autodoc_mock_imports = [
+    "oceanbench",
+    "xesmf",
+    "xrpatcher",
+]
 
 # Stolen from weatherbench2:
 # https://stackoverflow.com/a/66295922/809705
