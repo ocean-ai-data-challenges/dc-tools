@@ -24,6 +24,7 @@ autodoc_typehints = 'description'
 # Mock oceanbench and xrpatcher to prevent errors in readthedocs
 autodoc_mock_imports = [
     "oceanbench",
+    "xesmf",
     "xrpatcher",
 ]
 
