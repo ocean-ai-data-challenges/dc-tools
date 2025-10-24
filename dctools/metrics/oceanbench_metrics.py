@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
 """Wrapper for functions implemented in Mercator's oceanbench library."""

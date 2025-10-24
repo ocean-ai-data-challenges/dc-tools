@@ -1,8 +1,9 @@
+"""Connection configuration classes."""
 
 from abc import ABC
 import os
 from types import SimpleNamespace
-from typing import Optional, Tuple
+from typing import Optional
 
 import fsspec
 from loguru import logger
@@ -40,6 +41,7 @@ class LocalConnectionConfig(BaseConnectionConfig):
         full_day_data:  Optional[bool] = False,
     ):
         """Init.
+        
         Args:
             root (str): path to local directory
         """
@@ -81,7 +83,6 @@ class CMEMSConnectionConfig(BaseConnectionConfig):
         Args:
             cmems_credentials(Optional[str]): path to CMEMS credentials file
         """
-
         self.cache_dir = "/tmp/s3_cache"
         os.makedirs(self.cache_dir, exist_ok=True)
         fs = fsspec.filesystem(
@@ -176,7 +177,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
                 "s3", key=key, secret=secret_key, client_kwargs=client_kwargs
             )
         super().__init__(
-            protocol, 
+            protocol,
             init_type=init_type,
             local_root=local_root,
             bucket=bucket,
@@ -255,7 +256,7 @@ class GlonetConnectionConfig(BaseConnectionConfig):
         )
 
         super().__init__(
-            "glonet", 
+            "glonet",
             init_type=init_type,
             local_root=local_root,
             fs=fs,

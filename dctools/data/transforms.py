@@ -1,12 +1,9 @@
 
-from copy import deepcopy
-import profile
-import traceback
-from typing import Any, Dict, List, Optional, Tuple
+
+from typing import Any, Dict, List, Optional
 
 import ast
 from loguru import logger
-from memory_profiler import profile
 import numpy as np
 from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
@@ -14,11 +11,7 @@ from torchvision import transforms
 import xarray as xr
 from pyproj import Transformer
 
-from dctools.data.coordinates import (
-    LIST_VARS_GLONET,
-)
 from dctools.utilities.xarray_utils import (
-    rename_coordinates,
     rename_coords_and_vars,
     subset_variables,
     assign_coordinate,

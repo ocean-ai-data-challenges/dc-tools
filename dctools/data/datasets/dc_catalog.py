@@ -5,7 +5,7 @@ from datetime import datetime
 import traceback
 from typing import (
     Any, Callable, Dict, List,
-    Optional, Tuple, Union,
+    Optional, Union,
 )
 
 import geopandas as gpd
@@ -21,6 +21,7 @@ from dctools.utilities.misc_utils import (
     make_timestamps_serializable,
     make_fully_serializable,
 )
+
 GLOBAL_METADATA = [
     "coord_type", "crs", "dimensions", "keep_variables",
      "resolution", "variables", "variables_rename_dict",

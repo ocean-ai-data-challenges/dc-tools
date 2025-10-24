@@ -2,7 +2,7 @@
 # -*- coding: UTF-8 -*-
 
 """Classes and functions for saving xarray Datasets."""
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from loguru import logger
 import xarray as xr

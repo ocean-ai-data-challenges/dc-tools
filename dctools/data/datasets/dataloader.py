@@ -4,7 +4,7 @@
 """Dataloder."""
 
 import traceback
-from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Type, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type, Union
 
 import dask
 import geopandas as gpd
@@ -16,7 +16,6 @@ import xarray as xr
 import torch
 from xrpatcher import XRDAPatcher
 
-from dctools.utilities.misc_utils import log_memory
 from dctools.data.connection.config import BaseConnectionConfig
 from dctools.data.connection.connection_manager import (
     ArgoManager,
