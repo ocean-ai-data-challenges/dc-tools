@@ -1,11 +1,10 @@
 
 
-from abc import ABC, abstractmethod
+from abc import ABC
 import os
 from typing import (
-    Any, Callable, Dict, List,
-    Iterator, Optional, Tuple, Type,
-    Union,
+    Any, Dict, List,
+    Iterator, Optional, Type,
 )
 
 import ast

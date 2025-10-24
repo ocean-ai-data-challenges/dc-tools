@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import traceback
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import xarray as xr

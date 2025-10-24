@@ -2,25 +2,20 @@
 
 """Miscellaneous utility functions."""
 
-from argparse import Namespace
 import os
 import pickle
 import psutil
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Union
 
 import copy
 from cartopy import crs as ccrs
-from cartopy.feature import NaturalEarthFeature
 from dask.distributed import get_worker, get_client
-import dill
 import geopandas as gpd
-from loguru import logger
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from shapely.geometry import mapping, Polygon, base as shapely_base
-import weakref
+from shapely.geometry import mapping, base as shapely_base
 import xarray as xr
 
 from dask.distributed import get_worker

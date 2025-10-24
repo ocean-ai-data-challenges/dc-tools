@@ -5,7 +5,7 @@
 from collections import OrderedDict
 import os
 import subprocess
-from typing import Callable, List
+from typing import List
 
 from loguru import logger
 from pathlib import Path

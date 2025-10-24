@@ -1,7 +1,5 @@
 
 from abc import ABC, abstractmethod
-import logging
-import pickle
 import re
 import traceback
 from types import SimpleNamespace
@@ -31,7 +29,6 @@ from dctools.data.coordinates import (
     CoordinateSystem,
 )
 from dctools.data.coordinates import (
-    VARIABLES_ALIASES,
     TARGET_DEPTH_VALS,
 )
 
@@ -46,13 +43,13 @@ from dctools.utilities.misc_utils import (
 def get_time_bound_values(ds: xr.Dataset) -> tuple:
     """
     Obtient les bornes min/max temporelles d'un dataset xarray de manière robuste.
-    
+
     Explore différentes configurations où 'time' peut être :
     - Une dimension principale
-    - Une coordonnée 
+    - Une coordonnée
     - Une variable de données
     - Absente du dataset
-    
+
     Args:
         ds: Dataset xarray
         
@@ -60,11 +57,11 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
         tuple: (min_time, max_time) ou (None, None) si aucune donnée temporelle trouvée
     """
     # Liste des noms possibles pour la dimension temporelle
-    time_names = ['time', 'Time', 'TIME', 'date', 'datetime', 'valid_time', 
+    time_names = ['time', 'Time', 'TIME', 'date', 'datetime', 'valid_time',
                   'forecast_time', 'time_counter', 'profile_date']
-    
+
     time_vals = None
-    
+
     try:
         # Chercher dans les dimensions principales
         for time_name in time_names:
@@ -74,7 +71,7 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                     break
                 except KeyError:
                     continue
-        
+
         # Si pas trouvé, chercher dans les coordonnées
         if time_vals is None:
             for time_name in time_names:
@@ -84,7 +81,7 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                         break
                     except KeyError:
                         continue
-        
+
         # Si pas trouvé, chercher dans les variables de données
         if time_vals is None:
             for time_name in time_names:
@@ -94,7 +91,7 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                         break
                     except KeyError:
                         continue
-        
+
         # Si toujours pas trouvé, chercher des variables avec attributs temporels
         if time_vals is None:
             for var_name, var in ds.data_vars.items():
@@ -105,7 +102,8 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                     if any(indicator in str(attrs).lower() for indicator in temporal_indicators):
                         try:
                             # Vérifier si ça ressemble à des données temporelles
-                            if np.issubdtype(var.dtype, np.datetime64) or 'time' in var_name.lower():
+                            if np.issubdtype(var.dtype, np.datetime64)\
+                                or 'time' in var_name.lower():
                                 time_vals = var
                                 break
                         except Exception:
@@ -219,12 +217,12 @@ class BaseConnectionManager(ABC):
         date_start: pd.Timestamp, date_end: pd.Timestamp
     ) -> tuple[pd.Timestamp, pd.Timestamp]:
         """
-        Si date_start == date_end et date_start est à minuit,
-        ajuste date_end pour couvrir toute la journée.
+        Adjust date_end to cover a full day if both start and end dates are the same at midnight.
         """
         if pd.isnull(date_start) or pd.isnull(date_end):
             return date_start, date_end
-        if date_start == date_end and date_start.hour == 0 and date_start.minute == 0 and date_start.second == 0:
+        if date_start == date_end and date_start.hour == 0\
+            and date_start.minute == 0 and date_start.second == 0:
             # Ajuste date_end à la fin de la journée
             date_end = date_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
         return date_start, date_end
@@ -235,6 +233,7 @@ class BaseConnectionManager(ABC):
     ) -> xr.Dataset:
         """
         Open a file, prioritizing local then remote access.
+        
         If the file is not available,
         attempt to download it locally and open it.
 

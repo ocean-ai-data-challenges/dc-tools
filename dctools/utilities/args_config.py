@@ -3,7 +3,7 @@
 """Read config files and parse command-line arguments."""
 
 from argparse import ArgumentParser, Namespace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from loguru import logger
 import torch
