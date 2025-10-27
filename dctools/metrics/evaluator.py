@@ -282,6 +282,11 @@ class Evaluator:
                 batch_results = self._evaluate_batch(
                     batch, self.dataloader,
                 )
+                if batch_results is None:
+                    raise TypeError(
+                        "Empty result batch. Make sure all datasets needed for "\
+                         "the evaluation loaded properly."
+                        )
                 serial_results = [make_fully_serializable(res) for res in batch_results if res is not None]
                 self.results.extend(serial_results) 
             return self.results
