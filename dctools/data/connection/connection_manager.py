@@ -471,7 +471,7 @@ class BaseConnectionManager(ABC):
                 )
         except Exception as exc:
             logger.error(
-                f"Failed to extract metadata for file {path}: {traceback.format_exc()}"
+                f"Failed to extract metadata for file {path}: {repr(exc)}"
             )
             raise
 
@@ -650,7 +650,7 @@ class BaseConnectionManager(ABC):
             self.dataset_processor.cleanup_worker_memory()
 
         except Exception as exc:
-            logger.error(f"Dask metadata extraction failed: {exc}")
+            logger.error(f"Dask metadata extraction failed: {repr(exc)}")
             raise
 
         if not metadata_list:
@@ -721,7 +721,7 @@ class CMEMSManager(BaseConnectionManager):
                 logger.warning(f"Credentials file not found at {self.params.cmems_credentials_path}.")
                 copernicusmarine.login(credentials_file=self.params.cmems_credentials_path)
         except Exception as exc:
-            logger.error(f"login to CMEMS failed: {repr(exc)}")
+            logger.error(f"Login to CMEMS failed: {repr(exc)}")
 
     def remote_file_exists(self, dt: datetime.datetime) -> bool:
         """

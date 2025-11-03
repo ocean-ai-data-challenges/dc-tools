@@ -190,7 +190,7 @@ class FileLoader:
                         return ds
                         
         except Exception as exc:
-            logger.error(f"Failed to open dataset {path}: {traceback.format_exc()}")
+            logger.error(f"Failed to open dataset {path}: {repr(exc)}")
             raise
 
     @staticmethod

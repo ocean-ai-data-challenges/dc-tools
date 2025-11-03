@@ -292,7 +292,7 @@ class Evaluator:
             return self.results
 
         except Exception as exc:
-            logger.error(f"Evaluation failed: {traceback.format_exc()}")
+            logger.error(f"Evaluation failed: {repr(exc)}")
             raise
 
     def clean_namespace(self, namespace: Namespace) -> Namespace:

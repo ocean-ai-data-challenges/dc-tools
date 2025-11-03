@@ -189,7 +189,7 @@ class OceanbenchMetrics(DCMetric):
                 return res
 
             except Exception as exc:
-                logger.error(f"Failed to compute metric {self.metric_name}: {traceback.format_exc()}")
+                logger.error(f"Failed to compute metric {self.metric_name}: {repr(exc)}")
                 raise
         else:
             if eval_variables:
@@ -241,6 +241,6 @@ class OceanbenchMetrics(DCMetric):
 
                 return result
             except Exception as exc:
-                logger.error(f"Failed to compute metric {self.metric_name}: {traceback.format_exc()}")
+                logger.error(f"Failed to compute metric {self.metric_name}: {repr(exc)}")
                 raise
 
