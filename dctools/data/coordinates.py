@@ -538,7 +538,7 @@ def get_dataset_geometry_light(ds: xr.Dataset, coord_sys: dict) -> gpd.GeoSeries
         return None
         
     except Exception as exc:
-        logger.error(f"Safe geometry extraction failed: {exc}")
+        logger.error(f"Safe geometry extraction failed: {repr(exc)}")
         from shapely.geometry import Point
         return gpd.GeoSeries([Point(0, 0)])
 
