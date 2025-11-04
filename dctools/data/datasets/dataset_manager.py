@@ -488,8 +488,8 @@ class MultiSourceDatasetManager:
                 )
             case _:
                 logger.warning(
-                    f"Transform name '{transform_name}' does not correspond to \
-                        any MultiSourceDatasetManager transforms."
+                    f"Transform name '{transform_name}' does not correspond to" \
+                        " any MultiSourceDatasetManager transforms."
                     )
                 transform = None
 
