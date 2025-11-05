@@ -645,7 +645,7 @@ class BaseConnectionManager(ABC):
             valid_results = [meta for meta in batch_results if meta is not None]
             metadata_list.extend(valid_results)
 
-            logger.info(f"Finished processing ARGO data: {len(valid_results)}/{len(file_list)} items processed")
+            logger.info(f"Finished processing data: {len(valid_results)}/{len(file_list)} items processed")
 
             self.dataset_processor.cleanup_worker_memory()
 
