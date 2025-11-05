@@ -305,7 +305,7 @@ class BaseDataset(ABC):
 
         # Appeler la méthode filter_by_variables de DatasetCatalog
         self.catalog.filter_by_variables(variables)
-        logger.info(f"Succesfully filtered catalog. Kept variables: {variables}")
+        logger.info(f"Successfully filtered catalog. Kept variables: {variables}")
 
     def load_data(self, index: int) -> xr.Dataset:
         """
@@ -341,7 +341,7 @@ class BaseDataset(ABC):
             # Sauvegarder le catalogue en JSON
             self.catalog.to_json(str(path))
             # Construire un dictionnaire pour les attributs de BaseDataset
-            logger.info(f"BaseDataset saved succesfully in {path}")
+            logger.info(f"BaseDataset saved successfully in {path}")
         except Exception as exc:
             logger.error(f"Error while exporting BaseDataset to JSON file: {repr(exc)}")
             raise
