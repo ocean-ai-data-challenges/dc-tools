@@ -325,6 +325,72 @@ class SubsetCoordTransform:
         return transf_dataset
 
 
+class StdPercentageTransform:
+    """
+    Transform percentage variables in the [0, 100] range to [0,1].
+    """
+    def __init__(self, var_names: str | List[str]):
+        """Init function for StdPercentageTransform.
+
+        Parameters
+        ----------
+        var_names : str | List[str]
+            Name(s) of the variable(s) to convert to the [0, 1] range.
+        """
+        
+        self.var_names = [var_names] if var_names is str else var_names
+
+    def __call__(self, ds: xr.Dataset) -> xr.Dataset:
+        """Transform the variables in `ds` specified in `self.var_names`.
+
+        Parameters
+        ----------
+        ds : xr.Dataset
+            Dataset containing variables whose names match `self.var_names`.
+
+        Returns
+        -------
+        xr.Dataset
+            The dataset with the transformed variables.
+        """
+        for var_name in self.var_names:
+
+            try:
+                var_da = ds[var_name]
+            except KeyError:
+                logger.error(
+                    f"Percentage variable '{var_name}' not found in dataset. " \
+                        "Skipping variable."
+                    )
+                continue
+            
+            # Check that values are between 0 and 100
+            if (var_da < 0).any().item() or (var_da > 100).any().item():
+                logger.error(
+                    f"Variable '{var_name}' does not represent a percentage. " \
+                       "Skipping variable."
+                    )
+                continue
+            
+            # Check if variable is between 0 and 1
+            if (var_da > 1).any().item():
+                # Convert to 0 to 1 range
+                new_var_da = var_da / 100.
+
+                # Set units
+                new_var_da = new_var_da.assign_attrs(units="1")
+                ds[var_name] = new_var_da
+            else:
+                # NOTE: What happens if the variable is represented as a 0-100
+                # percentage but the data just so happens to be between 0 and 1%?
+                logger.warning(
+                    f"Percentage variable '{var_name}' is already in the 0 " \
+                        " to 1 range. Skipping variable."
+                    )
+
+        return ds
+
+
 class CustomTransforms:
     def __init__(
         self, 
