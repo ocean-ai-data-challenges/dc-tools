@@ -134,7 +134,7 @@ class DatasetCatalog:
                     f.write(json_str)
             return json_str
         except Exception as exc:
-            logger.error(f"Erreur lors de l'exportation en JSON : {repr(exc)}")
+            logger.error(f"Error while exporting JSON file: {repr(exc)}")
             raise
 
     @classmethod
@@ -209,7 +209,7 @@ class DatasetCatalog:
 
                         records.append(props)
                     else:
-                        logger.warning(f"Feature without geometry : {props['path']}, skipping.")
+                        logger.warning(f"Feature without geometry: {props['path']}, skipping.")
                 except Exception as exc:
                     logger.warning(f"Could not parse feature: {feat} ({exc})")
                     traceback.print_exc()
@@ -227,7 +227,7 @@ class DatasetCatalog:
         
             return instance
         except Exception as exc:
-            logger.error(f"Erreur lors du chargement depuis JSON : {traceback.format_exc(exc)}")
+            logger.error(f"Error while loading from JSON file: {traceback.format_exc(exc)}")
             traceback.print_exc()
             raise
 
@@ -341,7 +341,7 @@ class DatasetCatalog:
             and bool(start) and all(isinstance(elem, datetime) for elem in start) \
             and bool(end) and all(isinstance(elem, datetime) for elem in end):
             if len(start) != len(end):
-                logger.warning("start and end must have the same number of elements.")
+                logger.warning("Start and end must have the same number of elements.")
                 return
             mask = (self.gdf["date_end"] >= start[0])
             for start_el, end_el in zip(start, end):
@@ -489,10 +489,10 @@ class DatasetCatalog:
         if not gdf.empty:
             invalid_count = (~gdf.geometry.is_valid).sum()
             if invalid_count > 0:
-                logger.warning(f"WARNING: {invalid_count} invalid geometries in data")
+                logger.warning(f"{invalid_count} invalid geometries in data")
         
         if not region.is_valid.all():
-            logger.warning("WARNING: Region geometry is invalid")
+            logger.warning("Region geometry is invalid")
         
         # Test d'intersection sur un échantillon
         if not gdf.empty and len(gdf) > 0:
@@ -523,7 +523,7 @@ class DatasetCatalog:
             logger.warning("No variables provided for filtering.")
             return
         self.gdf = self.gdf[self.gdf["variables"].apply(lambda vars: any(var in vars for var in variables))]
-        logger.debug(f"Filtered by variables {variables}, remaining entries: {len(self.gdf)}")
+        logger.debug(f"Filtered by keeping variables {variables}, remaining entries: {len(self.gdf)}")
 
     def to_geodataframe(self) -> gpd.GeoDataFrame:
         """

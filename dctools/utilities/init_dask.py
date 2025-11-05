@@ -54,7 +54,7 @@ def setup_dask(args: Optional[Namespace] = None):
         processes=False,  # Forcer l'utilisation de threads pour éviter overhead
         silence_logs=False,  # Garder les logs pour debugging
     )
-    logger.info(f"Dask tourne sur CPU avec {num_workers} workers et {memory_limit} de mémoire")
+    logger.info(f"Dask is running on {num_workers} CPU workers, each with {memory_limit} of memory.")
 
     configure_dask_logging()
 
