@@ -359,16 +359,16 @@ class StdPercentageTransform:
                 var_da = ds[var_name]
             except KeyError:
                 logger.error(
-                    f"Percentage variable '{var_name}' not found in dataset. \
-                        Skipping variable."
+                    f"Percentage variable '{var_name}' not found in dataset. " \
+                        "Skipping variable."
                     )
                 continue
             
             # Check that values are between 0 and 100
             if (var_da < 0).any().item() or (var_da > 100).any().item():
                 logger.error(
-                    f"Variable '{var_name}' does not represent a percentage. \
-                        Skipping variable."
+                    f"Variable '{var_name}' does not represent a percentage. " \
+                       "Skipping variable."
                     )
                 continue
             
@@ -384,8 +384,8 @@ class StdPercentageTransform:
                 # NOTE: What happens if the variable is represented as a 0-100
                 # percentage but the data just so happens to be between 0 and 1%?
                 logger.warning(
-                    f"Percentage variable '{var_name}' is already in the 0 \
-                        to 1 range. Skipping variable."
+                    f"Percentage variable '{var_name}' is already in the 0 " \
+                        " to 1 range. Skipping variable."
                     )
 
         return ds
