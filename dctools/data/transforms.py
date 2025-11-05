@@ -385,7 +385,7 @@ class StdPercentageTransform:
                 # percentage but the data just so happens to be between 0 and 1%?
                 logger.warning(
                     f"Percentage variable '{var_name}' is already in the 0 " \
-                        " to 1 range. Skipping variable."
+                        "to 1 range. Skipping variable."
                     )
 
         return ds
