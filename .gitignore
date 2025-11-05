@@ -5,7 +5,7 @@ tst.zarr
 
 # Specific to our docs
 docs/build/
-docs/source/_autosummary/
+docs/source/package_docs/_autosummary/
 
 # Generated automatically
 # https://getgitignore.com/Python

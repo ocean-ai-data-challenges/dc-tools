@@ -1,7 +1,7 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'dc-tools'
+project = 'PPR-OC Data Challenges'
 copyright = '2025, Kamel Ait Mohand, Guillermo Cossio'
 author = 'Kamel Ait Mohand, Guillermo Cossio'
 release = '0.0.1'
