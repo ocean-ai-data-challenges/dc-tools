@@ -176,7 +176,7 @@ class MultiSourceDatasetManager:
         aliases_to_remove = []
         for alias, _ in self.datasets.items():
             # TODO: Fix logger output when using lists as start and end
-            logger.info(f"Filtrage du dataset '{alias}' par date : {start} -> {end}")
+            logger.info(f"Filtering dataset '{alias}' by date: {start} -> {end}")
             res = self.filter_by_date(alias, start, end)
             aliases_to_remove.append(res)
         for alias in aliases_to_remove:
