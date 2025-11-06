@@ -1,7 +1,7 @@
 # Data challenges
 
 ```{toctree}
-:maxdepth: 2
+:maxdepth: 1
 
 DC1.md
 DC2.md
