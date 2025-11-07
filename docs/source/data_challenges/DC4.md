@@ -9,3 +9,8 @@ Three subtasks will be explored, using different observation windows to estimate
 1. Filtering: $\left[t - \infty, t \right)$
 2. Smoothing: $\left(t - \infty, t + \infty \right)$
 3. Forecasting: $\left(t - inf, t-24h\right]$
+
+## GitHub repository
+
+The code for this Data Challenge can be found in [this GitHub repository.](https://github.com/ocean-ai-data-challenges/dc4-forecasting-tropical-cyclones)
+If you encounter any problems with the evaluation please report them in the "Issues" tab.
