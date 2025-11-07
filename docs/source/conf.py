@@ -37,6 +37,9 @@ autosummary_generate = True
 
 myst_heading_anchors = 2
 myst_links_external_new_tab = True
+myst_enable_extensions = [
+    "dollarmath"
+]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
