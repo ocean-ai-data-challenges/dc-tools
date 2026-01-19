@@ -238,6 +238,17 @@ def _safe_repr(x, maxlen=120):
         return s[:maxlen-3] + "..."
     return s
 
+def to_float32(obj: Any) -> Any:
+    """Recursively converts all float64 data to float32 in xarray objects or dicts."""
+    if isinstance(obj, (xr.Dataset, xr.DataArray)):
+        return obj.astype("float32")
+    elif isinstance(obj, dict):
+        return {k: to_float32(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [to_float32(v) for v in obj]
+    return obj
+
+
 def print_structure_types(
     obj,
     indent: int = 0,

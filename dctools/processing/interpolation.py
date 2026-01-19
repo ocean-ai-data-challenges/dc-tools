@@ -72,20 +72,48 @@ def interpolate_scipy(
     if var_names is None:
         var_names = [v for v, da in ds.data_vars.items() if lat_name in da.dims and lon_name in da.dims]
 
-    lat_src = np.asarray(ds[lat_name])
-    lon_src = np.asarray(ds[lon_name])
+    ds_subset = ds[var_names]
 
-    out_vars = apply_over_time_depth(
-        ds, var_names, depth_name, lat_name, lon_name,
-        lat_src, lon_src, tgt_lat, tgt_lon,
-        #safe_kwargs, dask_gufunc_kwargs,
-        tol_depth=tol_depth,
-    )
+    # Use xarray lazy interpolation instead of eager scipy loop
+    # This prevents loading the entire dataset into memory when iterating over time steps
+    try:
+        # Optimisation critique pour Dask : 
+        # Si assume_sorted=True, xarray.interp évite des tris coûteux sur les coords dask
+        # On vérifie si les coords source sont monotones (rapide car 1D)
+        
+        # On ne vérifie pas la monotonicité en chargeant tout.
+        # On suppose que les données grilles sources sont correctement formatées.
+        
+        # Construction de l'appel lazy
+        ds_out = ds_subset.interp(
+            {lat_name: tgt_lat, lon_name: tgt_lon},
+            method="linear", 
+            kwargs={"fill_value": np.nan},
+            assume_sorted=True  # Important pour la RAM/CPU avec Dask
+        )
+        
+        # L'appel à .interp() génère un graphe Dask potentiellement complexe.
+        # Si target_grid est petit, tout va bien.
+        
+    except Exception as e:
+        logger.warning(f"Lazy interpolation failed: {e}. Falling back to eager.")
+        # Fallback to original logic if needed
+        # Ce fallback charge tout en mémoire via .values, ce qui cause le OOM
+        # On ne devrait l'utiliser que si l'erreur n'est pas liée à la mémoire
+        
+        # Pour éviter le crash OOM dans le fallback, on peut essayer par blocs
+        # mais pour l'instant on garde le fallback standard (dangereux)
+        lat_src = np.asarray(ds[lat_name])
+        lon_src = np.asarray(ds[lon_name])
 
-    if len(out_vars) == 0:
-        raise RuntimeError("No metrics computed.")
-
-    ds_out = xr.Dataset(out_vars)
+        out_vars = apply_over_time_depth(
+            ds, var_names, depth_name, lat_name, lon_name,
+            lat_src, lon_src, tgt_lat, tgt_lon,
+            tol_depth=tol_depth,
+        )
+        if len(out_vars) == 0:
+            raise RuntimeError("No metrics computed.")
+        ds_out = xr.Dataset(out_vars)
 
     # writing / returning according to mode
     if output_mode == "zarr":
@@ -279,7 +307,7 @@ def interpolate_dataset(
         method = kwargs.get('method', 'linear')
         ds_out = interpolate_scipy_optimized(ds, target_grid, method)'''
     
-    if interpolation_lib == 'scipy':
+    if interpolation_lib == 'scipy' or interpolation_lib == 'pyinterp':
         # ds_out = interpolate_dataset_time_depth_vars(ds, target_grid)
 
         ds_renamed, coord_mapping = rename_to_standard_pyinterp(ds, 'lat', 'lon')
@@ -472,6 +500,9 @@ def interpolate_xesmf(  # TODO : check and uncomment
             cache_key = (src_shape, tgt_shape, method)
             regridder = get_regridder(da, target_grid_ds, method, cache_key)
             out_vars[var] = regridder(da)
+
+    # Nettoyage explicite du cache regridder pour libérer les ressources ESMF
+    regridder_cache.clear()
 
     # Construit le dataset final
     ds_out = xr.Dataset(out_vars)

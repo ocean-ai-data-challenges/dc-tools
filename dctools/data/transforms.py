@@ -1,11 +1,11 @@
-
-
 from typing import Any, Dict, List, Optional
 
 import ast
 # import kornia
 from loguru import logger
 from memory_profiler import profile
+import dask
+import dask.array as da
 import numpy as np
 from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
@@ -38,9 +38,65 @@ def detect_and_normalize_longitude_system(
         preview_display_dataset(ds)
         return ds
     
-    # Analyser les plages de longitude
-    lon_vals = ds[lon_name].values
-    lon_min, lon_max = float(np.nanmin(lon_vals)), float(np.nanmax(lon_vals))
+    # Analyser les plages de longitude avec optimisation mémoire et lazy loading
+    
+    # 1. Tenter d'utiliser les attributs (très rapide)
+    attrs = ds[lon_name].attrs
+    if "valid_min" in attrs and "valid_max" in attrs:
+        lon_min = float(attrs["valid_min"])
+        lon_max = float(attrs["valid_max"])
+    else:
+        # 2. Si dask array, optimiser la réduction
+        da_lon = ds[lon_name]
+        is_dask = hasattr(da_lon.data, "dask")
+        
+        if is_dask:
+            # Pour détecter le système, un sous-échantillonnage suffit souvent
+            # Cela réduit considérablement la charge sur les workers dask
+            if da_lon.size > 100_000:
+                # Strategy: Sample beginning, middle, and end of the dataset
+                # This catches the range in most cases (tracks or grids) without
+                # reading all chunks (unlike simple striding).
+                
+                # Ensure we handle 1D and nD cases reasonably
+                main_dim = da_lon.dims[0]
+                dim_size = da_lon.sizes[main_dim]
+                
+                # Define block size
+                block = min(dim_size, 500)
+                
+                parts = []
+                # Start
+                parts.append(da_lon.isel({main_dim: slice(0, block)}).data.flatten())
+                
+                # Middle (if distinct)
+                mid = dim_size // 2
+                if mid > block:
+                    parts.append(da_lon.isel({main_dim: slice(mid, mid + block)}).data.flatten())
+                
+                # End (if distinct)
+                if dim_size > 2 * block:
+                     parts.append(da_lon.isel({main_dim: slice(dim_size - block, dim_size)}).data.flatten())
+                
+                # Concatenate samples to form the subset
+                da_lon_subset = da.concatenate(parts)
+            else:
+                da_lon_subset = da_lon.data
+                
+            # Calculer min et max en une seule passe graphe dask
+            # Use dask.nanmin/nanmax which are lazy and handle NaNs correctly for dask arrays
+            min_lazy = da.nanmin(da_lon_subset)
+            max_lazy = da.nanmax(da_lon_subset)
+            
+            # Un seul compute pour les deux
+            lon_min, lon_max = dask.compute(min_lazy, max_lazy)
+            
+            lon_min = float(lon_min.item())
+            lon_max = float(lon_max.item())
+        else:
+            # NumPy array standard - calcul immédiat
+            lon_min = float(da_lon.min(skipna=True).values)
+            lon_max = float(da_lon.max(skipna=True).values)
 
     # Détecter le système de coordonnées
     lon_system = _detect_longitude_system(lon_min, lon_max)
@@ -216,14 +272,35 @@ class ToTimestampTransform:
         Convert the time coordinate to a timestamp.
         """
         for time_name in self.time_names:
-            time_values = data[time_name].values
+            if time_name not in data:
+                continue
+                
+            # Quick check on dtype to avoid loading data
+            if np.issubdtype(data[time_name].dtype, np.datetime64):
+                continue
 
-            # Vérifier si les valeurs sont déjà des pandas.Timestamp
-            are_timestamps = isinstance(time_values[0], pd.Timestamp)
+            # If not visibly datetime, check first element lazily
+            # This avoids loading the whole array just to check type
+            try:
+                if hasattr(data[time_name].data, "map_blocks"): # Is it a Dask array?
+                    # Compute just the first value
+                    first_val = data[time_name].isel({d:0 for d in data[time_name].dims}).compute().item()
+                else:
+                    first_val = data[time_name].values.flat[0]
+                
+                if isinstance(first_val, (pd.Timestamp, np.datetime64)):
+                    continue
+            except Exception:
+                pass
 
-            if not are_timestamps:
-                # Convertir toutes les valeurs en pandas.Timestamp
-                data[time_name] = pd.to_datetime(data[time_name].values)
+
+            try:
+                # If we really must convert, explicit load (unavoidable for pd.to_datetime usually)
+                # But we can check if we can defer it or map_blocks it
+                 data[time_name] = pd.to_datetime(data[time_name].values)
+            except Exception as e:
+                logger.warning(f"Could not convert {time_name} to datetime: {e}")
+
         return data
 
 
@@ -243,18 +320,21 @@ class WrapLongitudeTransform:
         # Récupère la DataArray des longitudes
         lon = ds[self.lon_name]
         # Applique la conversion
+        # Lazy operation compatible with Dask
         lon_wrapped = ((lon + 180) % 360) - 180
 
-        # Trie les longitudes et réindexe le dataset pour garder l'ordre croissant
-        order = np.argsort(lon_wrapped)
-        lon_wrapped_sorted = lon_wrapped[order]
-
-        # Remplace la coordonnée longitude
-        ds = ds.assign_coords({self.lon_name: lon_wrapped_sorted})
-
-        # Réindexe le dataset si la longitude est une dimension
+        # On remplace la coordonnée longitude
+        # Note: on ne trie QUE si la longitude est une dimension d'indexation (grille)
+        # Si c'est une coordonnée 2D (swath) ou une coordonnée de points, trier casserait la correspondance !
+        
         if self.lon_name in ds.dims:
+            # C'est une dimension : on assigne et on trie pour garder une grille valide
+            ds = ds.assign_coords({self.lon_name: lon_wrapped})
             ds = ds.sortby(self.lon_name)
+        else:
+             # Ce n'est pas une dimension (ex: swath along 'n_points')
+             # On assigne juste les valeurs wrappées, SANS trier
+             ds = ds.assign_coords({self.lon_name: lon_wrapped})
 
         return ds
 

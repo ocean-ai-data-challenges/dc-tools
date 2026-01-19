@@ -30,7 +30,7 @@ def configure_xarray_for_dask():
     
     # Configuration Dask pour xarray
     dask.config.set({
-        'array.chunk-size': '256MB',
+        'array.chunk-size': '128MB',
         'array.slicing.split_large_chunks': False,
         'distributed.worker.daemon': False,
         'distributed.comm.timeouts.tcp': 300,
@@ -136,8 +136,11 @@ class FileLoader:
         """
         os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
         try:
+            # FORCE LAZY LOADING: chunks={} tells xarray to use dask with file's chunks
+            base_chunks = {}
+
             # open_kwargs = {"chunks": "auto", "engine": engine}
-            open_kwargs = {"engine": engine}
+            open_kwargs = {"engine": engine, "chunks": base_chunks}
             if dask_safe:
                 open_kwargs.update({"lock": False, "cache": False})
 
@@ -167,7 +170,7 @@ class FileLoader:
 
             elif file_path.endswith(".zarr"):
                 zarr_kwargs = {
-                    "chunks": "auto",
+                    "chunks": base_chunks,
                     "consolidated": True,
                 }
                 if file_storage is not None:
@@ -175,8 +178,8 @@ class FileLoader:
                         try:
                             # Support for remote storage (e.g., S3)
                             store = file_storage.get_mapper(file_path)  # <-- mapping, pas file-like
-                            kvstore = zarr.storage.KVStore(store)
-                            ds = xr.open_zarr(kvstore, consolidated=True)  # **zarr_kwargs)
+                            # kvstore = zarr.storage.KVStore(store)
+                            ds = xr.open_zarr(store, **zarr_kwargs)
                         except Exception as e:
                             logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
                             if attempt == reading_retries - 1:

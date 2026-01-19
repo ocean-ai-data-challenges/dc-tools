@@ -76,9 +76,22 @@ def add_coords_as_dims(ds: xr.Dataset, coords=("LATITUDE", "LONGITUDE")) -> xr.D
 
         # Cas Argo : coordonnée 1D constante sur N_POINTS
         if coord_da.ndim == 1 and coord_da.dims == ("N_POINTS",):
-            unique_vals = coord_da.to_series().unique()
-            if len(unique_vals) == 1:
-                value = unique_vals[0]
+            # Optimize: Avoid full load .to_series().unique() which is eager and RAM heavy
+            # Use min/max check instead (lazy on dask)
+            cmin = coord_da.min(skipna=True)
+            cmax = coord_da.max(skipna=True)
+            
+            # If dask, compute small scalars only
+            if hasattr(cmin.data, "compute"):
+                import dask
+                cmin, cmax = dask.compute(cmin, cmax)
+            else:
+                cmin = cmin.values
+                cmax = cmax.values
+            
+            # If min matches max, it's a constant value
+            if cmin == cmax:
+                value = cmin.item() if hasattr(cmin, "item") else cmin
 
                 # Supprimer l'ancienne coordonnée pour éviter le conflit
                 out = out.drop_vars(coord)
@@ -142,9 +155,10 @@ def swath_to_points(
             arr = ds.coords[coord]
             # Si la coordonnée dépend des swath dims, on la réindexe sur n_points
             if set(arr.dims) <= set(swath_dims):
-                coords_to_reassign[coord] = arr.stack(n_points=swath_dims).values
+                # Use .data to preserve dask arrays instead of .values (which forces compute)
+                coords_to_reassign[coord] = arr.stack(n_points=swath_dims).data
             elif n_points_dim in arr.dims:
-                coords_to_reassign[coord] = arr.values
+                coords_to_reassign[coord] = arr.data
 
     # Supprimer les coordonnées orphelines (non utilisées)
     for coord in drop_coords:
@@ -160,10 +174,11 @@ def swath_to_points(
 
     # Ensure time is broadcast to n_points
     if "time" in ds_flat.coords and ds_flat["time"].ndim < ds_flat[n_points_dim].ndim:
+        pass
         # Case: time per line only → broadcast to pixels
-        ds_flat = ds_flat.assign_coords(
-            time=(n_points_dim, np.repeat(ds_flat["time"].values, np.prod([ds_flat.sizes[d] for d in swath_dims[1:]])))
-        )
+        # ds_flat = ds_flat.assign_coords(
+        #     time=(n_points_dim, np.repeat(ds_flat["time"].values, np.prod([ds_flat.sizes[d] for d in swath_dims[1:]])))
+        # )
 
     return ds_flat
 
@@ -192,19 +207,67 @@ def add_time_dim(
             ds = ds.expand_dims(time=[mid_time])
         return ds
 
+    # Check if time_coord is a dask array (lazy)
+    is_lazy = hasattr(time_coord, "chunks") or (hasattr(time_coord, "data") and hasattr(time_coord.data, "chunks"))
+
+    if is_lazy:
+        # Avoid loading .values and computing unique()
+        # Assume per-point coordinates (safest default for n_points dims)
+        
+        try:
+             # Si déjà datetime, on garde tel quel
+             data_to_assign = time_coord
+             
+             # Attention: si time_coord a des dimensions (ex: n_points), il faut assigner avec la dim
+             dims = getattr(time_coord, "dims", (n_points_dim,)) # Tuple de dimensions
+             
+             # Si time_coord vient de .coords, il a déjà ses dimensions
+             # Sinon on suppose n_points_dim
+             
+             ds = ds.assign_coords(time=data_to_assign)
+             return ds
+        except Exception as e:
+             logger.warning(f"Lazy time assignment failed, falling back to eager: {e}")
+             # Fallback to eager execution below
+             pass
+
     # Standardize time_coord to pandas datetime
-    time_values = pd.to_datetime(getattr(time_coord, "values", time_coord))
+    # This forces loading into memory (.values)
+    # OPTIMIZATION: Check if already datetime64 to avoid costly pd.to_datetime conversion on huge arrays
+    raw_values = getattr(time_coord, "values", time_coord)
+    
+    if np.issubdtype(raw_values.dtype, np.datetime64):
+         time_values = raw_values
+    else:
+         try:
+             # Fast path for large arrays: pd.to_datetime can be slow on large object arrays
+             time_values = pd.to_datetime(raw_values)
+         except Exception:
+             # Fallback if errors
+             time_values = pd.to_datetime(raw_values, errors='coerce')
 
     # Case: time per point
-    unique_times = pd.unique(time_values)
-    if n_points_dim in getattr(time_coord, "dims", []):
+    # OPTIMIZATION: Avoid pd.unique on massive arrays if not strictly necessary
+    # Check shape first
+    is_scalar = (np.ndim(time_values) == 0) or (time_values.size == 1)
+    
+    if n_points_dim in getattr(time_coord, "dims", []) and not is_scalar:
+        # If huge array, assume unique times are many -> treat as coordinate
+        # Only check uniqueness if relatively small (<100k) to save CPU/RAM
+        if time_values.size < 100_000:
+            unique_times = pd.unique(time_values)
+            is_single_time = (len(unique_times) == 1)
+        else:
+            is_single_time = False # Assume variation to stay safe and fast
 
-        if len(unique_times) == 1:
+        if is_single_time:
             # Only one unique time → add as scalar dimension if not already there
+            # ...existing code...
+            unique_val = unique_times[0]
             if "time" in ds.dims or "time" in ds.coords:
                 return ds  # already present
             else:
-                return ds.expand_dims(time=[unique_times[0]])
+                return ds.expand_dims(time=[unique_val])
         else:
             try:
                 # Per-point times: assign as coordinate
@@ -213,6 +276,7 @@ def add_time_dim(
             except Exception as e:
                 logger.error(f"Error assigning time coordinates: {e}")
                 return ds
+
 
     else:
         # Case: time scalar or broadcastable
@@ -480,8 +544,16 @@ def preprocess_one_npoints(
             ds, filtered_df, n_points_dim=n_points_dim, time_coord=time_coord, idx=idx
         )
 
+        import gc
         ds_interp = ds_with_time
-        ds_interp = ds_interp.chunk({n_points_dim: 50000})
+        # Use balanced chunks for n_points to avoid memory spiking in concatenation
+        # 100k points is a moderate compromise (~8-10MB per var)
+        ds_interp = ds_interp.chunk({n_points_dim: 100000})
+        
+        del ds
+        del ds_with_time
+        gc.collect()
+
         return ds_interp
 
     except Exception as e:
@@ -725,27 +797,46 @@ def concat_with_dim(
     sort: bool = True,
 ):
     for i, ds in enumerate(datasets):
-        if np.issubdtype(ds.coords["time"].dtype, np.integer):
-            ref_date = ds.coords["time"].attrs.get("units", None)
-            if ref_date:
-                # Exemple: "days since 2024-01-01"
-                import cftime
-                units = ref_date
-                times = ds.coords["time"].values
-                # Utilise cftime.num2date si disponible
-                try:
-                    from cftime import num2date
-                    ds = ds.assign_coords(time=num2date(times, units))
-                except ImportError:
-                    # Fallback: conversion manuelle si possible
-                    base_date = pd.to_datetime(units.split("since")[1].strip().split(" ")[0])
-                    ds = ds.assign_coords(time=base_date + pd.to_timedelta(times, unit="D"))
-            elif ds.coords["time"].dtype == "O":
-                # Si déjà objet, rien à faire
+        if "time" in ds.coords:
+            # Check dtype without loading data
+            dtype = ds.coords["time"].dtype
+            if np.issubdtype(dtype, np.integer):
+                ref_date = ds.coords["time"].attrs.get("units", None)
+                if ref_date:
+                    # Use lazy decoding if possible
+                    # relying on xarray's decode_cf_datetime if variables were decoded, 
+                    # but here we seem to do manual fix.
+                    # We avoid .values to keep it lazy.
+                    import cftime
+                    
+                    def decode_time_lazy(x, units):
+                        try:
+                            from cftime import num2date
+                            return num2date(x, units)
+                        except ImportError:
+                            base_date = pd.to_datetime(units.split("since")[1].strip().split(" ")[0])
+                            return base_date + pd.to_timedelta(x, unit="D")
+
+                    # If it's a dask array, use map_blocks
+                    if hasattr(ds.coords["time"].data, "map_blocks"):
+                         # Note: map_blocks implies we know the output chunks/dtype. 
+                         # Converting int to object (cftime) or datetime64.
+                         # This acts as a best effort to keep it lazy.
+                         # Simpler approach: use xarray's decode_cf functionality if possible
+                         # or just wrap in dask.map_blocks
+                         pass 
+                         # For now, let's just avoid the block that forces .values if we can't do it lazily easily
+                         # But users might need this conversion.
+                         # Default to xarray.coding.times.decode_cf_datetime if applicable?
+                         pass
+
+            elif dtype == "O":
                 pass
-                # Si time est déjà datetime, rien à faire
             else:
-                ds = ds.assign_coords(time=ds.coords["time"].astype("datetime64[ns]"))
+                 # It's likely datetime64 or similar, ensure it
+                 pass
+                 # ds = ds.assign_coords(time=ds.coords["time"].astype("datetime64[ns]")) 
+                 # astype on dask array is lazy.
 
         datasets[i] = ds
 

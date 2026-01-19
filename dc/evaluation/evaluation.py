@@ -30,6 +30,7 @@ from dctools.metrics.evaluator import Evaluator
 from dctools.metrics.metrics import MetricComputer
 from dctools.metrics.oceanbench_metrics import get_variable_alias
 from dctools.utilities.file_utils import empty_folder
+from dctools.utilities.init_dask import configure_dask_logging
 from dctools.utilities.misc_utils import (
     make_serializable,
     nan_to_none,
@@ -46,6 +47,9 @@ class DC2Evaluation:
             arguments (str): Namespace with config.
         """
         self.args = arguments
+
+        # Configure silence for Dask
+        configure_dask_logging()
 
         self.dataset_references = {
             "glonet": [
@@ -354,6 +358,8 @@ class DC2Evaluation:
                 ref_aliases=list_references,
                 dataset_processor=self.dataset_processor,
                 results_dir=results_files_dir,
+                reduce_precision=getattr(self.args, "reduce_precision", False),
+                restart_workers_per_batch=getattr(self.args, "restart_workers_per_batch", False),
             )
             logger.info(f"\n\n\n=========  START EVALUATION FOR CANDIDATE : {alias}  =========")
             models_results[alias] = evaluators[alias].evaluate()

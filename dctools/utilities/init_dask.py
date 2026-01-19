@@ -93,6 +93,7 @@ def configure_dask_logging():
         'distributed.core',
         'distributed.worker',
         'distributed.scheduler',
+        'distributed.nanny',
         'distributed.comm',
         'distributed.utils',
         'distributed.client',
