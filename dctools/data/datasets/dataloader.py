@@ -233,7 +233,7 @@ def add_time_dim(
 
     # Standardize time_coord to pandas datetime
     # This forces loading into memory (.values)
-    # OPTIMIZATION: Check if already datetime64 to avoid costly pd.to_datetime conversion on huge arrays
+    # Check if already datetime64 to avoid costly pd.to_datetime conversion on huge arrays
     raw_values = getattr(time_coord, "values", time_coord)
     
     if np.issubdtype(raw_values.dtype, np.datetime64):

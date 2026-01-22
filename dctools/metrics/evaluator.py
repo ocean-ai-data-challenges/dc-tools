@@ -2,6 +2,7 @@ from argparse import Namespace
 import ctypes
 import gc
 import os
+import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import dask
@@ -31,6 +32,16 @@ from dctools.utilities.misc_utils import (
 )
 from dctools.utilities.format_converter import convert_format1_to_format2
 
+
+def worker_memory_cleanup():
+    """Manual memory cleanup to be run on workers."""
+    import gc
+    import ctypes
+    gc.collect()
+    try:
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except Exception:
+        pass
 
 
 def compute_metric(
@@ -314,6 +325,9 @@ class Evaluator:
                 
                 argo_index = None
                 if hasattr(self.dataloader.ref_managers[ref_alias], 'argo_index'):
+                    # Disable scattering for Argo Index to improve stability
+                    argo_index = self.dataloader.ref_managers[ref_alias].get_argo_index()
+                    '''
                     if ref_alias not in self.scattered_argo_indexes:
                         raw_idx = self.dataloader.ref_managers[ref_alias].get_argo_index()
                         if raw_idx is not None:
@@ -323,7 +337,9 @@ class Evaluator:
                         else:
                             self.scattered_argo_indexes[ref_alias] = None
                     argo_index = self.scattered_argo_indexes[ref_alias]
+                    '''
 
+                '''
                 # Optimization: Scatter ref_catalog if present in batch entries (for observations)
                 for entry in batch:
                     if isinstance(entry.get("ref_data"), dict) and "source" in entry["ref_data"]:
@@ -336,6 +352,7 @@ class Evaluator:
                             )
                         # Replace the heavy object with the Future
                         entry["ref_data"]["source"] = self.scattered_ref_catalogs[ref_alias]
+                '''
 
                 batch_results = self._evaluate_batch(
                     batch, pred_alias, ref_alias,
@@ -351,6 +368,24 @@ class Evaluator:
                 batch_file = os.path.join(self.results_dir, f"results_{pred_alias}_batch_{batch_idx}.json")
                 with open(batch_file, "w") as f:
                     json.dump(serial_results, f, indent=2, ensure_ascii=False)
+                
+                if self.restart_workers_per_batch:
+                    try:
+                        # Alternative to client.restart(): Run manual cleanup on all workers
+                        # This avoids CommClosedError and ensures completion before next batch
+                        logger.info("Running manual memory cleanup (GC + malloc_trim) on workers...")
+                        self.dataset_processor.client.run(worker_memory_cleanup)
+                        
+                        # Pause to allow OS to reclaim memory completely
+                        time.sleep(5)
+                    except Exception as e:
+                        logger.warning(f"Worker memory cleanup failed: {e}")
+                
+                # Explicit cleanup of batch variables
+                del batch_results
+                del serial_results
+                # Force garbage collection on driver
+                gc.collect()
             
             # Cleanup scattered data
             self.scattered_argo_indexes.clear()

@@ -183,10 +183,10 @@ class DC2Evaluation:
             #"glorys", "argo_profiles", "argo_velocities",
             #"jason1", "jason2", "jason3",
             #"saral", "swot", "SSS_fields", "SST_fields",
-            if source_name != "glonet" and source_name != "argo_profiles" and source_name != "swot" and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
+            if source_name != "glonet" and source_name != "swot":  #  and source_name != "swot" and source_name != "jason3" and source_name != "saral" and source_name != "glorys":
                 logger.warning(f"Dataset {source_name} is not supported yet, skipping.")
                 continue
-    
+
             # Download dataset index file (catalog) if needed
             self.get_catalog(
                 source_name,
@@ -245,6 +245,15 @@ class DC2Evaluation:
         transforms_dict = self.setup_transforms(dataset_manager, aliases)
 
         # json_path=os.path.join(self.args.catalog_dir, f"all_test_results.json")
+        import psutil
+        def restart_workers_if_low_memory(threshold=0.10):
+            mem = psutil.virtual_memory()
+            available_ratio = mem.available / mem.total
+            if available_ratio < threshold:
+                logger.warning(f"RAM disponible trop faible ({available_ratio*100:.1f}%), redémarrage des workers...")
+                self.dataset_processor.client.restart()
+                logger.info("Workers Dask redémarrés.")
+
         for alias in self.dataset_references.keys():
             dataset_json_path = os.path.join(self.args.data_directory, f"results_{alias}.json")
             results_files_dir = os.path.join(self.args.data_directory, "results_batches")

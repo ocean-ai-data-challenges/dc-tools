@@ -14,9 +14,9 @@ max_cache_files: 1000  # max files to store (older files are deleted)
 
 ############################# PARALLELIZATION ###################################
 
-batch_size: 16
+batch_size: 32
 n_parallel_workers: 8
-nthreads_per_worker: 4
+nthreads_per_worker: 2
 memory_limit_per_worker: "6GB"
 reduce_precision: true
 restart_workers_per_batch: true
