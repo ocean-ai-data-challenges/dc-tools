@@ -2,9 +2,10 @@
 
 """Wrapper for functions implemented in Mercator's oceanbench library."""
 
+import time
 from abc import ABC, abstractmethod
 import traceback
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from loguru import logger
 import oceanbench.metrics as oceanbench_metrics
@@ -37,8 +38,7 @@ OCEANBENCH_VARIABLES = {
     "mdt": Variable.MEAN_DYNAMIC_TOPOGRAPHY,
 }
 
-
-def get_variable_alias(variable: str) -> "Variable | None":
+def get_variable_alias(variable: str) -> Variable | None:
     """Get the alias for a given variable.
 
     Args:
@@ -143,6 +143,7 @@ class OceanbenchMetrics(DCMetric):
 
         if is_class4:
             class4_args = dict(self.class4_kwargs)
+            logger.debug(f"Class4Evaluator config: {class4_args}")
             self.class4_evaluator = Class4Evaluator(
                 metrics=class4_args["list_scores"],
                 interpolation_method=class4_args["interpolation_method"],
@@ -179,13 +180,18 @@ class OceanbenchMetrics(DCMetric):
 
         if self.is_class4:
             try:
-
+                t_c4_start = time.time()
+                
                 res = self.class4_evaluator.run(
                     model_ds=eval_dataset,
                     obs_ds=ref_dataset,
                     variables=self.eval_variables,
                     ref_coords=ref_coords,
                 )
+                
+                t_c4_end = time.time()
+                logger.info(f"Class4Evaluator.run time: {t_c4_end - t_c4_start:.4f} seconds")
+                
                 return res
 
             except Exception as exc:
@@ -243,4 +249,3 @@ class OceanbenchMetrics(DCMetric):
             except Exception as exc:
                 logger.error(f"Failed to compute metric {self.metric_name}: {repr(exc)}")
                 raise
-

@@ -296,8 +296,8 @@ class MultiSourceDatasetManager:
             catalog_df,
             init_date=init_date,
             end_date=end_date,
-            forecast_time_col="date_start",
-            valid_time_col="date_end",
+            start_time_col="date_start",
+            end_time_col="date_end",
             file_col="path",
             n_days_forecast=n_days_forecast,
             n_days_interval=n_days_interval,
@@ -436,7 +436,7 @@ class MultiSourceDatasetManager:
                 )
                 transform_interp = CustomTransforms(
                     transform_name="glorys_to_glonet",
-                    dataset_processor=None,  # self.dataset_processor,
+                    dataset_processor=None,
                     depth_coord_vals=depth_coord_vals,
                     interp_ranges=interp_ranges,
                     weights_path=regridder_weights,
@@ -485,6 +485,20 @@ class MultiSourceDatasetManager:
                         transform_add_coords,
                         transform_standardize,
                     ]
+                )
+            case "standardize_to_surface":
+                transform_std = CustomTransforms(
+                    transform_name="standardize_to_surface",
+                    dataset_processor=None,  # self.dataset_processor,
+                    list_vars=keep_vars,
+                    coords_rename_dict=coords_rename_dict,
+                    vars_rename_dict=vars_rename_dict,
+                )
+                transform = transform_std
+                self.standardize_names(
+                    dataset_alias,
+                    coords_rename_dict,
+                    vars_rename_dict,
                 )
             case _:
                 logger.warning(

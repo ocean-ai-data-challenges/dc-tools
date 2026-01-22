@@ -1,0 +1,49 @@
+
+start_time: "2024-01-01"
+end_time: "2024-01-02"
+
+# Target region coordinates
+min_lon: -180
+max_lon: 180
+min_lat: -90
+max_lat: 90
+
+
+delta_time: 12   # delta time (hours) when matching observation data
+
+##################################################################
+
+
+max_cache_files: 1000  # max files to store (older files are deleted)
+
+
+
+############################# PARALLELIZATION ###################################
+
+batch_size: 64
+n_parallel_workers: 4
+nthreads_per_worker: 4
+memory_limit_per_worker: "15GB"
+
+
+############################### DATASETS ###################################
+
+max_samples: 5
+
+sources:
+  - dataset: glorys
+    config: "cmems"
+    cmems_product_name: "cmems_mod_glo_phy_myint_0.083deg_P1D-m"
+    file_pattern: "**/*.nc"
+    keep_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"
+    eval_variables:
+      - "so"
+      - "thetao"
+      - "uo"
+      - "vo"
+      - "zos"

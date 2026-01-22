@@ -32,8 +32,7 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
     Returns:
         Namespace: Namespace with parsed args.
     """
-    parser = ArgumentParser()
-    parser = ArgumentParser(description='Run DC1 Evaluation on Glorys data')
+    parser = ArgumentParser(description='DC Tools Argument Parser')
     parser.add_argument(
         '-d', '--data_directory', type=str,
         help="Folder where to store downloaded data",

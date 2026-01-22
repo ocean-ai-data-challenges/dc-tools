@@ -1,0 +1,35 @@
+
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File with Arguments (Default Python)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/dc/evaluate.py",
+            "console": "integratedTerminal",
+            "args": ["--logfile", "/home/k24aitmo/IMT/software/dc-tools/tests/dc2.log", "--data_directory",  "/home/k24aitmo/IMT/software/dc-tools/tests/data"],
+            "stopOnEntry": false,
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Python Debugger: Current File with Arguments (Auto Python)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${command:python.interpreterPath}",
+            "program": "${workspaceFolder}/dc/evaluate.py",
+            "console": "integratedTerminal",
+            "args": ["--logfile", "/home/k24aitmo/IMT/software/dc-tools/tests/dc2.log", "--data_directory", "/home/k24aitmo/IMT/software/dc-tools/tests/data"],
+            "stopOnEntry": false,
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+    ]
+}

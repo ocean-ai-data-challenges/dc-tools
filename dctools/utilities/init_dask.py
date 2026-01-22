@@ -70,6 +70,7 @@ def configure_dask_logging():
         'distributed.core',
         'distributed.worker',
         'distributed.scheduler',
+        'distributed.nanny',
         'distributed.comm',
         'distributed.utils',
         'distributed.client',
@@ -93,6 +94,7 @@ def configure_dask_logging():
         'distributed.worker.memory.spill': 0.9,
         'distributed.worker.memory.pause': 0.95,
         'distributed.worker.memory.terminate': False,
+
         'logging': {
             'distributed': {
                 '': 'error',            # root "distributed" logger

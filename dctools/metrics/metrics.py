@@ -21,7 +21,6 @@ class MetricComputer(OceanbenchMetrics):
             **kwargs,
         ):
         super().__init__(
-            #dataset_processor,
             is_class4=is_class4, class4_kwargs=class4_kwargs, **kwargs
         )
         self.is_class4 = is_class4

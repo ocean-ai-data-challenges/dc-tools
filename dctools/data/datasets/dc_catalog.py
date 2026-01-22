@@ -1,5 +1,6 @@
 
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import traceback
@@ -19,7 +20,7 @@ from shapely.geometry import mapping, shape
 from dctools.data.coordinates import CoordinateSystem
 from dctools.utilities.misc_utils import (
     make_timestamps_serializable,
-    make_fully_serializable,
+    serialize_structure,
 )
 
 GLOBAL_METADATA = [
@@ -38,7 +39,7 @@ class CatalogEntry:
     path: str
     date_start: pd.Timestamp
     date_end: pd.Timestamp
-    variables: Dict[str, List[str]]
+    # variables: Dict[str, List[str]]
     geometry: gpd.GeoSeries
 
     def to_dict(self):
@@ -46,10 +47,14 @@ class CatalogEntry:
             dct = asdict(self)
             dct["date_start"] = self.date_start.isoformat()
             dct["date_end"] = self.date_end.isoformat()
-            dct["geometry"] = mapping(self.geometry)
+            if self.geometry is not None:
+                dct["geometry"] = mapping(self.geometry)
+            else:
+                dct["geometry"] = None
             return dct
         except Exception as exc:
             logger.error(f"Error converting CatalogEntry to dict: {exc}")
+            traceback.print_exc()
             raise
 
     @classmethod
@@ -57,7 +62,8 @@ class CatalogEntry:
         data_copy = data.copy()
         data_copy["date_start"] = pd.to_datetime(data_copy["date_start"])
         data_copy["date_end"] = pd.to_datetime(data_copy["date_end"])
-        data_copy["geometry"] = shape(data_copy["geometry"])
+        if data_copy["geometry"] is not None:
+            data_copy["geometry"] = shape(data_copy["geometry"])
         return cls(**data_copy)
 
 
@@ -96,8 +102,20 @@ class DatasetCatalog:
                     logger.warning(f"Ignoring invalid entry: {entry}")
 
             # Convertir les entrées en GeoDataFrame
+            data_dicts = []
+            for entry in self.entries:
+                entry_dict = asdict(entry)
+                # Convert geometry dict back to Shapely object if needed
+                geometry_data = entry_dict.get('geometry')
+                if isinstance(geometry_data, dict):
+                    entry_dict['geometry'] = shape(geometry_data)
+                elif geometry_data is None:
+                    entry_dict['geometry'] = None
+                # If it's already a Shapely object, keep it as is
+                data_dicts.append(entry_dict)
+            
             self.gdf = gpd.GeoDataFrame(
-                [asdict(entry) for entry in self.entries],
+                data_dicts,
                 geometry="geometry",
                 crs="EPSG:4326",
             )
@@ -118,12 +136,20 @@ class DatasetCatalog:
         Returns:
             str: Représentation JSON complète de l'instance.
         """
+        def coord_system_to_dict(coord_system):
+            if isinstance(coord_system, dict):
+                return coord_system
+            if hasattr(coord_system, "__dict__"):
+                return {k: v for k, v in coord_system.__dict__.items() if not k.startswith("_")}
+            return str(coord_system)
         try:
-            # Convertir le GeoDataFrame en GeoJSON (dict)
-            serial_metadata = make_fully_serializable(self._global_metadata.copy())
+            # Copie et conversion coord_system AVANT serialize_structure
+            meta_copy = self._global_metadata.copy()
+            if "coord_system" in meta_copy:
+                meta_copy["coord_system"] = coord_system_to_dict(meta_copy["coord_system"])
+            serial_metadata = serialize_structure(meta_copy)
             gdf_serializable = make_timestamps_serializable(self.gdf)
             geojson_dict = json.loads(gdf_serializable.to_json())
-            # Ajouter les métadonnées globales
             export_dict = {
                 "global_metadata": serial_metadata,
                 "features": geojson_dict.get("features", [])
@@ -138,10 +164,33 @@ class DatasetCatalog:
             raise
 
     @classmethod
-    def from_json(cls, path: str, alias:str) -> 'DatasetCatalog':
+    def from_json(cls, path: str, alias:str, limit: int, ignore_geometry = False) -> 'DatasetCatalog':
         """
         Reconstruit une instance de DatasetCatalog à partir d'un fichier GeoJSON.
         """
+        def process_feature(feat):
+            try:
+                props = feat.get("properties", {})
+                if not ignore_geometry:
+                    if feat["geometry"] is not None:
+                        geom = shape(feat["geometry"])
+                    else:
+                        geom = None
+
+                    if geom is not None:
+                        geom_obj = shape(geom)
+                        if not isinstance(geom_obj, BaseGeometry):
+                            logger.warning(f"Invalid geometry: {geom}")
+                            return None
+                        props["geometry"] = geom_obj
+                    else:
+                        logger.warning(f"Feature without geometry : {props['path']}, skipping.")
+                return props   
+            except Exception as exc:
+                logger.warning(f"Could not parse feature: {feat} ({exc})")
+                traceback.print_exc()
+                return None
+
         try:
             with open(path, "r") as f:
                 data = json.load(f)
@@ -166,61 +215,19 @@ class DatasetCatalog:
 
             # Extraire les propriétés et la géométrie
             records = []
-            for feat in features:
-                try:
-                    props = feat.get("properties", {})
-                    if feat["geometry"] is not None:
-                        geom = shape(feat["geometry"])
-                    else:
-                        geom = None
 
-                    if geom is not None:
-                        geom_obj = shape(geom)
-                        if not isinstance(geom_obj, BaseGeometry):
-                            logger.warning(f"Invalid geometry: {geom}")
-                            continue
-                        props["geometry"] = geom_obj
-
-
-                        if alias == "glorys" and "path" in props:
-                            try:
-                                # Convertir le path string en datetime
-                                path_value = props["path"]
-                                if isinstance(path_value, str):
-                                    # Essayer différents formats de date
-                                    try:
-                                        # Format ISO
-                                        props["path"] = datetime.fromisoformat(path_value)
-                                    except ValueError:
-                                        try:
-                                            # Format YYYY-MM-DD
-                                            props["path"] = datetime.strptime(path_value, "%Y-%m-%d")
-                                        except ValueError:
-                                            try:
-                                                # Format YYYY-MM-DD HH:MM:SS
-                                                props["path"] = datetime.strptime(path_value, "%Y-%m-%d %H:%M:%S")
-                                            except ValueError:
-                                                logger.warning(f"Could not parse path as datetime for glorys: {path_value}")
-                                                # Garder la valeur originale si la conversion échoue                        except Exception as exc:
-                                                traceback.print_exc()
-                            except Exception as exc:
-                                logger.warning(f"Error converting path to datetime for glorys: {exc}")
-                                traceback.print_exc()
-
-                        records.append(props)
-                    else:
-                        logger.warning(f"Feature without geometry: {props['path']}, skipping.")
-                except Exception as exc:
-                    logger.warning(f"Could not parse feature: {feat} ({exc})")
-                    traceback.print_exc()
-                    continue
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                records = list(executor.map(process_feature, features))
 
             # Créer le GeoDataFrame
-            gdf = gpd.GeoDataFrame(records, geometry="geometry")
-            if "keep_variables" in gdf.columns:
-                gdf["keep_variables"] = gdf["keep_variables"].apply(
-                    lambda x: json.loads(x) if isinstance(x, str) and x.startswith("[") else x
-                )
+            if not ignore_geometry:
+                gdf = gpd.GeoDataFrame(records, geometry="geometry")
+            else:
+                gdf = gpd.GeoDataFrame(records)
+            #if "keep_variables" in gdf.columns:
+            #    gdf["keep_variables"] = gdf["keep_variables"].apply(
+            #        lambda x: json.loads(x) if isinstance(x, str) and x.startswith("[") else x
+            #    )
             # Créer l'instance avec global_metadata
 
             instance = cls(alias=alias, global_metadata=global_metadata, dataframe=gdf)

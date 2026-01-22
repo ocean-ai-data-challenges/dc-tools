@@ -27,15 +27,20 @@ COORD_ALIASES = {
     },
     "quadrant": {"quadrant", "sector"},
     "time": {"time", "date", "datetime", "valid_time", "forecast_time", "time_counter"},
+    "n_points": {"n_points", "N_POINTS", "points", "obs"},
 }
 
 # Dictionnaire des variables d'intérêt : {nom générique -> standard_name(s), alias courants}
 VARIABLES_ALIASES = {
-    "sla": {
-        "standard_names": ["sea_surface_height_above_sea_level"],
-        "aliases": ["sla", "data_01__ku__ssha", "ssha"]
-    },
-    # "sst_foundation": {
+    #"sla": {   # TODO : check about computing sla from ssh
+    #    "standard_names": ["sea_surface_height_above_sea_level"],
+    #    "aliases": ["sla", "data_01__ku__ssha", "ssha"]
+    #},
+    #"sst": {
+    #    "standard_names": ["sea_surface_temperature"],
+    #    "aliases": ["sst", "surface_temperature", "temperature_surface"]
+    #},
+    #"sst_foundation": {
     #    "standard_names": ["sea_surface_foundation_temperature"],
     #    "aliases": [
     #        "sst_foundation", "sst_fnd",
@@ -67,7 +72,10 @@ VARIABLES_ALIASES = {
             "sea_surface_height_above_geoid",
             "sea_surface_height_above_reference_ellipsoid"
         ],
-        "aliases": ["ssh", "sea_level", "surface_height", "ssha_filtered", "zos"]
+        "aliases": [
+            "ssh", "sea_level", "surface_height",
+            "ssha_filtered", "zos", "data_01__ku__ssha",  "ssha",
+        ]
     },
     "temperature": {
         "standard_names": ["sea_water_potential_temperature", "sea_water_temperature"],
@@ -174,6 +182,10 @@ VARIABLES_ALIASES = {
         "standard_names": ["sea_ice_area_fraction"],
         "aliases": ["siconc", "sea_icea_area_fraction", "z"] # "z" used for siconc on AMSR2
     },
+    "n_points": {
+        "standard_names": ["n_points"],
+        "aliases": ["n_points", "N_POINTS", "points", "obs"],
+    },
 }
 
 GEO_STD_COORDS = {"lon": "lon", "lat": "lat", "depth": "depth", "time": "time"}
@@ -202,6 +214,8 @@ TARGET_DEPTH_VALS = [0.494025, 47.37369, 92.32607, 155.8507, 222.4752, 318.1274,
         453.9377, 541.0889, 643.5668, 763.3331, 902.3393, 1245.291, 1684.284, 
         2225.078, 3220.82, 3597.032, 3992.484, 4405.224, 4833.291, 5274.784]
 
+TARGET_DEPTH_VALS_SURFACE = [0.494025]
+
 GLONET_TIME_VALS = range(0, 10)
 
 TARGET_DIM_RANGES = {
@@ -211,18 +225,22 @@ TARGET_DIM_RANGES = {
     #"time": GLONET_TIME_VALS,
 }
 
-GLONET_ENCODING = {
-    "depth": {"dtype": "float32"},
-    "lat": {"dtype": "float64"},
-    "lon": {"dtype": "float64"},
-    "time": {"dtype": "str"},
-    "so": {"dtype": "float32"},
-    "thetao": {"dtype": "float32"},
-    "uo": {"dtype": "float32"},
-    "vo": {"dtype": "float32"},
-    "zos": {"dtype": "float32"},
+TARGET_DIM_RANGES_SURFACE = {
+    "lat": np.arange(-78, 90, 0.25),
+    "lon": np.arange(-180, 180, 0.25),
+    "depth": TARGET_DEPTH_VALS_SURFACE,
+    #"time": GLONET_TIME_VALS,
 }
 
+'''GLONET_ENCODING = {"depth": {"dtype": "float32"},
+                   "lat": {"dtype": "float64"},
+                   "lon": {"dtype": "float64"},
+                   "time": {"dtype": "str"},
+                   "so": {"dtype": "float32"},
+                   "thetao": {"dtype": "float32"},
+                   "uo": {"dtype": "float32"},
+                   "vo": {"dtype": "float32"},
+                   "zos": {"dtype": "float32"},'''
 
 def get_standardized_var_name(name: str):
 
@@ -381,6 +399,9 @@ class CoordinateSystem:
                 for alias in COORD_ALIASES[key]:
                     if alias.lower() in var_names_lower:
                         standardized[key] = var_names_lower[alias.lower()]
+
+        # dims = set(ds.dims)
+        # has_depth_dim = "depth" in standardized and standardized["depth"] in dims
 
         has_lat = "lat" in standardized
         has_lon = "lon" in standardized

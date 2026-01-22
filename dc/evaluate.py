@@ -53,7 +53,6 @@ def main() -> int:
     except SystemExit:
         # SystemExit is raised when the user calls sys.exit()
         # or when an error occurs in the argument parsing
-        # raise Exception("SystemExit.")
         print("SystemExit.")
         return 1
 

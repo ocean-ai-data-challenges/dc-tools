@@ -1,9 +1,11 @@
 
-
 from typing import Any, Dict, List, Optional
 
 import ast
 from loguru import logger
+from memory_profiler import profile
+import dask
+import dask.array as da
 import numpy as np
 from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
@@ -36,11 +38,69 @@ def detect_and_normalize_longitude_system(
     # Vérifier que la coordonnée longitude existe
     if lon_name not in ds.dims and lon_name not in ds.coords and lon_name not in ds.data_vars:
         logger.warning(f"Longitude coordinate '{lon_name}' not found in dataset")
+        from dctools.utilities.xarray_utils import preview_display_dataset
+        preview_display_dataset(ds)
         return ds
     
-    # Analyser les plages de longitude
-    lon_vals = ds[lon_name].values
-    lon_min, lon_max = float(np.nanmin(lon_vals)), float(np.nanmax(lon_vals))
+    # Analyser les plages de longitude avec optimisation mémoire et lazy loading
+    
+    # 1. Tenter d'utiliser les attributs (très rapide)
+    attrs = ds[lon_name].attrs
+    if "valid_min" in attrs and "valid_max" in attrs:
+        lon_min = float(attrs["valid_min"])
+        lon_max = float(attrs["valid_max"])
+    else:
+        # 2. Si dask array, optimiser la réduction
+        da_lon = ds[lon_name]
+        is_dask = hasattr(da_lon.data, "dask")
+        
+        if is_dask:
+            # Pour détecter le système, un sous-échantillonnage suffit souvent
+            # Cela réduit considérablement la charge sur les workers dask
+            if da_lon.size > 100_000:
+                # Strategy: Sample beginning, middle, and end of the dataset
+                # This catches the range in most cases (tracks or grids) without
+                # reading all chunks (unlike simple striding).
+                
+                # Ensure we handle 1D and nD cases reasonably
+                main_dim = da_lon.dims[0]
+                dim_size = da_lon.sizes[main_dim]
+                
+                # Define block size
+                block = min(dim_size, 500)
+                
+                parts = []
+                # Start
+                parts.append(da_lon.isel({main_dim: slice(0, block)}).data.flatten())
+                
+                # Middle (if distinct)
+                mid = dim_size // 2
+                if mid > block:
+                    parts.append(da_lon.isel({main_dim: slice(mid, mid + block)}).data.flatten())
+                
+                # End (if distinct)
+                if dim_size > 2 * block:
+                     parts.append(da_lon.isel({main_dim: slice(dim_size - block, dim_size)}).data.flatten())
+                
+                # Concatenate samples to form the subset
+                da_lon_subset = da.concatenate(parts)
+            else:
+                da_lon_subset = da_lon.data
+                
+            # Calculer min et max en une seule passe graphe dask
+            # Use dask.nanmin/nanmax which are lazy and handle NaNs correctly for dask arrays
+            min_lazy = da.nanmin(da_lon_subset)
+            max_lazy = da.nanmax(da_lon_subset)
+            
+            # Un seul compute pour les deux
+            lon_min, lon_max = dask.compute(min_lazy, max_lazy)
+            
+            lon_min = float(lon_min.item())
+            lon_max = float(lon_max.item())
+        else:
+            # NumPy array standard - calcul immédiat
+            lon_min = float(da_lon.min(skipna=True).values)
+            lon_max = float(da_lon.max(skipna=True).values)
 
     # Détecter le système de coordonnées
     lon_system = _detect_longitude_system(lon_min, lon_max)
@@ -89,10 +149,7 @@ def _convert_longitude_to_180(ds: xr.Dataset, lon_name: str) -> xr.Dataset:
     Returns:
         xr.Dataset: Dataset avec longitudes normalisées
     """
-    # Créer une copie du dataset pour éviter de modifier l'original
     ds_work = ds.copy(deep=True)
-    
-    # Obtenir les longitudes
     lon_data = ds_work[lon_name]
     
     # Conversion : lon > 180 devient lon - 360
@@ -219,14 +276,35 @@ class ToTimestampTransform:
         Convert the time coordinate to a timestamp.
         """
         for time_name in self.time_names:
-            time_values = data[time_name].values
+            if time_name not in data:
+                continue
+                
+            # Quick check on dtype to avoid loading data
+            if np.issubdtype(data[time_name].dtype, np.datetime64):
+                continue
 
-            # Vérifier si les valeurs sont déjà des pandas.Timestamp
-            are_timestamps = isinstance(time_values[0], pd.Timestamp)
+            # If not visibly datetime, check first element lazily
+            # This avoids loading the whole array just to check type
+            try:
+                if hasattr(data[time_name].data, "map_blocks"): # Is it a Dask array?
+                    # Compute just the first value
+                    first_val = data[time_name].isel({d:0 for d in data[time_name].dims}).compute().item()
+                else:
+                    first_val = data[time_name].values.flat[0]
+                
+                if isinstance(first_val, (pd.Timestamp, np.datetime64)):
+                    continue
+            except Exception:
+                pass
 
-            if not are_timestamps:
-                # Convertir toutes les valeurs en pandas.Timestamp
-                data[time_name] = pd.to_datetime(data[time_name].values)
+
+            try:
+                # If we really must convert, explicit load (unavoidable for pd.to_datetime usually)
+                # But we can check if we can defer it or map_blocks it
+                 data[time_name] = pd.to_datetime(data[time_name].values)
+            except Exception as e:
+                logger.warning(f"Could not convert {time_name} to datetime: {e}")
+
         return data
 
 
@@ -246,18 +324,21 @@ class WrapLongitudeTransform:
         # Récupère la DataArray des longitudes
         lon = ds[self.lon_name]
         # Applique la conversion
+        # Lazy operation compatible with Dask
         lon_wrapped = ((lon + 180) % 360) - 180
 
-        # Trie les longitudes et réindexe le dataset pour garder l'ordre croissant
-        order = np.argsort(lon_wrapped)
-        lon_wrapped_sorted = lon_wrapped[order]
-
-        # Remplace la coordonnée longitude
-        ds = ds.assign_coords({self.lon_name: lon_wrapped_sorted})
-
-        # Réindexe le dataset si la longitude est une dimension
+        # On remplace la coordonnée longitude
+        # Note: on ne trie QUE si la longitude est une dimension d'indexation (grille)
+        # Si c'est une coordonnée 2D (swath) ou une coordonnée de points, trier casserait la correspondance !
+        
         if self.lon_name in ds.dims:
+            # C'est une dimension : on assigne et on trie pour garder une grille valide
+            ds = ds.assign_coords({self.lon_name: lon_wrapped})
             ds = ds.sortby(self.lon_name)
+        else:
+             # Ce n'est pas une dimension (ex: swath along 'n_points')
+             # On assigne juste les valeurs wrappées, SANS trier
+             ds = ds.assign_coords({self.lon_name: lon_wrapped})
 
         return ds
 
@@ -324,6 +405,19 @@ class SubsetCoordTransform:
                 return data
         return transf_dataset
 
+class ToSurfaceTransform:
+    """
+    Réduit la dimension 'depth' à sa première valeur (la plus proche de la surface).
+    """
+    def __init__(self, depth_coord_name: str = "depth"):
+        self.depth_coord_name = depth_coord_name
+
+    def __call__(self, ds: xr.Dataset):
+        if self.depth_coord_name in ds.dims:
+            # Sélectionne la première valeur de la dimension depth en gardant la dimension
+            surface_ds = ds.isel({self.depth_coord_name: slice(0, 1)})
+            return surface_ds
+        return ds
 
 class StdPercentageTransform:
     """
@@ -435,6 +529,10 @@ class CustomTransforms:
                 )
             case "to_epsg3413":
                 return self.transform_to_epsg3413(
+                    dataset
+                )
+            case "standardize_to_surface":
+                return self.transform_standardize_to_surface(
                     dataset
                 )
             case _:
@@ -572,4 +670,39 @@ class CustomTransforms:
 
         # Add x and y as coordinates to the dataset
         transf_dataset = dataset.assign_coords(x=("n_points", x), y=("n_points", y))
+        return transf_dataset
+
+
+    def transform_standardize_to_surface(
+        self,
+        dataset: xr.Dataset,
+    ) -> xr.Dataset:
+        """
+        Applique la standardisation puis réduit à la surface (première valeur de depth).
+        """
+        assert(hasattr(self, "coords_rename_dict") and hasattr(self, "vars_rename_dict"))
+        assert(hasattr(self, "list_vars"))
+        depth_coord_name = self.depth_coord_name if hasattr(self, "depth_coord_name") else "depth"
+
+        # Convert string representations of dictionaries to actual dictionaries
+        if isinstance(self.coords_rename_dict, str):
+            coords_rename_dict = ast.literal_eval(self.coords_rename_dict)
+        else:
+            coords_rename_dict = self.coords_rename_dict
+        if isinstance(self.vars_rename_dict, str):
+            vars_rename_dict = ast.literal_eval(self.vars_rename_dict)
+        else:
+            vars_rename_dict = self.vars_rename_dict
+
+        transform = transforms.Compose([
+            SelectVariablesTransform(self.list_vars),
+            RenameCoordsVarsTransform(
+                coords_rename_dict=coords_rename_dict,
+                vars_rename_dict=vars_rename_dict,
+            ),
+            StdLongitudeTransform(),
+            ToSurfaceTransform(depth_coord_name=depth_coord_name),
+        ])
+
+        transf_dataset = transform(dataset)
         return transf_dataset

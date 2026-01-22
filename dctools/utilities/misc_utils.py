@@ -4,6 +4,7 @@
 
 import os
 import pickle
+import traceback
 import psutil
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
@@ -11,13 +12,19 @@ from typing import Any, Dict, List, Optional, Union
 import copy
 from cartopy import crs as ccrs
 from dask.distributed import get_worker, get_client
+import datetime
+import dill
 import geopandas as gpd
+import json
+from loguru import logger
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from shapely.geometry import mapping, base as shapely_base
 import xarray as xr
 
+from collections import deque
+from datetime import datetime, date, time, timedelta
 from dask.distributed import get_worker
 import os
 
@@ -103,10 +110,20 @@ def transform_in_place(obj, func):
 def make_serializable(obj):
     if isinstance(obj, pd.Timestamp):
         return obj.isoformat()
-    if isinstance(obj, pd.DataFrame) or isinstance(obj, gpd.GeoDataFrame):
+    if isinstance(obj, pd.DataFrame):
+        return obj.to_dict(orient="records")
+    if isinstance(obj, gpd.GeoDataFrame):
         return obj.to_json()
     if isinstance(obj, np.ndarray):
         return obj.tolist()
+    if isinstance(obj, (np.generic,)):
+        return obj.item()
+    if isinstance(obj, xr.Dataset) or isinstance(obj, xr.DataArray):
+        return obj.to_dict()
+    if isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [make_serializable(v) for v in obj]
     return obj
 
 def make_timestamps_serializable(gdf: pd.DataFrame) -> pd.DataFrame:
@@ -131,87 +148,277 @@ def _replace_nan_in_nested_list(obj):
     else:
         return obj
 
-def make_fully_serializable(obj):
-    # Gestion des valeurs NaN
-    if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
-        if np.isnan(obj):
-            return None  # ou "NaN" si vous préférez garder l'information
-        elif np.isposinf(obj):
-            return "Infinity"
-        elif np.isneginf(obj):
-            return "-Infinity"
-    
-    # Types de base
-    if obj is None or isinstance(obj, (str, int, float, bool)):
+
+
+def serialize_optimized(obj):
+    """
+    Convert object to JSON-serializable form efficiently for large structures.
+
+    Handles:
+        - dict
+        - list, tuple, set
+        - np.ndarray
+        - pandas.Timestamp
+        - pandas.Interval
+        - pandas.DataFrame (converted to records)
+        - pandas.Series
+        - basic scalars
+    """
+    # Basic types
+    if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
-    
-    # Numpy types
-    if isinstance(obj, (np.integer, np.floating)):
-        value = obj.item()
-        # Vérifier si la valeur extraite est NaN ou infinie
-        if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
-            if np.isnan(value):
-                return None
-            elif np.isposinf(value):
-                return "Infinity"
-            elif np.isneginf(value):
-                return "-Infinity"
-        return value
-    
+
+    # numpy scalar
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    # numpy array
     if isinstance(obj, np.ndarray):
-        # Gérer les NaN dans les arrays numpy
-        if obj.dtype.kind in ['f', 'c']:  # float ou complex
-            # Remplacer NaN par None et inf par des strings
-            result = obj.tolist()
-            return _replace_nan_in_nested_list(result)
-        return obj.tolist()
-    
-    # Pandas Timestamp/Timedelta avec gestion des NaT
+        if obj.shape == ():  # scalar
+            return obj.item()
+        else:
+            return obj.tolist()  # avoid recursion for performance
+
+    # pandas Timestamp
     if isinstance(obj, pd.Timestamp):
         if pd.isna(obj):
             return None
         return obj.isoformat()
-    if isinstance(obj, pd.Timedelta):
-        if pd.isna(obj):
-            return None
-        return str(obj)
-    
-    # Pandas DataFrame/Series
+
+    # pandas Interval
+    if isinstance(obj, pd.Interval):
+        return {"left": obj.left, "right": obj.right, "closed": obj.closed}
+
+    # pandas DataFrame
     if isinstance(obj, pd.DataFrame):
-        # Remplacer NaN par None avant conversion
-        df_clean = obj.where(pd.notnull(obj), None)
-        return df_clean.to_dict(orient="records")
+        # convert each row to dict but process columns recursively
+        records = []
+        for row in obj.itertuples(index=False, name=None):
+            row_dict = {col: serialize_optimized(val) for col, val in zip(obj.columns, row)}
+            records.append(row_dict)
+        return records
+
+    # pandas Series
     if isinstance(obj, pd.Series):
-        # Remplacer NaN par None
-        series_clean = obj.where(pd.notnull(obj), None)
-        return series_clean.tolist()
-    
-    # xarray Dataset/DataArray
-    if isinstance(obj, (xr.Dataset, xr.DataArray)):
-        return obj.to_dict()
-    
-    # Shapely geometry
-    if isinstance(obj, shapely_base.BaseGeometry):
-        return mapping(obj)
-    
-    # Dataclasses
-    if hasattr(obj, "__dataclass_fields__"):
-        return {k: make_fully_serializable(v) for k, v in obj.__dict__.items()}
-    
-    # Classes avec __dict__
-    if hasattr(obj, "__dict__"):
-        return {k: make_fully_serializable(v) for k, v in obj.__dict__.items() if not k.startswith("_")}
-    
-    # Mapping (dict-like)
+        return [serialize_optimized(x) for x in obj.tolist()]
+
+    # dict
     if isinstance(obj, dict):
-        return {make_fully_serializable(k): make_fully_serializable(v) for k, v in obj.items()}
-    
-    # Iterable (list, tuple, set)
+        return {k: serialize_optimized(v) for k, v in obj.items()}
+
+    # list / tuple / set
     if isinstance(obj, (list, tuple, set)):
-        return [make_fully_serializable(v) for v in obj]
-    
-    # Fallback: string representation
+        return [serialize_optimized(x) for x in obj]
+
+    # fallback: convert unknown object to string
     return str(obj)
+
+
+def serialize_structure(obj):
+    """
+    Serialize a complex object into JSON and save to file.
+    """
+    serializable_obj = serialize_optimized(obj)
+    return serializable_obj
+
+
+def _safe_repr(x, maxlen=120):
+    try:
+        s = repr(x)
+    except Exception:
+        s = str(type(x))
+    if len(s) > maxlen:
+        return s[:maxlen-3] + "..."
+    return s
+
+def to_float32(obj: Any) -> Any:
+    """Recursively converts all float64 data to float32 in xarray objects or dicts."""
+    if isinstance(obj, (xr.Dataset, xr.DataArray)):
+        return obj.astype("float32")
+    elif isinstance(obj, dict):
+        return {k: to_float32(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [to_float32(v) for v in obj]
+    return obj
+
+
+def print_structure_types(
+    obj,
+    indent: int = 0,
+    max_depth: int = 6,
+    max_items: int = 10,
+    show_values: bool = False,
+    follow_attrs: bool = False,
+    visited: set = None,
+):
+    """
+    Print hierarchically the types contained in `obj` with some metadata.
+
+    Parameters
+    ----------
+    obj:
+        Any Python object to inspect.
+    indent:
+        Current indentation level (used internally for recursion).
+    max_depth:
+        Maximum recursion depth.
+    max_items:
+        Max items to display per container (dict/list/array).
+    show_values:
+        If True, show small values for scalars/strings.
+    follow_attrs:
+        If True, explore object.__dict__ for arbitrary objects (dangerous for pandas).
+    visited:
+        Internal: set of visited object ids to avoid infinite recursion.
+    """
+    prefix = "  " * indent
+    if visited is None:
+        visited = set()
+
+    oid = id(obj)
+    if oid in visited:
+        print(f"{prefix}- <CYCLE detected: {type(obj)}> (id={oid})")
+        return
+    visited.add(oid)
+
+    t = type(obj)
+    # Simple scalars
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        val = _safe_repr(obj) if show_values else ""
+        print(f"{prefix}- {t} {val}")
+        return
+
+    # Numpy generic scalar
+    if isinstance(obj, np.generic):
+        try:
+            val = obj.item()
+        except Exception:
+            val = str(obj)
+        val_str = f": {_safe_repr(val)}" if show_values else ""
+        print(f"{prefix}- numpy scalar {obj.dtype}{val_str}")
+        return
+
+    # Numpy array (including object arrays)
+    if isinstance(obj, np.ndarray):
+        dtype = getattr(obj, "dtype", None)
+        shape = getattr(obj, "shape", None)
+        print(f"{prefix}- numpy.ndarray dtype={dtype} shape={shape}")
+        if obj.shape == ():  # scalar ndarray
+            try:
+                sval = obj.item()
+            except Exception:
+                sval = None
+            if show_values:
+                print(f"{prefix}  scalar value: {_safe_repr(sval)}")
+            return
+        # For non-scalar arrays, show a few items (flattened)
+        flat = obj.flat
+        n = min(max_items, obj.size)
+        for i, x in enumerate(flat):
+            if i >= n:
+                print(f"{prefix}  ... ({obj.size - n} more elements)")
+                break
+            print(f"{prefix}  index {i}:")
+            print_structure_types(x, indent + 2, max_depth, max_items, show_values, follow_attrs, visited)
+        return
+
+    # pandas Timestamp / Timedelta / Interval
+    if isinstance(obj, (pd.Timestamp, np.datetime64)):
+        print(f"{prefix}- pandas.Timestamp: {str(pd.to_datetime(obj))}")
+        return
+    if isinstance(obj, pd.Timedelta):
+        print(f"{prefix}- pandas.Timedelta: {str(obj)}")
+        return
+    if isinstance(obj, pd.Interval):
+        print(f"{prefix}- pandas.Interval left={_safe_repr(obj.left)} right={_safe_repr(obj.right)} closed={obj.closed}")
+        return
+
+    # Pandas DataFrame / Series
+    if isinstance(obj, pd.DataFrame):
+        print(f"{prefix}- pandas.DataFrame shape={obj.shape}")
+        # show columns and dtypes
+        for col in obj.columns[:max_items]:
+            print(f"{prefix}  column: {col!r} dtype={obj[col].dtype}")
+        if obj.shape[0] > 0 and max_items > 0:
+            sample = obj.head(3).to_dict(orient="records")
+            print(f"{prefix}  sample (up to 3 rows):")
+            for row in sample:
+                print(f"{prefix}    {_safe_repr(row, 200)}")
+        return
+    if isinstance(obj, pd.Series):
+        print(f"{prefix}- pandas.Series dtype={obj.dtype} length={len(obj)}")
+        if show_values:
+            print(f"{prefix}  head: {_safe_repr(list(obj.head(5)), 200)}")
+        return
+
+    # xarray
+    if isinstance(obj, xr.Dataset):
+        print(f"{prefix}- xarray.Dataset dims={dict(obj.dims)}")
+        # list variables
+        vars_list = list(obj.data_vars)[:max_items]
+        print(f"{prefix}  data_vars: {vars_list} (+{max(0, len(obj.data_vars)-len(vars_list))} more)")
+        return
+    if isinstance(obj, xr.DataArray):
+        print(f"{prefix}- xarray.DataArray dims={obj.dims} shape={obj.shape}")
+        return
+
+    # dict
+    if isinstance(obj, dict):
+        n = len(obj)
+        print(f"{prefix}- dict len={n}")
+        for i, (k, v) in enumerate(obj.items()):
+            if i >= max_items:
+                print(f"{prefix}  ... ({n - max_items} more keys)")
+                break
+            print(f"{prefix}  key: {k!r} (type={type(k)})")
+            if indent + 1 >= max_depth:
+                print(f"{prefix}    - max depth reached")
+            else:
+                print_structure_types(v, indent + 2, max_depth, max_items, show_values, follow_attrs, visited)
+        return
+
+    # list/tuple/set/deque
+    if isinstance(obj, (list, tuple, set, frozenset, deque)):
+        n = len(obj)
+        print(f"{prefix}- {t.__name__} len={n}")
+        for i, item in enumerate(list(obj)[:max_items]):
+            print(f"{prefix}  index {i}:")
+            if indent + 1 >= max_depth:
+                print(f"{prefix}    - max depth reached")
+            else:
+                print_structure_types(item, indent + 2, max_depth, max_items, show_values, follow_attrs, visited)
+        if n > max_items:
+            print(f"{prefix}  ... ({n - max_items} more elements)")
+        return
+
+    # pathlib.Path, datetime.date/time
+    if isinstance(obj, (datetime, date, time)):
+        print(f"{prefix}- {type(obj).__name__} {str(obj)}")
+        return
+
+    # bytes / bytearray
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        print(f"{prefix}- {type(obj).__name__} len={len(obj)} repr={_safe_repr(obj, 80)}")
+        return
+
+    # Generic object: optionally follow __dict__ if requested
+    print(f"{prefix}- {t} (generic object)")
+    if follow_attrs and hasattr(obj, "__dict__"):
+        attrs = {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+        if not attrs:
+            print(f"{prefix}  (no public attrs or all private - skip)")
+            return
+        print(f"{prefix}  public attrs: {list(attrs.keys())}")
+        for k, v in attrs.items():
+            print(f"{prefix}    attr: {k}")
+            if indent + 1 >= max_depth:
+                print(f"{prefix}      - max depth reached")
+            else:
+                print_structure_types(v, indent + 3, max_depth, max_items, show_values, follow_attrs, visited)
+    else:
+        # try to print small repr
+        print(f"{prefix}  repr: {_safe_repr(obj, 200)}")
+
 
 def add_noise_with_snr(signal: np.ndarray, snr_db: float, seed: int = None) -> np.ndarray:
     """
@@ -246,9 +453,15 @@ def add_noise_with_snr(signal: np.ndarray, snr_db: float, seed: int = None) -> n
 def nan_to_none(obj):
     if isinstance(obj, float) and np.isnan(obj):
         return None
+    if isinstance(obj, float) and (pd.isna(obj) or obj != obj):
+        return None
     if isinstance(obj, pd.Interval):
         # Convertit en string ou tuple
         return str(obj)  # ou (obj.left, obj.right)
+    if isinstance(obj, pd.Timestamp) and pd.isna(obj):
+        return None
+    if isinstance(obj, pd.NaT.__class__):  # Pour NaTType
+        return None
     if isinstance(obj, dict):
         return {k: nan_to_none(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -446,7 +659,7 @@ def show_worker_info():
         return f"Not in worker (PID: {os.getpid()})"
 
 
-def find_unpicklable_objects(obj, path="root", max_depth=5, visited=None):
+def find_unpicklable_objects(obj, path="root", max_depth=15, visited=None):
     """
     Explore récursivement un objet et affiche les sous-objets non picklables avec leur chemin.
     """
@@ -477,3 +690,27 @@ def find_unpicklable_objects(obj, path="root", max_depth=5, visited=None):
             for k in obj.__slots__:
                 v = getattr(obj, k, None)
                 find_unpicklable_objects(v, f"{path}.{k}", max_depth-1, visited)
+
+
+def list_all_days(
+        start_date: datetime,
+        end_date: datetime
+    ) -> list[datetime]:
+    """
+    Return a list of datetime.datetime objects for each day between start_date and end_date (inclusive).
+
+    Parameters:
+        start_date (datetime): The start of the range.
+        end_date (datetime): The end of the range.
+
+    Returns:
+        List[datetime]: List of dates at 00:00:00 for each day in the range.
+    """
+    if start_date > end_date:
+        raise ValueError("start_date must be before or equal to end_date.")
+
+    start = datetime.combine(start_date.date(), datetime.min.time())
+    end = datetime.combine(end_date.date(), datetime.min.time())
+
+    n_days = (end - start).days + 1
+    return [start + timedelta(days=i) for i in range(n_days)]

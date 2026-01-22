@@ -4,6 +4,7 @@ from pathlib import Path
 import traceback
 from typing import Dict, Optional, Sequence
 
+import dask
 import numpy as np
 import xarray as xr
 import xesmf as xe
@@ -18,8 +19,6 @@ from dctools.data.coordinates import (
 from dctools.utilities.xarray_utils import rename_coords_and_vars, create_empty_dataset
 
 
-
-
 def interpolate_scipy(
     ds: xr.Dataset,
     target_grid: Dict[str, Sequence],
@@ -28,7 +27,7 @@ def interpolate_scipy(
     lat_name: str = "latitude",
     lon_name: str = "longitude",
     tol_depth: float = 1e-3,
-    output_mode: str = "zarr",  # 'zarr'|'lazy'|'inmemory'
+    output_mode: str = "lazy",  # 'zarr'|'lazy'|'inmemory'
     output_path: str = None,
     zarr_target_chunks: dict = None,
 ) -> xr.Dataset:
@@ -75,19 +74,48 @@ def interpolate_scipy(
     if var_names is None:
         var_names = [v for v, da in ds.data_vars.items() if lat_name in da.dims and lon_name in da.dims]
 
-    lat_src = np.asarray(ds[lat_name])
-    lon_src = np.asarray(ds[lon_name])
+    ds_subset = ds[var_names]
 
-    out_vars = apply_over_time_depth(
-        ds, var_names, depth_name, lat_name, lon_name,
-        lat_src, lon_src, tgt_lat, tgt_lon,
-        tol_depth=tol_depth,
-    )
+    # Use xarray lazy interpolation instead of eager scipy loop
+    # This prevents loading the entire dataset into memory when iterating over time steps
+    try:
+        # Optimisation critique pour Dask : 
+        # Si assume_sorted=True, xarray.interp évite des tris coûteux sur les coords dask
+        # On vérifie si les coords source sont monotones (rapide car 1D)
+        
+        # On ne vérifie pas la monotonicité en chargeant tout.
+        # On suppose que les données grilles sources sont correctement formatées.
+        
+        # Construction de l'appel lazy
+        ds_out = ds_subset.interp(
+            {lat_name: tgt_lat, lon_name: tgt_lon},
+            method="linear", 
+            kwargs={"fill_value": np.nan},
+            assume_sorted=True  # Important pour la RAM/CPU avec Dask
+        )
+        
+        # L'appel à .interp() génère un graphe Dask potentiellement complexe.
+        # Si target_grid est petit, tout va bien.
+        
+    except Exception as e:
+        logger.warning(f"Lazy interpolation failed: {e}. Falling back to eager.")
+        # Fallback to original logic if needed
+        # Ce fallback charge tout en mémoire via .values, ce qui cause le OOM
+        # On ne devrait l'utiliser que si l'erreur n'est pas liée à la mémoire
+        
+        # Pour éviter le crash OOM dans le fallback, on peut essayer par blocs
+        # mais pour l'instant on garde le fallback standard (dangereux)
+        lat_src = np.asarray(ds[lat_name])
+        lon_src = np.asarray(ds[lon_name])
 
-    if len(out_vars) == 0:
-        raise RuntimeError("No metrics computed.")
-
-    ds_out = xr.Dataset(out_vars)
+        out_vars = apply_over_time_depth(
+            ds, var_names, depth_name, lat_name, lon_name,
+            lat_src, lon_src, tgt_lat, tgt_lon,
+            tol_depth=tol_depth,
+        )
+        if len(out_vars) == 0:
+            raise RuntimeError("No metrics computed.")
+        ds_out = xr.Dataset(out_vars)
 
     # writing / returning according to mode
     if output_mode == "zarr":
@@ -180,7 +208,9 @@ def apply_over_time_depth(
         time_slices_out = []
         for t in (ds.time.values if has_time else [None]):
             depth_slices_out = []
-            for z in (ds[depth_name].values if has_depth else [None]):
+            subset_vals = ds[depth_name].values
+            for z in subset_vals:
+            #for z in (ds[depth_name].values if has_depth else [None]):
                 # Sélection
                 sel_kwargs = {}
                 if t is not None:
@@ -266,23 +296,40 @@ def interpolate_dataset(
     for dim in GEO_STD_COORDS.keys():
         if dim not in out_dict.keys():
             out_dict[dim] = ds.coords.get(dim, ds.sizes.get(dim))
+
+    # Filtrer seulement les dimensions qui existent dans le dataset
+    # ranges = {k: v for k, v in target_grid.items() if k in ds.sizes}
+
+    # Choisir la méthode d'interpolation
+    '''if interpolation_lib == 'scipy':
+        method = kwargs.get('method', 'linear')
+        ds_out = interpolate_scipy_optimized(ds, target_grid, method)'''
     
-    if interpolation_lib == 'pyinterp':
+    if interpolation_lib == 'scipy' or interpolation_lib == 'pyinterp':
+        # ds_out = interpolate_dataset_time_depth_vars(ds, target_grid)
 
         ds_renamed, coord_mapping = rename_to_standard_pyinterp(ds, 'lat', 'lon')
         if dataset_processor is not None:
             ds_renamed = dataset_processor.apply_single(
                 ds_renamed, scipy_bilinear,
                 target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
-                output_mode="zarr",
+                output_mode="lazy",
             )
         else:
             ds_renamed = interpolate_scipy(
                 ds_renamed,
                 target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
-                output_mode="zarr",
+                output_mode="lazy",
             )
         ds_interp = rename_back(ds, ds_renamed, coord_mapping)
+
+    elif interpolation_lib == "xesmf":
+        ds_interp = interpolate_xesmf(
+            ds,
+            target_grid=out_dict,
+            weights_filepath=weights_filepath,
+            method="bilinear",
+        )
     else:
         raise ValueError(f"Unknown interpolation library: {interpolation_lib}")
         
@@ -353,7 +400,7 @@ def rename_to_standard_pyinterp(ds, lat_name, lon_name):
     if lon_name != 'longitude':
         coord_mapping[lon_name] = 'longitude'
 
-    # Appliquer le renommage si nécessaire
+    # Appliquer le renommage
     if len(coord_mapping) > 0:
         logger.debug(f"Renaming coordinates for pyinterp compatibility: {coord_mapping}")
         ds_renamed = rename_coords_and_vars(
@@ -397,74 +444,81 @@ def rename_back(orig_ds, renamed_ds, coord_mapping):
 
 
 def interpolate_xesmf(  # TODO : check and uncomment
-        ds: xr.Dataset, ranges: Dict[str, np.ndarray],
+        ds: xr.Dataset, target_grid: Dict[str, np.ndarray],
         weights_filepath: Optional[str] = None,
+        method: str = "bilinear",
     ) -> xr.Dataset:
 
-    for variable_name in ds.variables:
-        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
-        if not var_std_name:
-            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
+    # Sauvegarder les attributs des coordonnées et variables
+    coords_attrs = {coord: ds.coords[coord].attrs.copy() for coord in ds.coords}
+    vars_attrs = {var: ds[var].attrs.copy() for var in ds.data_vars}
 
-    # 1. Sauvegarder les attributs des coordonnées AVANT interpolation
-    coords_attrs = {}
-    for coord in ds.coords:
-        coords_attrs[coord] = ds.coords[coord].attrs.copy()
+    # Préparer la grille cible lat/lon
+    lat_out = target_grid["lat"]
+    lon_out = target_grid["lon"]
+    target_grid_ds = xr.Dataset({
+        "lat": ("lat", lat_out),
+        "lon": ("lon", lon_out)
+    })
 
-    # (optionnel) Sauvegarder aussi les attrs des variables si besoin
-    vars_attrs = {}
+    # Mécanisme de cache pour le regridder
+    regridder_cache = {}
+
+    def get_regridder(src, tgt, method, cache_key=None):
+        if cache_key and cache_key in regridder_cache:
+            return regridder_cache[cache_key]
+        with dask.config.set(scheduler="synchronous"):
+            regridder = xe.Regridder(src, tgt, method)
+        if cache_key:
+            regridder_cache[cache_key] = regridder
+        return regridder
+
+    out_vars = {}
     for var in ds.data_vars:
-        vars_attrs[var] = ds[var].attrs.copy()
+        da = ds[var]
+        # Boucle sur chaque profondeur
+        if "depth" in da.dims:
+            depth_vals = target_grid['depth']
+            slices = []
+            for d in depth_vals:
+                da_sel = da.sel(depth=d)
+                # Utilise la taille des grilles comme clé de cache
+                src_shape = tuple(da_sel["lat"].shape) + tuple(da_sel["lon"].shape)
+                tgt_shape = tuple(lat_out.shape) + tuple(lon_out.shape)
+                cache_key = (src_shape, tgt_shape, method)
+                regridder = get_regridder(da_sel, target_grid_ds, method, cache_key)
+                da_interp = regridder(da_sel)
+                # Ajoute la dimension depth
+                da_interp = da_interp.expand_dims({"depth": [d]})
+                slices.append(da_interp)
+            # Concatène sur la dimension depth
+            out_vars[var] = xr.concat(slices, dim="depth")
+        else:
+            src_shape = tuple(da["lat"].shape) + tuple(da["lon"].shape)
+            tgt_shape = tuple(lat_out.shape) + tuple(lon_out.shape)
+            cache_key = (src_shape, tgt_shape, method)
+            regridder = get_regridder(da, target_grid_ds, method, cache_key)
+            out_vars[var] = regridder(da)
 
-    for key in ranges.keys():
-        assert(key in list(ds.dims))
+    # Nettoyage explicite du cache regridder pour libérer les ressources ESMF
+    regridder_cache.clear()
 
-    out_dict = {}
-    for key in ranges.keys():
-        out_dict[key] = ranges[key]
-    for dim in GEO_STD_COORDS.keys():
-        if dim not in out_dict.keys():
-            out_dict[dim] = ds.coords[dim].values
-    ds_out = create_empty_dataset(out_dict)
+    # Construit le dataset final
+    ds_out = xr.Dataset(out_vars)
 
-    # TODO: adapt chunking depending on the dataset type
-    ds_out = ds_out.chunk(chunks={"lat": -1, "lon": -1, "time": 1})
-
-    if weights_filepath and Path(weights_filepath).is_file():
-        # Use precomputed weights
-        logger.debug(f"Using interpolation precomputed weights from {weights_filepath}")
-        regridder = xe.Regridder(
-            ds, ds_out, "bilinear", reuse_weights=True, filename=weights_filepath
-        )
-    else:
-        # Compute weights
-        regridder = xe.Regridder(
-            ds, ds_out, "bilinear"
-        )
-        # Save the weights to a file
-        regridder.to_netcdf(weights_filepath)
-    # Regrid the dataset
-    ds_out = regridder(ds)
-
-    # 2. Réaffecter les attributs des variables (déjà fait dans ton code)
+    # Réaffecter les attributs des variables
     for var in ds_out.data_vars:
         if var in vars_attrs:
             ds_out[var].attrs = vars_attrs[var].copy()
 
-    # 3. Réaffecter les attributs des coordonnées
+    # Réaffecter les attributs des coordonnées
     for coord in ds_out.coords:
         if coord in coords_attrs:
-            # Crée un nouveau DataArray avec les attrs sauvegardés
             new_coord = xr.DataArray(
                 ds_out.coords[coord].values,
                 dims=ds_out.coords[coord].dims,
                 attrs=coords_attrs[coord].copy()
             )
             ds_out = ds_out.assign_coords({coord: new_coord})
-
-    for variable_name in ds.variables:
-        var_std_name = ds[variable_name].attrs.get("standard_name",'').lower()
-        if not var_std_name:
-            var_std_name = ds[variable_name].attrs.get("std_name", '').lower()
 
     return ds_out
