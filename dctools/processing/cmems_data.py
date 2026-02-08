@@ -5,7 +5,7 @@
 
 import os
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Callable, Dict, Any
 
 from loguru import logger
 import xarray as xr
@@ -21,7 +21,7 @@ def create_glorys_ndays_forecast(
     list_nc_files: List[str],
     start_date: str,
     zarr_path: str,
-    transform_fct: Optional[callable],
+    transform_fct: Optional[Callable[[xr.Dataset], xr.Dataset]],
 ) -> xr.Dataset:
     """Create a forecast dataset from a list of CMEMS files.
 
@@ -35,36 +35,44 @@ def create_glorys_ndays_forecast(
     Returns:
         `glorys_data` (xr.Dataset): Glorys forecast dataset
     """
-
     logger.info(f"Concatenate {len(list_nc_files)} Glorys forecast files.")
     time_step = 0
     try:
         # concatenate downloaded files from CMEMS
         for fname in list_nc_files:
             fpath = os.path.join(nc_path, fname)
-            tmp_ds = FileLoader.lazy_load_dataset(fpath)
-            tmp_ds = transform_fct(tmp_ds)
-            tmp_ds = assign_coordinate(
-                tmp_ds, "time", coord_vals=[time_step],
-                coord_attrs=get_glonet_time_attrs(start_date)
-            )
-            assert tmp_ds is not None, f"Error while loading dataset: {tmp_ds}."
+            tmp_ds = FileLoader.open_dataset_auto(fpath) # replaced lazy_load_dataset
+            if tmp_ds and transform_fct:
+                tmp_ds = transform_fct(tmp_ds)
+
+            if tmp_ds is not None:
+                tmp_ds = assign_coordinate(
+                    tmp_ds, "time", coord_vals=[time_step],
+                    coord_attrs=get_glonet_time_attrs(start_date)
+                )
+
+            assert tmp_ds is not None, f"Error while loading dataset: {fpath}."
 
             if time_step == 0:
+                kwargs_w: Dict[str, Any] = {"file_format":"zarr", "mode":"w", "compute":True}
                 DataSaver.save_dataset(
                     tmp_ds, zarr_path,
-                    file_format="zarr", mode="w",
-                    compute=True,
+                    **kwargs_w,
                 )
             else:
+                kwargs_a: Dict[str, Any] = {
+                    "file_format":"zarr", "mode":"a",
+                    "append_dim":'time', "compute":True
+                }
                 DataSaver.save_dataset(
                     tmp_ds, zarr_path,
-                    file_format="zarr", mode="a", append_dim='time',
-                    compute=True,
+                    **kwargs_a,
                 )
             time_step += 1
 
-        glorys_data = FileLoader.lazy_load_dataset(zarr_path)
+        glorys_data = FileLoader.open_dataset_auto(zarr_path) # replaced lazy_load_dataset
+        if glorys_data is None:
+             raise ValueError("Failed to reload created Zarr dataset.")
 
     except Exception as err:
         logger.error(
@@ -87,7 +95,7 @@ def extract_dates_from_filename(filename: str) -> Optional[Tuple[str, str]]:
         Optional[Tuple[str, str]]: A tuple of (start_date, end_date) in 'YYYY-MM-DD' format,
                                    or None if no dates are found.
     """
-    # Regex pour extraire une plage de dates (YYYYMMDD-YYYYMMDD)
+    # Regex to extract a date range (YYYYMMDD-YYYYMMDD)
     match_range = re.search(r"(\d{8})-(\d{8})", filename)
     if match_range:
         start_date = match_range.group(1)
@@ -95,11 +103,14 @@ def extract_dates_from_filename(filename: str) -> Optional[Tuple[str, str]]:
         return start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:], \
                end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
 
-    # Regex pour extraire une seule date (YYYYMMDD)
+    # Regex to extract a single date (YYYYMMDD)
     match_single = re.search(r"(\d{8})", filename)
     if match_single:
         date = match_single.group(1)
-        return date[:4] + "-" + date[4:6] + "-" + date[6:], date[:4] + "-" + date[4:6] + "-" + date[6:]
+        return (
+            date[:4] + "-" + date[4:6] + "-" + date[6:],
+            date[:4] + "-" + date[4:6] + "-" + date[6:]
+        )
 
     return None
 

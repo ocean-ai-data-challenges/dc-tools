@@ -2,7 +2,7 @@
 # -*- coding: UTF-8 -*-
 
 """Classes and functions for saving xarray datasets."""
-from typing import Any, Dict
+from typing import Any
 
 from loguru import logger
 import xarray as xr
@@ -11,11 +11,12 @@ import zarr
 
 class DataSaver:
     """Saving datasets."""
+
     @staticmethod
     def save_dataset(
         ds: xr.Dataset,
         file_path: str,
-        **kwargs: Dict[str, Any]
+        **kwargs: Any
     ) -> None:
         """Save a dataset in a NetCDF file.
 
@@ -63,16 +64,25 @@ class DataSaver:
 
 
 def progressive_zarr_save(ds: xr.Dataset, zarr_path: str):
+    """
+    Save an xarray Dataset to Zarr format progressively (variable by variable).
+
+    This helps in reducing memory usage when saving large datasets.
+
+    Args:
+        ds (xr.Dataset): The dataset to save.
+        zarr_path (str): The path to the Zarr store.
+    """
     try:
-        # Créer le store Zarr (dossier ou fichier)
+        # Create Zarr store (directory or file)
         store = zarr.DirectoryStore(zarr_path)
 
-        # Écrire la première variable (crée le groupe)
+        # Write first variable (creates the group)
         first_var = list(ds.data_vars)[0]
         ds[[first_var]].to_zarr(store, mode="w", consolidated=False)
 
-        # Ajouter les autres variables une par une
+        # Add other variables one by one
         for var in list(ds.data_vars)[1:]:
             ds[[var]].to_zarr(store, mode="a", consolidated=False)
     except Exception as exc:
-        logger.error(f"Erreur lors de la sauvegarde progressive vers Zarr: {exc}")
+        logger.error(f"Error during progressive save to Zarr: {exc}")

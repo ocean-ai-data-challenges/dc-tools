@@ -1,6 +1,6 @@
 networks:
   app-net: null
-  
+
 services:
   debug_app:
     build:

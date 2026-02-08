@@ -3,7 +3,7 @@
 """Read config files and parse command-line arguments."""
 
 from argparse import ArgumentParser, Namespace
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 import torch
@@ -20,7 +20,11 @@ TIME_VARIABLES = [
 
 LOGGER_CONFIG = {
     'log_level': "DEBUG",
-    'log_format': "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | <level>{level: <8}</level> | <yellow>Line {line: >4} ({file}):</yellow> <b>{message}</b>"
+    'log_format': (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | "
+        "<level>{level: <8}</level> | "
+        "<yellow>Line {line: >4} ({file}):</yellow> <b>{message}</b>"
+    )
 }
 
 def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
@@ -63,7 +67,7 @@ def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
 
 def load_configs(
     config_filepath: str
-) -> Dict:
+) -> Dict[str, Any]:
     """Load configuration from yaml file.
 
     Args:
@@ -77,7 +81,7 @@ def load_configs(
     """
     try:
         with open(config_filepath, 'r') as fp:
-            config = yaml.safe_load(fp)
+            config: Dict[str, Any] = yaml.safe_load(fp)
     except Exception as err:
         logger.error(
             f"Error while loading config from {config_filepath}: {repr(err)}"
@@ -97,7 +101,6 @@ def load_args_and_config(
     Returns:
         args(Namespace): a Namespace with variables from config file and command-line.
     """
-
     if args is None:
         args = parse_arguments()
 

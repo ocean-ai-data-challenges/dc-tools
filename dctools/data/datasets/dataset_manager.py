@@ -1,3 +1,4 @@
+"""Dataset management and orchestration."""
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -7,7 +8,6 @@ import geopandas as gpd
 from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
 import pandas as pd
-from torchvision import transforms
 import xarray as xr
 
 from dctools.data.coordinates import (
@@ -15,115 +15,118 @@ from dctools.data.coordinates import (
 )
 from dctools.data.datasets.dataset import BaseDataset
 from dctools.data.datasets.forecast import build_forecast_index_from_catalog
-from dctools.data.transforms import CustomTransforms
+from dctools.data.transforms import CustomTransforms, get_dataset_transform
 from dctools.data.datasets.dc_catalog import DatasetCatalog
 from dctools.data.datasets.dataloader import EvaluationDataloader
 from dctools.utilities.file_utils import FileCacheManager
 
 class MultiSourceDatasetManager:
+    """Manager for handling multiple data sources with common processing operations."""
 
     def __init__(
         self,
         dataset_processor: DatasetProcessor,
         target_dimensions: Dict[str, Tuple[float, float]],
-        time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
-        list_references: list[str] = [],
+        time_tolerance: Optional[pd.Timedelta] = None,
+        list_references: Optional[list[str]] = None,
         max_cache_files: int = 100,
     ):
-        """
-        Initialise le gestionnaire multi-sources.
-        """
+        """Initializes the multi-source manager."""
         self.dataset_processor = dataset_processor
         self.target_dimensions = target_dimensions
-        self.datasets = {}
-        self.forecast_indexes = {}
-        self.time_tolerance = time_tolerance
-        self.list_references = list_references
+        self.datasets: Dict[str, BaseDataset] = {}
+        self.forecast_indexes: Dict[str, pd.DataFrame] = {}
+        self.time_tolerance = time_tolerance if time_tolerance is not None else pd.Timedelta("12h")
+        self.list_references = list_references if list_references is not None else []
         self.file_cache = FileCacheManager(max_cache_files)
 
     def get_keep_variables_dict(self):
-        keep_vars = {}
+        """Get dictionary of variables to keep for each dataset."""
+        keep_vars: Dict[Any, Any] = {}
         for dataset_alias in self.datasets.keys():
             keep_vars[dataset_alias] = self.datasets[dataset_alias].keep_variables
         return keep_vars
 
     def get_metadata_dict(self):
-        metadata = {}
+        """Get global metadata dictionary for all datasets."""
+        metadata: Dict[Any, Any] = {}
         for dataset_alias in self.datasets.keys():
             metadata[dataset_alias] = self.datasets[dataset_alias].get_global_metadata()
         return metadata
 
     def add_dataset(self, alias: str, dataset: BaseDataset):
         """
-        Ajoute un dataset au gestionnaire avec un alias.
+        Adds a dataset to the manager with an alias.
 
         Args:
-            alias (str): Alias unique pour le dataset.
-            dataset (BaseDataset): Instance du dataset.
+            alias (str): Unique alias for the dataset.
+            dataset (BaseDataset): Dataset instance.
         """
         if alias in self.datasets:
             raise ValueError(f"Alias '{alias}' already exists.")
         self.datasets[alias] = dataset
 
     def build_catalogs(self):
-        """
-        Construit les catalogues pour tous les datasets.
-        """
-        for alias, dataset in self.datasets.items():
+        """Builds catalogs for all datasets."""
+        for _alias, dataset in self.datasets.items():
             dataset.build_catalog()
 
-    def get_catalog(self, alias: str) -> DatasetCatalog:
+    def get_catalog(self, alias: str) -> Optional[DatasetCatalog]:
         """
-        Retourne le catalogue d'un dataset.
+        Returns the catalog of a dataset.
 
         Args:
-            alias (str): Alias du dataset.
+            alias (str): Dataset alias.
 
         Returns:
-            DatasetCatalog: Catalogue du dataset.
+            DatasetCatalog: The dataset catalog.
         """
         if alias not in self.datasets:
             raise ValueError(f"Alias '{alias}' not found in the manager.")
         return self.datasets[alias].get_catalog()
 
-    def get_data(self, alias: str, path: str) -> xr.Dataset:
+    def get_data(self, alias: str, path: str) -> Optional[xr.Dataset]:
         """
-        Charge les données d'un dataset.
+        Loads data from a dataset.
 
         Args:
-            alias (str): Alias du dataset.
-            path (str): Chemin du fichier.
+            alias (str): Dataset alias.
+            path (str): File path.
 
         Returns:
-            xr.Dataset: Dataset chargé.
+            xr.Dataset: Loaded dataset.
         """
-        return self.datasets[alias].load_data(path)
+        return self.datasets[alias].connection_manager.open(path)
 
     def filter_attrs(
         self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
     ) -> None:
         """
-        Filtre les datasets en fonction des attributs.
+        Filters datasets based on attributes.
 
         Args:
-            filters (dict[str, Callable[[Any], bool]]): Dictionnaire de filtres.
+            filters (dict[str, Callable[[Any], bool]]): Dictionary of filters.
         """
-        for alias, dataset in self.datasets.items():
-            dataset.filter_attrs(filters)
+        for _alias, dataset in self.datasets.items():
+            if hasattr(dataset, 'filter_attrs'):
+                dataset.filter_attrs(filters)
 
-    def filter_by_date(self, alias: str,start: datetime, end: datetime):
+    def filter_by_date(self, alias: str, start: Any, end: Any):
         """
-        Filtre le catalogue par plage temporelle.
+        Filters the catalog by time range.
 
         Args:
-            start (datetime): Date de début.
-            end (datetime): Date de fin.
+            start (datetime): Start date.
+            end (datetime): End date.
         """
         self.datasets[alias].filter_catalog_by_date(start, end)
-        if self.datasets[alias].get_catalog() is not None :
-            logger.debug(f"Filtered GeoDataFrame length: {len(self.datasets[alias].get_catalog().gdf)}")
+        catalog = self.datasets[alias].get_catalog()
+        if catalog is not None:
+            logger.debug(
+                f"Filtered GeoDataFrame length: {len(catalog.gdf)}"
+            )
         # check if catalog is not empty after filtering
-        if self.datasets[alias].get_catalog() is None or len(self.datasets[alias].get_catalog().gdf) == 0:
+        if catalog is None or len(catalog.gdf) == 0:
             logger.warning(f"Dataset '{alias}' is empty after filtering.")
             # remove dataset from manager
             return alias
@@ -131,15 +134,18 @@ class MultiSourceDatasetManager:
 
     def filter_by_region(self, alias: str, region: gpd.GeoSeries):
         """
-        Filtre le catalogue par boîte englobante.
+        Filters the catalog by bounding box.
 
         Args:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
         self.datasets[alias].filter_catalog_by_region(region)
-        if self.datasets[alias].get_catalog() is not None :
-            logger.debug(f"Filtered GeoDataFrame length: {len(self.datasets[alias].get_catalog().gdf)}")
-        if self.datasets[alias].get_catalog() is None or len(self.datasets[alias].get_catalog().gdf) == 0:
+        catalog = self.datasets[alias].get_catalog()
+        if catalog is not None:
+            logger.debug(
+                f"Filtered GeoDataFrame length: {len(catalog.gdf)}"
+            )
+        if catalog is None or len(catalog.gdf) == 0:
             logger.warning(f"Dataset '{alias}' is empty after filtering.")
             # remove dataset from manager
             return alias
@@ -147,15 +153,18 @@ class MultiSourceDatasetManager:
 
     def filter_by_variable(self, alias: str, variables: List[str]):
         """
-        Filtre le catalogue par variable.
+        Filters the catalog by variable.
 
         Args:
-            variables (List[str]): Liste des variables à filtrer.
+            variables (List[str]): List of variables to filter.
         """
         self.datasets[alias].filter_catalog_by_variable(variables)
-        if self.datasets[alias].get_catalog() is not None :
-            logger.debug(f"Filtered GeoDataFrame length: {len(self.datasets[alias].get_catalog().gdf)}")
-        if len(self.datasets[alias].get_catalog().gdf) == 0:
+        catalog = self.datasets[alias].get_catalog()
+        if catalog is not None:
+            logger.debug(
+                f"Filtered GeoDataFrame length: {len(catalog.gdf)}"
+            )
+        if catalog is None or len(catalog.gdf) == 0:
             logger.warning(f"Dataset '{alias}' is empty after filtering.")
             # remove dataset from manager
             return alias
@@ -167,13 +176,13 @@ class MultiSourceDatasetManager:
             end: datetime | list[datetime],
         ):
         """
-        Filtre tous les datasets gérés par cette classe par plage temporelle.
+        Filters all datasets managed by this class by time range.
 
         Args:
-            start (datetime): Date(s) de début.
-            end (datetime): Date(s) de fin.
+            start (datetime): Start date(s).
+            end (datetime): End date(s).
         """
-        aliases_to_remove = []
+        aliases_to_remove: List[Any] = []
         for alias, _ in self.datasets.items():
             # TODO: Fix logger output when using lists as start and end
             logger.info(f"Filtering dataset '{alias}' by date: {start} -> {end}")
@@ -186,14 +195,14 @@ class MultiSourceDatasetManager:
 
     def filter_all_by_region(self, region: gpd.GeoSeries):
         """
-        Filtre tous les datasets gérés par cette classe par par boîte englobante.
+        Filters all datasets managed by this class by bounding box.
 
         Args:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
-        aliases_to_remove = []
+        aliases_to_remove: List[Any] = []
         for alias, _ in self.datasets.items():
-            logger.info(f"Filtrage du dataset '{alias}' par bbox : {region}")
+            logger.info(f"Filtering dataset '{alias}' by bbox : {region}")
             res = self.filter_by_region(alias, region)
             aliases_to_remove.append(res)
         for alias in aliases_to_remove:
@@ -202,12 +211,12 @@ class MultiSourceDatasetManager:
 
     def filter_all_by_variable(self, variables: List[str]):
         """
-        Filtre tous les datasets gérés par cette classe par plage temporelle.
+        Filters all datasets managed by this class by time range.
 
         Args:
-            variables (List[str]): Liste des variables à filtrer.
+            variables (List[str]): List of variables to filter.
         """
-        aliases_to_remove = []
+        aliases_to_remove: List[Any] = []
         for alias, _ in self.datasets.items():
             res = self.filter_by_variable(alias, variables)
             aliases_to_remove.append(res)
@@ -217,53 +226,57 @@ class MultiSourceDatasetManager:
 
 
     def add_to_file_cache(self, filepath: str):
+        """Add a file to the file cache."""
         self.file_cache.add(filepath)
 
 
-    def to_json(self, alias: str, path: Optional[str] = None) -> str:
+    def to_json(self, alias: str, path: Optional[str] = None) -> Optional[str]:
         """
-        Exporte les informations d'un dataset au format JSON.
+        Exports dataset information in JSON format.
 
         Args:
-            alias (str): Alias du dataset à exporter.
-            path (Optional[str]): Chemin pour sauvegarder le fichier JSON.
+            alias (str): Alias of the dataset to export.
+            path (Optional[str]): Path to save the JSON file.
 
         Returns:
-            str: Représentation JSON des informations du dataset.
+            str: JSON representation of the dataset information.
         """
         if alias not in self.datasets:
             raise ValueError(f"Alias '{alias}' not found in the manager.")
 
         dataset = self.datasets[alias]
-        dataset.get_catalog().to_json(path)
+        catalog = dataset.get_catalog()
+        if catalog is None:
+             logger.warning(f"Catalog for {alias} is empty or None.")
+             return None
+        return catalog.to_json(path)
 
     def all_to_json(self, output_dir: str):
         """
-        Exporte les informations de tous les datasets au format JSON.
+        Exports information of all datasets in JSON format.
 
         Args:
-            output_dir (str): Répertoire où sauvegarder les fichiers JSON.
+            output_dir (str): Directory where to save the JSON files.
 
         Raises:
-            ValueError: Si le répertoire spécifié n'existe pas ou n'est pas accessible.
+            ValueError: If the specified directory does not exist or is not accessible.
         """
-
-        # Vérifier si le répertoire existe
+        # Check if directories exists
         if not os.path.exists(output_dir):
-            raise ValueError(f"Le répertoire spécifié '{output_dir}' n'existe pas.")
+            raise ValueError(f"The specified directory '{output_dir}' does not exist.")
         if not os.path.isdir(output_dir):
-            raise ValueError(f"Le chemin spécifié '{output_dir}' n'est pas un répertoire.")
+            raise ValueError(f"The specified path '{output_dir}' is not a directory.")
 
-        # Boucler sur tous les datasets
+        # Loop over all datasets
         for alias, _ in self.datasets.items():
-            # Générer le chemin du fichier JSON
+            # Generate JSON filename
             json_filename = f"{alias}.json"
             json_path = os.path.join(output_dir, json_filename)
 
-            # Appeler la méthode to_json() pour chaque dataset
+            # Call to_json() method for each dataset
             self.to_json(alias, path=json_path)
 
-            logger.info(f"Dataset '{alias}' exporté au format JSON dans '{json_path}'.")
+            logger.info(f"Dataset '{alias}' exported to JSON in '{json_path}'.")
 
     def standardize_names(
         self, alias: str,
@@ -271,11 +284,11 @@ class MultiSourceDatasetManager:
         vars_rename_dict: Dict[str, str],
     ) -> None:
         """
-        Standardise les noms des variables d'un dataset en fonction d'un dictionnaire de correspondance.
+        Standardizes variable names of a dataset based on a mapping dictionary.
 
         Args:
-            alias (str): Alias du dataset à standardiser.
-            standard_names (Dict[str, str]): Dictionnaire de correspondance des noms.
+            alias (str): Alias of the dataset to standardize.
+            standard_names (Dict[str, str]): Dictionary mapping old names to new names.
         """
         if alias not in self.datasets:
             raise ValueError(f"Alias '{alias}' not found in the manager.")
@@ -288,9 +301,11 @@ class MultiSourceDatasetManager:
         n_days_forecast: int,
         n_days_interval: int,
     ):
-
+        """Build forecast index for a dataset."""
         dataset = self.datasets[alias]
         catalog = dataset.get_catalog()
+        if catalog is None:
+            raise ValueError(f"No catalog found for alias '{alias}'.")
         catalog_df = catalog.get_dataframe()
         forecast_index = build_forecast_index_from_catalog(
             catalog_df,
@@ -305,18 +320,21 @@ class MultiSourceDatasetManager:
         )
 
         self.forecast_indexes[alias] = forecast_index
-    
+
     def get_config(self):
-        ref_managers = {}
-        ref_catalogs = {}
-        ref_connection_params= {}
+        """Get configuration for all reference datasets."""
+        ref_managers: Dict[Any, Any] = {}
+        ref_catalogs: Dict[Any, Any] = {}
+        ref_connection_params: Dict[Any, Any]= {}
         ref_aliases = [alias for alias in self.list_references if alias in self.datasets]
-        ref_datasets = {}
+        ref_datasets: Dict[Any, Any] = {}
         for alias in ref_aliases:
             ref_datasets[alias] = self.datasets[alias]
         for ref_alias in ref_aliases:
             if ref_alias not in self.datasets:
-                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
+                logger.warning(
+                    f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping."
+                )
                 continue
             ref_managers[ref_alias] = ref_datasets[ref_alias].get_connection_manager()
             ref_catalogs[ref_alias] = ref_datasets[ref_alias].get_catalog()
@@ -326,52 +344,59 @@ class MultiSourceDatasetManager:
     def get_dataloader(
         self,
         pred_alias: str,
-        ref_aliases: Optional[List[str]] = None,
+        ref_aliases: Optional[Optional[List[str]]] = None,
         batch_size: Optional[int] = 8,
-        pred_transform: Optional[CustomTransforms] = None,
-        ref_transforms: Optional[List[CustomTransforms]] = None,
+        pred_transform: Optional[Optional[CustomTransforms]] = None,
+        ref_transforms: Optional[Optional[List[CustomTransforms]]] = None,
         forecast_mode: bool = False,
         n_days_forecast: int = 0,
         lead_time_unit: str = "days",
     ) -> EvaluationDataloader:
         """
-        Crée un EvaluationDataloader à partir des alias des datasets.
+        Creates an EvaluationDataloader from dataset aliases.
 
         Args:
-            pred_alias (str): Alias du dataset de prédiction.
-            ref_aliases (Optional[List[str]]): Alias des datasets de référence.
-            batch_size (int): Taille des lots.
-            pred_transform (Optional[CustomTransforms]): Transformation pour les prédictions.
-            ref_transforms (Optional[List[CustomTransforms]]): Transformations pour les références.
-            forecast_mode (bool): Active le mode forecast.
-            n_days_forecast (int): Nombre de jours de forecast à considérer.
-            lead_time_unit (str): Unité du lead time ("days" ou "hours").
+            pred_alias (str): Alias of the prediction dataset.
+            ref_aliases (Optional[List[str]]): Aliases of the reference datasets.
+            batch_size (int): Batch size.
+            pred_transform (Optional[CustomTransforms]): Transform for predictions.
+            ref_transforms (Optional[List[CustomTransforms]]): Transforms for references.
+            forecast_mode (bool): Enable forecast mode.
+            n_days_forecast (int): Number of forecast days to consider.
+            lead_time_unit (str): Lead time unit ("days" or "hours").
 
         Returns:
-            EvaluationDataloader: Instance du dataloader.
+            EvaluationDataloader: Dataloader instance.
         """
-
         pred_dataset = self.datasets[pred_alias]
-        ref_datasets = {}
-        for ref_alias in ref_aliases:
+        ref_datasets: Dict[Any, Any] = {}
+        for ref_alias in (ref_aliases or []):
             if ref_alias not in self.datasets:
-                logger.warning(f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping.")
+                logger.warning(
+                    f"Reference dataset '{ref_alias}' not found in dataset manager. Skipping."
+                )
                 continue
             ref_datasets[ref_alias] = self.datasets[ref_alias]
 
         pred_manager = pred_dataset.get_connection_manager()
 
-        ref_managers, ref_catalogs, ref_connection_params = self.get_config()
+        ref_managers: Dict[Any, Any] = {}
+        ref_catalogs: Dict[Any, Any] = {}
+        ref_connection_params: Dict[Any, Any] = {}
+        for alias, ds in ref_datasets.items():
+            ref_managers[alias] = ds.get_connection_manager()
+            ref_catalogs[alias] = ds.get_catalog()
+            ref_connection_params[alias] = ds.get_connection_config()
 
         pred_catalog = pred_dataset.get_catalog()
         pred_connection_params = pred_dataset.get_connection_config()
 
-        # --- Ajout du mode forecast ---
+        # --- Enable forecast mode ---
         forecast_index = None
         if forecast_mode:
             # catalog_df = pred_catalog.get_dataframe()
             forecast_index = self.forecast_indexes[pred_alias]
-        dataloader_params = {}
+        dataloader_params: Dict[Any, Any] = {}
         keep_vars = self.get_keep_variables_dict()
 
         dataloader_params = {
@@ -400,111 +425,45 @@ class MultiSourceDatasetManager:
 
     def get_transform(
         self,
-        transform_name: str,
         dataset_alias: str,
+        transform_name: Optional[Optional[str]] = None,
         **kwargs,
     ) -> Any:
-        """
-        Factory function to create a transform based on the given name and parameters.
-        """
+        """Factory function to create a transform based on the given name and parameters."""
         global_metadata = self.datasets[dataset_alias].get_global_metadata()
         coord_sys = global_metadata.get("coord_system", None)
         if global_metadata is None or coord_sys is None:
-            raise("Cannot import dataset metadata.")
+            raise ValueError("Cannot import dataset metadata.")
         if isinstance(coord_sys, dict):
-            # Si le metadata global est un dictionnaire, on peut l'utiliser directement
+            # If global metadata is a dict, we can use it directly
             coord_dict = coord_sys["coordinates"]
         elif isinstance(coord_sys, CoordinateSystem):
             coord_dict = coord_sys.coordinates
         coords_rename_dict = {v: k for k, v in coord_dict.items()}
         vars_rename_dict= global_metadata.get("variables_rename_dict")
-        keep_vars = self.datasets[dataset_alias].keep_variables  # global_metadata.get("keep_variables")
+        # global_metadata.get("keep_variables")
+        keep_vars = self.datasets[dataset_alias].keep_variables
+
+        metadata = {
+            "keep_vars": keep_vars,
+            "coords_rename_dict": coords_rename_dict,
+            "vars_rename_dict": vars_rename_dict
+        }
+
+        # Call centralized transform builder
+        transform_obj = get_dataset_transform(
+            alias=dataset_alias,
+            metadata=metadata,
+            dataset_processor=self.dataset_processor,
+            transform_name=transform_name,
+            config=kwargs
+        )
 
 
-        # Configurer les transformations
-        match transform_name:
-            case "standardize_glorys":
-                regridder_weights = kwargs.get("regridder_weights", None)
-                interp_ranges = kwargs.get("interp_ranges", None)
-                depth_coord_vals = kwargs.get("depth_coord_vals", None)
-                transform_std = CustomTransforms(
-                    transform_name="standardize_dataset",
-                    dataset_processor=None,  # self.dataset_processor, évite des erreurs de sérialisation : le dataset_processor sera affecté depuis les workers
-                    list_vars=keep_vars,
-                    coords_rename_dict=coords_rename_dict,
-                    vars_rename_dict=vars_rename_dict,
-                )
-                transform_interp = CustomTransforms(
-                    transform_name="glorys_to_glonet",
-                    dataset_processor=None,
-                    depth_coord_vals=depth_coord_vals,
-                    interp_ranges=interp_ranges,
-                    weights_path=regridder_weights,
-                )
-                transform = transforms.Compose(
-                    [
-                        transform_std,
-                        transform_interp,
-                    ]
-                )
-                self.standardize_names(
-                    dataset_alias,
-                    coords_rename_dict,
-                    vars_rename_dict,
-                )
-            case "standardize":
-                transform_std = CustomTransforms(
-                    transform_name="standardize_dataset",
-                    dataset_processor=None,  # self.dataset_processor,
-                    list_vars=keep_vars,
-                    coords_rename_dict=coords_rename_dict,
-                    vars_rename_dict=vars_rename_dict,
-                )
-                transform = transform_std
-                self.standardize_names(
-                    dataset_alias,
-                    coords_rename_dict,
-                    vars_rename_dict,
-                )
-            case "standardize_add_coords":
-                transform_standardize = CustomTransforms(
-                    transform_name="standardize_dataset",
-                    dataset_processor=None,  # self.dataset_processor,
-                    list_vars=keep_vars,
-                    coords_rename_dict=coords_rename_dict,
-                    vars_rename_dict=vars_rename_dict,
-                )
-                transform_add_coords = CustomTransforms(
-                    transform_name="add_spatial_coords",
-                    dataset_processor=None,  # self.dataset_processor,
-                    list_vars=keep_vars,
-                    coords_rename_dict=coords_rename_dict,
-                )
-                transform = transforms.Compose(
-                    [
-                        transform_add_coords,
-                        transform_standardize,
-                    ]
-                )
-            case "standardize_to_surface":
-                transform_std = CustomTransforms(
-                    transform_name="standardize_to_surface",
-                    dataset_processor=None,  # self.dataset_processor,
-                    list_vars=keep_vars,
-                    coords_rename_dict=coords_rename_dict,
-                    vars_rename_dict=vars_rename_dict,
-                )
-                transform = transform_std
-                self.standardize_names(
-                    dataset_alias,
-                    coords_rename_dict,
-                    vars_rename_dict,
-                )
-            case _:
-                logger.warning(
-                    f"Transform name '{transform_name}' does not correspond to" \
-                        " any MultiSourceDatasetManager transforms."
-                    )
-                transform = None
+        self.standardize_names(
+            dataset_alias,
+            coords_rename_dict,
+            vars_rename_dict or {},
+        )
 
-        return transform
+        return transform_obj

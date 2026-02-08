@@ -6,6 +6,7 @@
 import os
 import sys
 
+from dask.distributed import performance_report
 from dctools.utilities.args_config import load_args_and_config
 
 from dc.evaluation.evaluation import DC2Evaluation
@@ -40,9 +41,19 @@ def main() -> int:
             os.remove(args.regridder_weights)
 
         os.makedirs(args.catalog_dir, exist_ok=True)
+        os.makedirs(args.result_dir, exist_ok=True)
 
         evaluator_instance = DC2Evaluation(args)
-        evaluator_instance.run_eval()
+
+        report_path = os.path.join(args.result_dir, "dask-report.html")
+        logger_msg = f"Generating Dask performance report at: {report_path}"
+        print(logger_msg)
+
+        with performance_report(filename=report_path):
+            evaluator_instance.run_eval()
+
+        evaluator_instance.close()
+
         print("Evaluation has finished successfully.")
         return 0
 

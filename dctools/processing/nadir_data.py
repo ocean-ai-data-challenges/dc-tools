@@ -17,10 +17,10 @@ class NadirDataProcessor:
     @staticmethod
     def subset_nadir(
         data: xr.Dataset | xr.DataArray,
-        lat_range: Optional[Tuple[float, float]] = None,
-        lon_range: Optional[Tuple[float, float]] = None,
-        time_range: Optional[Tuple[np.datetime64, np.datetime64]] = None,
-        coord_name_dict: Optional[dict[str, str]] = None,
+        lat_range: Optional[Optional[Tuple[float, float]]] = None,
+        lon_range: Optional[Optional[Tuple[float, float]]] = None,
+        time_range: Optional[Optional[Tuple[np.datetime64, np.datetime64]]] = None,
+        coord_name_dict: Optional[Optional[dict[str, str]]] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.

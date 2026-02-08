@@ -5,30 +5,27 @@
 
 import gc
 import os
-from typing import Any, Callable, List, Optional
+from typing import Any, Dict, List, Optional
 
-import fsspec
 from loguru import logger
-from memory_profiler import profile
 import netCDF4
 import numpy as np
 import traceback
 import xarray as xr
-import zarr
 
-# Configuration pour la compatibilité Dask
-#os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-#os.environ['NETCDF4_DEACTIVATE_MPI'] = '1'
+# Dask configuration for compatibility
+os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+os.environ['NETCDF4_DEACTIVATE_MPI'] = '1'
 
 
 def configure_xarray_for_dask():
-    """
-    Configure xarray pour une utilisation optimale avec Dask workers.
-    À appeler une fois au début de l'application.
+    """Configure xarray for optimal usage with Dask workers.
+
+    Call once at the beginning of the application.
     """
     import dask
-    
-    # Configuration Dask pour xarray
+
+    # Dask configuration for xarray
     dask.config.set({
         'array.chunk-size': '128MB',
         'array.slicing.split_large_chunks': False,
@@ -36,11 +33,13 @@ def configure_xarray_for_dask():
         'distributed.comm.timeouts.tcp': 300,
         'distributed.comm.timeouts.connect': 180,
     })
-    
-    # Configuration xarray
+
+    # xarray configuration - Minimize file cache to avoid memory accumulation
+    # This prevents file handles from being kept in memory between batches
+    # Note: Some xarray versions don't allow 0, so we use 1 (minimal cache)
     xr.set_options(
-        file_cache_maxsize=1,  # Cache minimal pour éviter les conflits
-        warn_for_unclosed_files=False,  # Évite les warnings dans les workers
+        file_cache_maxsize=1,  # minimal: 1 file cached (effectively disabled)
+        warn_for_unclosed_files=False,  # Avoid warnings in workers
     )
 
 
@@ -49,15 +48,13 @@ def choose_chunks_automatically(
     target_chunk_mb: int = 32,
     min_chunk: int = 1,
 ) -> dict:
-    """
-    Propose un schéma de chunking adapté en fonction de la taille mémoire des variables.
-    """
+    """Propose a suitable chunking scheme based on variable memory size."""
     target_bytes = target_chunk_mb * 1024**2
     element_size = np.dtype("float64").itemsize
     target_elems = target_bytes // element_size
 
     dim_sizes = dict(ds.sizes)
-    suggested = {}
+    suggested: Dict[Any, Any] = {}
 
     for dim, size in dim_sizes.items():
         vars_using_dim = [v for v in ds.data_vars if dim in ds[v].dims]
@@ -67,7 +64,7 @@ def choose_chunks_automatically(
         max_other = 1
         for v in vars_using_dim:
             other_dims = [d for d in ds[v].dims if d != dim]
-            prod = np.prod([dim_sizes[d] for d in other_dims])
+            prod = int(np.prod([dim_sizes[d] for d in other_dims]))
             max_other = max(max_other, prod)
 
         elems_if_full = size * max_other
@@ -83,40 +80,95 @@ def choose_chunks_automatically(
 
 
 def list_all_group_paths(nc_path: str) -> List[str]:
-    """
-    Liste tous les chemins de groupes dans un fichier NetCDF.
-    Thread-safe pour utilisation avec Dask.
+    """List all group paths in a NetCDF file.
+
+    Thread-safe for use with Dask.
+    Tries h5netcdf first (faster), then netCDF4.
     """
     def walk(grp, prefix=""):
-        paths = []
-        for name, subgrp in grp.groups.items():
-            full = f"{prefix}/{name}" if prefix else name
-            paths.append(full)
-            paths.extend(walk(subgrp, full))
+        paths: List[str] = []
+        # h5netcdf and netCDF4 have slightly different APIs for groups
+        # netcdf4: .groups (dict)
+        # h5netcdf: .keys() but must check if it is a group
+        items = getattr(grp, "groups", None)
+        if items is None: # h5netcdf loop approach
+             items = grp
+
+        # Generic iteration
+        for name in items:
+             # h5netcdf key iter
+             try:
+                 item = grp[name]
+             except Exception:
+                 continue # skip if error
+
+             # Check if it is a group
+             # h5netcdf.Group ou netCDF4.Group
+             is_group = False
+             if hasattr(item, "groups") or "Group" in type(item).__name__:
+                 is_group = True
+
+             if is_group:
+                full = f"{prefix}/{name}" if prefix else name
+                paths.append(full)
+                paths.extend(walk(item, full))
         return paths
+
+    # Attempt with h5netcdf (often faster for listing)
     try:
-        # Utiliser mode 'r' avec format='NETCDF4' pour compatibilité Dask
+        import h5netcdf
+        with h5netcdf.File(nc_path, 'r') as nc:
+             # The walk function must be adapted for h5netcdf if necessary
+             # To keep it simple, we recreate a specific walk for h5netcdf
+             def walk_h5(grp: Any, prefix: str = "") -> List[str]:
+                paths: List[str] = []
+                for name in grp.keys():
+                    item = grp[name]
+                    if isinstance(item, h5netcdf.Group):
+                        full = f"{prefix}/{name}" if prefix else name
+                        paths.append(full)
+                        paths.extend(walk_h5(item, full))
+                return paths
+
+             groups = walk_h5(nc)
+        gc.collect()
+        return groups
+    except (ImportError, OSError, Exception):
+        # Silent fallback (or debug log) to netCDF4
+        pass
+
+    try:
+        # Use mode 'r' with format='NETCDF4' for Dask compatibility
         with netCDF4.Dataset(nc_path, "r", format='NETCDF4') as nc:
-            groups = walk(nc)
+            def walk_nc(grp: Any, prefix: str = "") -> List[str]:
+                paths: List[str] = []
+                for name, subgrp in grp.groups.items():
+                    full = f"{prefix}/{name}" if prefix else name
+                    paths.append(full)
+                    paths.extend(walk_nc(subgrp, full))
+                return paths
+            groups = walk_nc(nc)
         gc.collect()
         return groups
     except Exception as e:
         logger.warning(f"Could not read groups from {nc_path}: {e}")
-        traceback.print_exc()
+        # traceback.print_exc()
         return []
 
 
 class FileLoader:
+    """Utilities for loading datasets from various file formats."""
+
     @staticmethod
     def open_dataset_auto(
         file_path: str,
         adaptive_chunking: bool = False,
-        groups: Optional[list[str]] = None,
+        groups: Optional[Optional[list[str]]] = None,
         engine: Optional[str] = "h5netcdf",
-        variables: Optional[list[str]] = None,
+        variables: Optional[Optional[list[str]]] = None,
         dask_safe: Optional[bool] = True,
         target_chunk_mb: Optional[int] = 128,
-        file_storage: Optional[Any] = None,
+        file_storage: Optional[Optional[Any]] = None,
         reading_retries: Optional[int] = 3,
     ) -> xr.Dataset | None:
         """
@@ -134,28 +186,36 @@ class FileLoader:
         Returns:
             xr.Dataset | None: Loaded dataset or None if error.
         """
+        if reading_retries is None:
+            reading_retries = 3
+        if target_chunk_mb is None:
+            target_chunk_mb = 128
+
         os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
         try:
-            # FORCE LAZY LOADING: chunks={} tells xarray to use dask with file's chunks
-            base_chunks = {}
+            # force lazy loading: chunks={} tells xarray to use dask with file's chunks
+            base_chunks: Dict[Any, Any] = {}
 
             # open_kwargs = {"chunks": "auto", "engine": engine}
-            open_kwargs = {"engine": engine, "chunks": base_chunks}
+            open_kwargs: Dict[str, Any] = {"engine": engine, "chunks": base_chunks}
             if dask_safe:
                 open_kwargs.update({"lock": False, "cache": False})
 
             ds = None
 
             if file_path.endswith(".nc"):
-                # Récupérer les groupes
+                # Retrieve groups
                 group_paths = list_all_group_paths(file_path)
                 if group_paths:
-                    datasets = []
+                    datasets: List[Any] = []
                     for group_path in group_paths:
                         try:
                             sub_ds = xr.open_dataset(file_path, group=group_path, **open_kwargs)
                             prefix = group_path.replace("/", "__")
-                            sub_ds = sub_ds.rename({var: f"{prefix}__{var}" for var in sub_ds.data_vars})
+                            sub_ds = sub_ds.rename({
+                                var: f"{prefix}__{var}"
+                                for var in sub_ds.data_vars
+                            })
                             datasets.append(sub_ds)
                         except Exception as e:
                             logger.warning(f"Failed to open group {group_path}: {e}")
@@ -169,7 +229,7 @@ class FileLoader:
                     ds = xr.open_dataset(file_path, **open_kwargs)
 
             elif file_path.endswith(".zarr"):
-                zarr_kwargs = {
+                zarr_kwargs: Dict[str, Any] = {
                     "chunks": base_chunks,
                     "consolidated": True,
                 }
@@ -177,7 +237,7 @@ class FileLoader:
                     for attempt in range(reading_retries):
                         try:
                             # Support for remote storage (e.g., S3)
-                            store = file_storage.get_mapper(file_path)  # <-- mapping, pas file-like
+                            store = file_storage.get_mapper(file_path)  # <-- mapping, not file-like
                             # kvstore = zarr.storage.KVStore(store)
                             ds = xr.open_zarr(store, **zarr_kwargs)
                         except Exception as e:
@@ -191,11 +251,11 @@ class FileLoader:
                         except Exception as e:
                             logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
                             if attempt == reading_retries - 1:
-                                raise   
+                                raise
             else:
                 raise ValueError(f"Unsupported file format {file_path}.")
 
-            # Filtrage des variables après ouverture
+            # Filtering variables after opening
             if variables and ds is not None:
                 # available_vars = list(ds.variables.keys())
                 available_data_vars = list(ds.data_vars.keys())
@@ -203,7 +263,7 @@ class FileLoader:
                 if vars_to_drop:
                     ds = ds.drop_vars(vars_to_drop, errors="ignore")
 
-            # Appliquer adaptive chunking si demandé
+            # Apply adaptive chunking if requested
             if adaptive_chunking and ds is not None:
                 chunks = choose_chunks_automatically(ds, target_chunk_mb=target_chunk_mb)
                 if chunks:
