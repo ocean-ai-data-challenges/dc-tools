@@ -3,7 +3,8 @@
 ################################# WASABI S3 ACCESS KEYS ###############################
 ##  WASABI credentials
 define: &WASABI_KEY "A10PTBP92GOXQW8OPE8G"
-define: &WASABI_SECRET_KEY "1C1Iscst7rfDnXp5eM8DtL7AkFiUAycINzctMEGQ" 
+define: &WASABI_SECRET_KEY "1C1Iscst7rfDnXp5eM8DtL7AkFiUAycINzctMEGQ"
+
 ############################# GENERAL DC PARAMETERS ###################################
 
 n_days_forecast: 10
@@ -25,12 +26,12 @@ restart_workers_per_batch: true
 # Relative memory safety trigger.
 # If max worker memory used increases too much vs a baseline, we trigger a restart.
 # Example: 0.30 => restart when max memory used is +30% above baseline.
-max_p_memory_increase: 0.10
+max_p_memory_increase: 0.80
 
 # Absolute memory safety trigger (in addition to baseline increase).
 # If any worker exceeds this fraction of its Dask memory_limit, we trigger a restart.
 # Example: 0.85 => restart when a worker goes above 85% of its limit.
-max_worker_memory_fraction: 0.25
+max_worker_memory_fraction: 0.35
 
 ############################# DATA FILTERS ###################################
 
@@ -52,26 +53,27 @@ max_lat: 90
 
 ############################# DATASETS ###################################
 catalog_connection:
-  connection_type: "wasabi"
-  url: "https://s3.eu-west-2.wasabisys.com"
-  s3_bucket: "ppr-ocean-climat"
+  config: "s3"
+  connection_type: "public"
+  url: "https://minio.dive.edito.eu"
+  s3_bucket: "project-ppr-ocean-ia"
   s3_folder: "catalogs"
-  s3_key: *WASABI_KEY
-  s3_secret_key: *WASABI_SECRET_KEY
+  s3_key: 
+  s3_secret_key: 
 
 sources:  # lists all datasets used in the DC
-  - dataset: saral
+  - dataset: saral_edito
     observation_dataset: true
     metrics:
       - "rmsd"
     time_tolerance: 12   # time tolerance for matching with observations (hours)
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/ZARR/Saral"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.zarr"
     ignore_geometry: true
     keep_variables:
@@ -112,17 +114,17 @@ sources:  # lists all datasets used in the DC
       - "vo"
       - "zos"
 
-  - dataset: glorys
+  - dataset: glorys_edito
     observation_dataset: false
     metrics:
       - "rmsd"
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/ZARR/Glorys"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.zarr"
     full_day_data: true
     ignore_geometry: true
@@ -142,19 +144,19 @@ sources:  # lists all datasets used in the DC
       - "temperature"
       - "u_current"
       - "v_current"
-
-  - dataset: swot
+  
+  - dataset: swot_edito
     observation_dataset: true
     metrics:
       - "rmsd"
     time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/ZARR/Swot"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.zarr"
     ignore_geometry: true
     keep_variables:
@@ -172,18 +174,19 @@ sources:  # lists all datasets used in the DC
     eval_variables:
       - "ssha_filtered"
 
-  - dataset: argo_velocities
+
+  - dataset: argo_velocities_edito
     observation_dataset: true
     metrics:
       - "rmsd"
     time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/Argo_velocities"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.nc"
     ignore_geometry: true
     keep_variables:
@@ -225,7 +228,7 @@ sources:  # lists all datasets used in the DC
       - "PSAL"  # Use adjusted variables
       - "TEMP"
 
-  - dataset: jason3
+  - dataset: jason3_edito
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -237,12 +240,12 @@ sources:  # lists all datasets used in the DC
       - "ku"
       - "data_01"
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/ZARR/Jason3"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.zarr"
     ignore_geometry: true
     keep_variables:
@@ -279,18 +282,18 @@ sources:  # lists all datasets used in the DC
     - "sea_surface_temperature"
     #- "adjusted_sea_surface_temperature"
 
-  - dataset: jason1
+  - dataset: jason1_edito
     observation_dataset: true
     metrics:
       - "rmsd"
     time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/Nadir_altimetry/Jason-1"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.nc"
     ignore_geometry: true
     keep_variables:
@@ -306,18 +309,18 @@ sources:  # lists all datasets used in the DC
     eval_variables:
     - "ssha"
 
-  - dataset: jason2
+  - dataset: jason2_edito
     observation_dataset: true
     metrics:
       - "rmsd"
     time_tolerance: 12   # tolerance for matching the observations (hours)
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/Nadir_altimetry/Jason-2"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.nc"
     ignore_geometry: true
     keep_variables:
@@ -334,7 +337,7 @@ sources:  # lists all datasets used in the DC
     eval_variables:
     - "ssha"
 
-  - dataset: SSS_fields
+  - dataset: SSS_fields_edito
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -343,12 +346,12 @@ sources:  # lists all datasets used in the DC
       - "ku"
       - "data_01"
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/SSS_fields"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.nc"
     ignore_geometry: true
     keep_variables:
@@ -365,17 +368,17 @@ sources:  # lists all datasets used in the DC
     #- "data_01__ku__ssha"
     - Sea_Surface_Salinity_Rain_Corrected
 
-  - dataset: glonet
+  - dataset: glonet_edito
     observation_dataset: false
     metrics:
       - "rmsd"
     config: "s3"
-    connection_type: "wasabi"
-    url: "https://s3.eu-west-2.wasabisys.com"
-    s3_bucket: "ppr-ocean-climat"
+    connection_type: "public"
+    url: "https://minio.dive.edito.eu"
+    s3_bucket: "project-ppr-ocean-ia"
     s3_folder: "DC2/ZARR/Glonet"
-    s3_key: *WASABI_KEY
-    s3_secret_key: *WASABI_SECRET_KEY
+    s3_key: 
+    s3_secret_key: 
     file_pattern: "**/*.zarr"
     full_day_data: true
     ignore_geometry: true
@@ -393,7 +396,7 @@ sources:  # lists all datasets used in the DC
       - "zos"
 
 
-  - dataset: glonet_edito
+  - dataset: glonet_edito_2
     observation_dataset: false
     metrics:
       - "rmsd"

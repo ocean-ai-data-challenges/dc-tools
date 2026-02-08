@@ -39,7 +39,7 @@ build:
         hash -r
         poetry config virtualenvs.create false
         poetry install --with docs --without custom
-      
+
 
       # Install dependencies with 'docs' dependency group
       # VIRTUAL_ENV needs to be set manually for now.

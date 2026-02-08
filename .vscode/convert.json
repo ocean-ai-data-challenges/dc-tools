@@ -1,0 +1,21 @@
+
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/k24aitmo/anaconda3/envs/dc-env/bin/python",
+            "program": "${workspaceFolder}/scripts/convert_netcdf_to_zarr.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--source", "jason3",
+                "--output_dir", "/home/k24aitmo/IMT/software/dc-tools/tests/data/netcdf_to_zarr_remote",
+                "--data_dir", "/home/k24aitmo/IMT/software/dc-tools/tests/data"
+            ],
+            "stopOnEntry": false,
+            "justMyCode": false
+        }
+    ]
+}

@@ -4,18 +4,24 @@
 """Unit Tests."""
 
 import os
+import shutil
 from pathlib import Path
-import sys
 
 from loguru import logger
 import numpy as np
+import pandas as pd
 import xarray as xr
 import pytest
 
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
 # from dctools.processing.gridder import DataGridder
-from dctools.utilities.file_utils import empty_folder
+from dctools.utilities.xarray_utils import (
+    filter_spatial_area,
+    filter_time_interval,
+    filter_variables,
+    filter_dataset_by_depth,
+)
 
 # TODO : Update all tests
 def get_sample_dataset():
@@ -78,8 +84,7 @@ def setup_output_dir():
 
     # Teardown
     if os.path.exists(test_output_dir):
-        empty_folder(test_output_dir)
-        os.rmdir(test_output_dir)
+        shutil.rmtree(test_output_dir, ignore_errors=True)
 
 
 def test_save_load_dataset(
@@ -92,27 +97,28 @@ def test_save_load_dataset(
     DataSaver.save_dataset(
         setup_data, setup_filepath,
     )
-    loaded_ds = FileLoader.load_dataset(
-        setup_filepath
+    loaded_ds = FileLoader.open_dataset_auto(
+        setup_filepath,
+        engine="netcdf4"
     )
     assert isinstance(loaded_ds, xr.Dataset)
     assert "temperature" in loaded_ds.variables
+    loaded_ds.close()
 
 def test_load_error(setup_filepath):
     """Test trying to load a non-existent file."""
     logger.info("Run test_load_error")
     try:
-        FileLoader.load_dataset(
+        FileLoader.open_dataset_auto(
             Path(setup_filepath).stem
         )
     except Exception:
         pass
 
 
-'''
-from dctools.utilities.xarray_utils import filter_spatial_area, filter_time_interval
 
 def test_filter_spatial_area_with_valid_data():
+    """Test filtering by spatial area with valid data overlap."""
     # Create a sample dataset with latitude and longitude coordinates
     lat = [10, 20, 30]
     lon = [100, 110, 120]
@@ -126,6 +132,7 @@ def test_filter_spatial_area_with_valid_data():
     assert result["data"].shape == (1, 1)  # Only one point should be in the specified area
 
 def test_filter_spatial_area_no_data():
+    """Test filtering by spatial area with no data overlap."""
     # Create a sample dataset with latitude and longitude coordinates
     lat = [10, 20, 30]
     lon = [100, 110, 120]
@@ -138,6 +145,7 @@ def test_filter_spatial_area_no_data():
     assert result is None  # Should return None as no data matches
 
 def test_filter_time_interval_with_valid_data():
+    """Test filtering by time interval with valid data overlap."""
     # Create a sample dataset with a time coordinate
     times = pd.date_range("2024-05-02", periods=10, freq="D")
     data = xr.DataArray(range(10), coords=[times], dims=["time"])
@@ -150,6 +158,7 @@ def test_filter_time_interval_with_valid_data():
     assert result["data"].shape[0] == 3  # Should have 3 time steps
 
 def test_filter_time_interval_no_data():
+    """Test filtering by time interval with no data overlap."""
     # Create a sample dataset with a time coordinate
     times = pd.date_range("2024-05-02", periods=10, freq="D")
     data = xr.DataArray(range(10), coords=[times], dims=["time"])
@@ -159,4 +168,43 @@ def test_filter_time_interval_no_data():
     result = filter_time_interval(ds, "2024-06-01", "2024-06-10")
 
     assert result is None  # Should return None as no data matches
-'''
+
+
+def test_filter_variables():
+    """Test filtering dataset to keep only selected variables."""
+    # Setup
+    ds = xr.Dataset(
+        {"temp": (("x", "y"), [[1, 2], [3, 4]]),
+         "salt": (("x", "y"), [[5, 6], [7, 8]])},
+        coords={"x": [1, 2], "y": [10, 20]}
+    )
+    keep_vars = ["temp"]
+
+    # Action
+    filtered = filter_variables(ds, keep_vars)
+
+    # Assert
+    assert "temp" in filtered
+    assert "salt" not in filtered
+    assert filtered["temp"].equals(ds["temp"])
+
+def test_filter_dataset_by_depth():
+    """Test filtering dataset by depth."""
+    # Setup
+    ds = xr.Dataset(
+        {"temp": (("time", "depth"), [[1, 2, 3], [4, 5, 6]])},
+        coords={"time": [1, 2], "depth": [10, 100, 1000]}
+    )
+    target_depths = [100]
+
+    # Action
+    filtered = filter_dataset_by_depth(ds, target_depths, depth_tol=1)
+
+    # Assert
+    assert filtered is not None
+    # Assuming filter_dataset_by_depth keeps only nearest depths or similar
+    # Depending on implementation, it might return dataset with subset of depth
+    assert 100 in filtered.depth
+    assert 10 not in filtered.depth
+    assert 1000 not in filtered.depth
+

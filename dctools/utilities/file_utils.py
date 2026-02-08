@@ -5,7 +5,7 @@
 from collections import OrderedDict
 import os
 import subprocess
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from pathlib import Path
@@ -14,44 +14,51 @@ import yaml
 
 def remove_file(filepath: str) -> bool:
     """
-    Supprime un fichier local.
+    Remove a local file.
 
     Args:
-        filepath (str): Chemin du fichier à supprimer.
+        filepath (str): Path of the file to remove.
 
     Returns:
-        bool: True si le fichier a été supprimé, False sinon.
+        bool: True if the file was deleted, False otherwise.
     """
     try:
         if not isinstance(filepath, str) or not filepath:
             logger.warning(f"remove_file: invalid path: {filepath}")
             return False
         if not os.path.exists(filepath):
-            logger.info(f"remove_file: file not exist: {filepath}")
+            logger.warning(f"remove_file: file not exist: {filepath}")
             return False
         if not os.path.isfile(filepath):
             logger.warning(f"remove_file: not a file: {filepath}")
             return False
         os.remove(filepath)
-        logger.info(f"remove_file: deleted file: {filepath}")
+        # logger.info(f"remove_file: deleted file: {filepath}")
         return True
     except Exception as exc:
         logger.error(f"remove_file: error when removing file {filepath}: {exc}")
         return False
 
-def empty_folder(folder_path: str):
+def empty_folder(dir_name: str, extension: Optional[Optional[str]] = None):
     """Remove all files in given folder.
 
     Args:
             folder_path (str): Path to ,folder to empty.
     """
-    for filename in os.listdir(folder_path):
-        file_path = os.path.join(folder_path, filename)
-        try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-        except Exception as e:
-            logger.warning(f"Failed to delete {file_path}: {e}")
+    dir_path = Path(dir_name)
+    if not dir_path.is_dir():
+        print(f"{dir_name} is not a valid directory or does not exist.")
+        return 0
+    count = 0
+    for file in dir_path.iterdir():
+        if file.is_file() and file.suffix == extension:
+            try:
+                file.unlink()
+                count += 1
+            except Exception as e:
+                print(f"Error removing {file}: {e}")
+    # print(f"{count} files deleted with extension {extension} in {dir_name}.")
+    return count
 
 def list_files_with_extension(directory: str, extension: str):
     """Return a list of all files with a given extension in a specified directory.
@@ -120,7 +127,7 @@ def get_list_filter_files(
         List[str]: _description_
     """
     list_files = list_files_with_extension(directory,  extension)
-    list_filter_files = []
+    list_filter_files: List[Any] = []
     if prefix:
         list_filter_files = [
             ncf for ncf in list_files if ncf.startswith(regex)
@@ -132,8 +139,18 @@ def get_list_filter_files(
     return list_filter_files
 
 def read_file_tolist(filepath: str, max_lines: int=0) -> List[str]:
+    """
+    Read a file and return its content as a list of strings (lines).
+
+    Args:
+        filepath (str): Path to the file.
+        max_lines (int, optional): Maximum number of lines to read. Defaults to 0 (read all).
+
+    Returns:
+        List[str]: List of lines stripped of whitespace.
+    """
     with open(filepath) as file:
-        lines = []
+        lines: List[Any] = []
         n_line = 0
         for line in file:
             if max_lines > 0 and n_line >= max_lines:
@@ -144,24 +161,46 @@ def read_file_tolist(filepath: str, max_lines: int=0) -> List[str]:
 
 
 def check_valid_files(list_files: List[str]) -> List[str]:
-    list_valid_files = []
+    """
+    Check if files in a list exist and return the valid ones.
+
+    Args:
+        list_files (List[str]): List of file paths to check.
+
+    Returns:
+        List[str]: List of files that exist.
+    """
+    list_valid_files: List[Any] = []
     for file_path in list_files:
         if os.path.isfile(file_path):
             list_valid_files.append(file_path)
     return list_valid_files
 
 
-def load_config_file(path: str) -> dict:
+def load_config_file(path: str) -> Dict[Any, Any]:
+    """
+    Load a YAML configuration file.
+
+    Args:
+        path (str): Path to the YAML file.
+
+    Returns:
+        dict: The configuration dictionary.
+    """
     with open(path) as f:
-        return yaml.safe_load(f)
+        result = yaml.safe_load(f)
+        return result if result is not None else {}
 
 
 class FileCacheManager:
+    """Manages a cache of files with automatic cleanup when limit is reached."""
+
     def __init__(self, max_files: int):
         self.max_files = max_files
-        self.cache = OrderedDict()
+        self.cache: OrderedDict[str, bool] = OrderedDict()
 
     def add(self, filepath: str):
+        """Add a file to the cache, removing oldest if cache is full."""
         if filepath in self.cache:
             self.cache.move_to_end(filepath)
         else:
@@ -171,9 +210,15 @@ class FileCacheManager:
                 remove_file(old_path)
 
     def __contains__(self, filepath: str):
+        """Check if filepath is in the cache."""
         return filepath in self.cache
 
+    def remove(self, filepath: str):
+        """Remove a file from the filesystem."""
+        remove_file(filepath)
+
     def clear(self):
+        """Clear all files from the cache."""
         for filepath in list(self.cache.keys()):
             remove_file(filepath)
         self.cache.clear()

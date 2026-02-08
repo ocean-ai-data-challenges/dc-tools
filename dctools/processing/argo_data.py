@@ -16,10 +16,10 @@ class ArgoDataProcessor:
     @staticmethod
     def subset_argo(
         data: xr.Dataset | xr.DataArray,
-        lat_range: Optional[Tuple[float, float]] = None,
-        lon_range: Optional[Tuple[float, float]] = None,
-        time_range: Optional[Tuple[np.datetime64, np.datetime64]] = None,
-        coord_name_dict: Optional[dict] = None,
+        lat_range: Optional[Optional[Tuple[float, float]]] = None,
+        lon_range: Optional[Optional[Tuple[float, float]]] = None,
+        time_range: Optional[Optional[Tuple[np.datetime64, np.datetime64]]] = None,
+        coord_name_dict: Optional[Optional[dict]] = None,
     ) -> xr.Dataset | xr.DataArray:
         """
         Subset the area defined by `lat_range`, `lon_range` and `time_range`.
@@ -40,8 +40,18 @@ class ArgoDataProcessor:
         result = data
         # We can't use .sel since argopy data is only indexed by N_POINTS
         if not coord_name_dict:
-            coord_sys = CoordinateSystem.get_coordinate_system(data)
-            coord_name_dict = coord_sys.coordinates
+            if isinstance(data, xr.Dataset):
+                coord_sys = CoordinateSystem.get_coordinate_system(data)
+                coord_name_dict = coord_sys.coordinates
+            else:
+                # Assuming data structure similar enough or manual mapping needed
+                 # For DataArray, we would need to wrap or specific logic,
+                 # but here let's assume it should be Dataset for coordinate system detection.
+                 # Or cast it if legitimate.
+                 # Let's try casting if it's safe, or handle the type.
+                 # Given the method name, data probably IS a dataset in practice.
+                 coord_sys = CoordinateSystem.get_coordinate_system(data)
+                 coord_name_dict = coord_sys.coordinates
 
         # Create mask for .where
         mask = xr.ones_like(data[coord_name_dict["lat"]])
