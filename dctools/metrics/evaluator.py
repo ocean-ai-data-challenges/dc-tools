@@ -118,7 +118,7 @@ def compute_metric(
         ref_alias = entry.get("ref_alias")
         ref_is_observation = entry.get("ref_is_observation")
 
-        # LOGGING DEBUG: Confirm task start on worker
+        # Logging debug: Confirm task start on worker
         # logger.debug(
         #     f"Start processing: {forecast_reference_time} "
         #     f"(Valid: {valid_time}) on worker"
@@ -150,7 +150,7 @@ def compute_metric(
             pred_data = pred_source
 
 
-        # SCIENTIFIC IMPROVEMENT: Use linear interpolation in time when possible
+        # Scientific improvement: Use linear interpolation in time when possible
         # Standard benchmarking practice is to reconstruct the field at the
         # exact observation time (4D interpolation) rather than snapping to the
         # nearest model output step (Nearest Neighbor).
@@ -224,7 +224,7 @@ def compute_metric(
                     dataset_processor=None,
                 )
                 # load immediately before increasing Dask graph size
-                # MODIF: load_to_memory=False to avoid RAM overhead on workers
+                # Modification: load_to_memory=False to avoid RAM overhead on workers
                 ref_data = ref_raw_data.preprocess_datasets(
                     ref_df,
                     load_to_memory=False,
@@ -643,7 +643,7 @@ class Evaluator:
                             f"Restarting {n_workers_before} workers to clear memory..."
                         )
 
-                        # ROBUST METHOD: Restart with wait_for_workers=False
+                        # Robust method: Restart with wait_for_workers=False
                         # + Active Waiting
                         # We avoid Dask native TimeoutError, while
                         # ensuring workers are ready before

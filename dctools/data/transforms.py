@@ -97,7 +97,10 @@ def detect_and_normalize_longitude_system(
             max_lazy = da.nanmax(da_lon_subset)
 
             # One compute for both
-            lon_min, lon_max = dask.compute(min_lazy, max_lazy)
+            # Use synchronous scheduler to avoid nested dask task scheduling issues
+            # when running inside a worker (which creates KeyError or deadlocks)
+            with dask.config.set(scheduler="synchronous"):
+                lon_min, lon_max = dask.compute(min_lazy, max_lazy)
 
             lon_min = float(lon_min)
             lon_max = float(lon_max)

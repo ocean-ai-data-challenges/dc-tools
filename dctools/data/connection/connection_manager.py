@@ -600,7 +600,7 @@ class BaseConnectionManager(ABC):
             if values.ndim != 1:
                 return None
             if len(values) == 1:
-                return float(values[0])  # Retourne la valeur unique
+                return float(values[0])  # Return the unique value
             diffs = np.diff(values)
             return float(np.round(np.median(np.abs(diffs)), 6))
 
