@@ -106,7 +106,7 @@ def interpolate_scipy(
         # If assume_sorted=True, xarray.interp avoids costly sorts on dask coords
         # We verify if source coords are monotonic (fast since 1D)
 
-        # FORCED OPTIMIZATION for Pairwise: Use our specialized apply_ufunc implementation
+        # Forced optimization for Pairwise: Use our specialized apply_ufunc implementation
         # standard .interp() can be slow/memory-intensive for Grid-to-Track on Dask
         if pairwise:
              raise NotImplementedError(
