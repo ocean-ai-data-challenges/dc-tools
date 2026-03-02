@@ -39,6 +39,7 @@ def remove_file(filepath: str) -> bool:
         logger.error(f"remove_file: error when removing file {filepath}: {exc}")
         return False
 
+
 def empty_folder(dir_name: str, extension: Optional[Optional[str]] = None):
     """Remove all files in given folder.
 
@@ -60,6 +61,7 @@ def empty_folder(dir_name: str, extension: Optional[Optional[str]] = None):
     # print(f"{count} files deleted with extension {extension} in {dir_name}.")
     return count
 
+
 def list_files_with_extension(directory: str, extension: str):
     """Return a list of all files with a given extension in a specified directory.
 
@@ -67,9 +69,8 @@ def list_files_with_extension(directory: str, extension: str):
         directory(str): path to directory
         extension(str): file extension to look for
     """
-    return [fname for fname in sorted(
-        os.listdir(directory)
-    ) if Path(fname).suffix == extension]
+    return [fname for fname in sorted(os.listdir(directory)) if Path(fname).suffix == extension]
+
 
 def delete_files_from_list(directory: str, list_files: List[str]):
     """Remove a list of files in a given directory.
@@ -82,6 +83,7 @@ def delete_files_from_list(directory: str, list_files: List[str]):
         if os.path.isfile(fpath):
             os.remove(fpath)
 
+
 def run_command(command: str):
     """Run and wait till the end of the given command.
 
@@ -93,9 +95,8 @@ def run_command(command: str):
     p.wait()
     return p.returncode
 
-def remove_listof_files(
-    list_files:List[str], dir: str
-) -> None:
+
+def remove_listof_files(list_files: List[str], dir: str) -> None:
     """Remove a list of files from a given folder.
 
     Args:
@@ -111,9 +112,10 @@ def remove_listof_files(
     except Exception as exc:
         logger.error(f"Failed to remove files: {repr(exc)}")
 
+
 def get_list_filter_files(
-        directory: str, extension: str, regex: str, prefix: bool = False
-    ) -> List[str]:
+    directory: str, extension: str, regex: str, prefix: bool = False
+) -> List[str]:
     """Return a list of files that match some conditions.
 
     Args:
@@ -126,19 +128,16 @@ def get_list_filter_files(
     Returns:
         List[str]: _description_
     """
-    list_files = list_files_with_extension(directory,  extension)
+    list_files = list_files_with_extension(directory, extension)
     list_filter_files: List[Any] = []
     if prefix:
-        list_filter_files = [
-            ncf for ncf in list_files if ncf.startswith(regex)
-        ]
+        list_filter_files = [ncf for ncf in list_files if ncf.startswith(regex)]
     else:
-        list_filter_files = [
-            ncf for ncf in list_files if regex in ncf
-        ]
+        list_filter_files = [ncf for ncf in list_files if regex in ncf]
     return list_filter_files
 
-def read_file_tolist(filepath: str, max_lines: int=0) -> List[str]:
+
+def read_file_tolist(filepath: str, max_lines: int = 0) -> List[str]:
     """
     Read a file and return its content as a list of strings (lines).
 

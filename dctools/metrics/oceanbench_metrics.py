@@ -5,21 +5,36 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
-import oceanbench.metrics as oceanbench_metrics
-import xarray as xr
-from loguru import logger
-from oceanbench.core.class4_metrics.class4_evaluator import Class4Evaluator
-from oceanbench.core.derived_quantities import (
-    add_geostrophic_currents,
-    add_mixed_layer_depth,
-)
-from oceanbench.core.lagrangian_trajectory import (
-    ZoneCoordinates,
-    deviation_of_lagrangian_trajectories,
-)
-from oceanbench.core.rmsd import Variable, rmsd
+_OCEANBENCH_IMPORT_ERROR: Exception | None = None
+try:
+    import oceanbench.metrics as oceanbench_metrics  # type: ignore
+    from oceanbench.core.class4_metrics.class4_evaluator import Class4Evaluator  # type: ignore
+    from oceanbench.core.derived_quantities import (  # type: ignore
+        add_geostrophic_currents,
+        add_mixed_layer_depth,
+    )
+    from oceanbench.core.lagrangian_trajectory import (  # type: ignore
+        ZoneCoordinates,
+        deviation_of_lagrangian_trajectories,
+    )
+    from oceanbench.core.rmsd import Variable, rmsd  # type: ignore
 
-from dctools.data.coordinates import (
+    OCEANBENCH_AVAILABLE = True
+except Exception as exc:  # pragma: no cover
+    oceanbench_metrics = None  # type: ignore[assignment]
+    Class4Evaluator = None  # type: ignore[assignment]
+    add_geostrophic_currents = None  # type: ignore[assignment]
+    add_mixed_layer_depth = None  # type: ignore[assignment]
+    ZoneCoordinates = Any  # type: ignore[assignment]
+    deviation_of_lagrangian_trajectories = None  # type: ignore[assignment]
+    Variable = Any  # type: ignore[assignment]
+    rmsd = None  # type: ignore[assignment]
+    OCEANBENCH_AVAILABLE = False
+    _OCEANBENCH_IMPORT_ERROR = exc
+import xarray as xr  # noqa: E402
+from loguru import logger  # noqa: E402
+
+from dctools.data.coordinates import (  # noqa: E402
     COORD_ALIASES,
     EVAL_VARIABLES_GLONET,
     GLOBAL_ZONE_COORDINATES,
@@ -27,19 +42,23 @@ from dctools.data.coordinates import (
 )
 
 # Dictionary of variables of interest: {generic name -> standard_name(s), common aliases}
-OCEANBENCH_VARIABLES = {
-    "sla": Variable.SEA_SURFACE_HEIGHT_ABOVE_SEA_LEVEL,
-    "sst": Variable.SEA_SURFACE_TEMPERATURE,
-    "sss": Variable.SEA_WATER_SALINITY,
-    "ssh": Variable.SEA_SURFACE_HEIGHT_ABOVE_GEOID,
-    "temperature": Variable.SEA_WATER_POTENTIAL_TEMPERATURE,
-    "salinity": Variable.SEA_WATER_SALINITY,
-    "u_current": Variable.NORTHWARD_SEA_WATER_VELOCITY,
-    "v_current": Variable.EASTWARD_SEA_WATER_VELOCITY,
-    "w_current": Variable.UPWARD_SEA_WATER_VELOCITY,
-    "mld": Variable.MIXED_LAYER_THICKNESS,
-    "mdt": Variable.MEAN_DYNAMIC_TOPOGRAPHY,
-}
+if OCEANBENCH_AVAILABLE:
+    OCEANBENCH_VARIABLES = {
+        "sla": Variable.SEA_SURFACE_HEIGHT_ABOVE_SEA_LEVEL,
+        "sst": Variable.SEA_SURFACE_TEMPERATURE,
+        "sss": Variable.SEA_WATER_SALINITY,
+        "ssh": Variable.SEA_SURFACE_HEIGHT_ABOVE_GEOID,
+        "temperature": Variable.SEA_WATER_POTENTIAL_TEMPERATURE,
+        "salinity": Variable.SEA_WATER_SALINITY,
+        "u_current": Variable.NORTHWARD_SEA_WATER_VELOCITY,
+        "v_current": Variable.EASTWARD_SEA_WATER_VELOCITY,
+        "w_current": Variable.UPWARD_SEA_WATER_VELOCITY,
+        "mld": Variable.MIXED_LAYER_THICKNESS,
+        "mdt": Variable.MEAN_DYNAMIC_TOPOGRAPHY,
+    }
+else:  # pragma: no cover
+    OCEANBENCH_VARIABLES = {}
+
 
 def get_variable_alias(variable: str) -> Variable | None:
     """Get the alias for a given variable.
@@ -50,6 +69,8 @@ def get_variable_alias(variable: str) -> Variable | None:
     Returns:
         Optional[str]: The alias of the variable, or None if not found.
     """
+    if not OCEANBENCH_VARIABLES:
+        return None
     for alias, var in OCEANBENCH_VARIABLES.items():
         if alias == variable or var == variable:
             return var
@@ -74,19 +95,23 @@ class DCMetric(ABC):
                 - small_scale_cutoff_km (float): Cutoff for spectral analysis.
         """
         self.metric_name = None
-        no_default_attrs = ['metric_name', 'var', 'depth']
-        class_default_attrs = ['metric_name']
+        no_default_attrs = ["metric_name", "var", "depth"]
+        class_default_attrs = ["metric_name"]
         default_attrs: Dict[str, Any] = dict(
-            plot_result=False, minimum_latitude=None, maximum_latitude=None,
-            minimum_longitude=None, maximum_longitude=None,
-            spatial_resolution=None, small_scale_cutoff_km=100,
+            plot_result=False,
+            minimum_latitude=None,
+            maximum_latitude=None,
+            minimum_longitude=None,
+            maximum_longitude=None,
+            spatial_resolution=None,
+            small_scale_cutoff_km=100,
         )
         allowed_attrs = list(default_attrs.keys()) + no_default_attrs
         default_attrs.update(kwargs)
-        self.__dict__.update((k,v) for k,v in default_attrs.items() if k in allowed_attrs)
+        self.__dict__.update((k, v) for k, v in default_attrs.items() if k in allowed_attrs)
 
         for attr in class_default_attrs:
-            assert(hasattr(self, attr))
+            assert hasattr(self, attr)
 
     def get_metric_name(self) -> Optional[str]:
         """Return the name of the metric.
@@ -98,9 +123,7 @@ class DCMetric(ABC):
 
     @abstractmethod
     def compute(
-        self, pred_data: xr.Dataset,
-        ref_data: Optional[xr.Dataset] = None,
-        **kwargs: Any
+        self, pred_data: xr.Dataset, ref_data: Optional[xr.Dataset] = None, **kwargs: Any
     ) -> Any:
         """Compute the metric wrapper (includes preprocessing).
 
@@ -112,9 +135,7 @@ class DCMetric(ABC):
 
     @abstractmethod
     def compute_metric(
-        self, pred_data: xr.Dataset,
-        ref_data: Optional[xr.Dataset] = None,
-        **kwargs: Any
+        self, pred_data: xr.Dataset, ref_data: Optional[xr.Dataset] = None, **kwargs: Any
     ) -> Any:
         """Compute the core metric value.
 
@@ -123,7 +144,6 @@ class DCMetric(ABC):
             ref_data (xr.Dataset): Reference dataset.
         """
         pass
-
 
 
 class OceanbenchMetrics(DCMetric):
@@ -146,11 +166,23 @@ class OceanbenchMetrics(DCMetric):
             class4_kwargs (Optional[dict]): Arguments for Class4Evaluator.
             **kwargs: Additional arguments.
         """
+        if not OCEANBENCH_AVAILABLE:
+            msg = (
+                "oceanbench is required for OceanbenchMetrics, but it failed to import in this "
+                "environment. This is commonly caused by optional dependencies"
+                " (e.g. copernicusmarine) "
+                "or a broken sqlite3 build in the Python distribution."
+            )
+            if _OCEANBENCH_IMPORT_ERROR is not None:
+                msg += f" Original error: {repr(_OCEANBENCH_IMPORT_ERROR)}"
+            raise ImportError(msg)
+
         super().__init__(**kwargs)
         self.eval_variables = eval_variables
         self.oceanbench_eval_variables = oceanbench_eval_variables
         self.is_class4 = is_class4
         self.class4_kwargs = class4_kwargs or {}
+        self.bin_resolution = kwargs.get("bin_resolution", None)
 
         self.metrics_set: Dict[str, Optional[Dict[str, Any]]] = {
             "rmsd": {
@@ -158,7 +190,6 @@ class OceanbenchMetrics(DCMetric):
                 "kwargs_with_ref": ["vars"],
                 "func_no_ref": oceanbench_metrics.rmsd_of_variables_compared_to_glorys,
             },
-
             "lagrangian": {
                 "func_with_ref": deviation_of_lagrangian_trajectories,
                 "kwargs_with_ref": ["zone"],
@@ -166,25 +197,21 @@ class OceanbenchMetrics(DCMetric):
                     oceanbench_metrics.deviation_of_lagrangian_trajectories_compared_to_glorys
                 ),
             },
-
             "rmsd_geostrophic_currents": {
                 "func_with_ref": rmsd,
                 "kwargs_with_ref": ["vars"],
                 "func_no_ref": oceanbench_metrics.rmsd_of_geostrophic_currents_compared_to_glorys,
                 "preprocess_ref": add_geostrophic_currents,
             },
-
             "rmsd_mld": {
                 "func_with_ref": rmsd,
                 "kwargs_with_ref": ["vars"],
                 "func_no_ref": oceanbench_metrics.rmsd_of_mixed_layer_depth_compared_to_glorys,
                 "preprocess_ref": add_mixed_layer_depth,
             },
-
             # --- Addition for class 4 metrics ---
-            "class4": None
+            "class4": None,
         }
-
 
         if is_class4:
             class4_args = dict(self.class4_kwargs)
@@ -199,7 +226,6 @@ class OceanbenchMetrics(DCMetric):
                 apply_qc=class4_args.get("apply_qc", False),
                 qc_mapping=class4_args.get("qc_mapping", None),
             )
-
 
     def compute_metric(
         self,
@@ -225,14 +251,31 @@ class OceanbenchMetrics(DCMetric):
 
         if self.is_class4:
             try:
+                # ── Promote lat/lon/time to coordinates for obs datasets ──
+                # ARGO observation data has lat/lon/time as data_vars, not
+                # as coordinates.  Class4Evaluator accesses individual
+                # DataArrays via obs_ds[var], and only *coordinates* carry
+                # over to the DataArray.  Without this promotion, the
+                # resulting DataFrame has no spatial/temporal columns and
+                # interpolation cannot match observations to model grid.
+                coord_candidates = ["lat", "lon", "time"]
+                promote = [
+                    c
+                    for c in coord_candidates
+                    if c in ref_data.data_vars and c not in ref_data.coords
+                ]
+                if promote:
+                    ref_data = ref_data.set_coords(promote)
+                    """logger.debug(
+                        f"Promoted {promote} from data_vars to coords on obs dataset"
+                    )"""
+
                 res = self.class4_evaluator.run(
                     model_ds=pred_data,
                     obs_ds=ref_data,
                     variables=self.eval_variables,
                     ref_coords=ref_coords,
                 )
-
-                # logger.info(f"Class4Evaluator.run time: {t_c4_end - t_c4_start:.4f} seconds")
 
                 return res
 
@@ -242,8 +285,7 @@ class OceanbenchMetrics(DCMetric):
         else:
             if eval_variables:
                 has_depth = any(
-                    depth_alias in list(pred_data.dims)
-                    for depth_alias in COORD_ALIASES["depth"]
+                    depth_alias in list(pred_data.dims) for depth_alias in COORD_ALIASES["depth"]
                 )
             if eval_variables and not has_depth:
                 if self.metric_name == "lagrangian":
@@ -259,7 +301,7 @@ class OceanbenchMetrics(DCMetric):
             try:
                 metric_info = self.metrics_set[metric_name]
                 if metric_info is None:
-                     return None
+                    return None
 
                 if ref_data:
                     metric_func = metric_info["func_with_ref"]
@@ -294,6 +336,11 @@ class OceanbenchMetrics(DCMetric):
                         kwargs["zone"] = zone
 
                     kwargs.update(add_kwargs)
+
+                # Forward per-bins spatial resolution when set
+                if self.bin_resolution is not None:
+                    kwargs["bin_resolution"] = self.bin_resolution
+
                 result = metric_func(**kwargs)
 
                 return result

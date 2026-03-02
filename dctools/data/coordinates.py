@@ -1,14 +1,42 @@
 """Coordinate system utilities and transformations."""
 
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum
+import json
 from typing import Any, Dict, List, DefaultDict, Optional, Union
 
-import geopandas as gpd
-import json
 from loguru import logger
 import numpy as np
-from oceanbench.core.lagrangian_trajectory import ZoneCoordinates
-from oceanbench.core.rmsd import Variable
+
+try:
+    from oceanbench.core.lagrangian_trajectory import ZoneCoordinates  # type: ignore
+except Exception:
+
+    @dataclass(frozen=True)
+    class ZoneCoordinates:
+        """Fallback stub for ZoneCoordinates when oceanbench is unavailable."""
+
+        minimum_latitude: float
+        maximum_latitude: float
+        minimum_longitude: float
+        maximum_longitude: float
+
+
+try:
+    from oceanbench.core.rmsd import Variable  # type: ignore
+except Exception:
+
+    class Variable(str, Enum):
+        """Fallback stub for Variable when oceanbench is unavailable."""
+
+        SEA_SURFACE_HEIGHT_ABOVE_GEOID = "sea_surface_height_above_geoid"
+        SEA_WATER_POTENTIAL_TEMPERATURE = "sea_water_potential_temperature"
+        SEA_WATER_SALINITY = "sea_water_salinity"
+        NORTHWARD_SEA_WATER_VELOCITY = "northward_sea_water_velocity"
+        EASTWARD_SEA_WATER_VELOCITY = "eastward_sea_water_velocity"
+
+
 import pandas as pd
 from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
@@ -23,8 +51,12 @@ COORD_ALIASES = {
     "x": {"x", "xc", "x_center", "easting", "projection_x_coordinate", "grid_xt", "i"},
     "y": {"y", "yc", "y_center", "northing", "projection_y_coordinate", "grid_yt", "j"},
     "depth": {
-        "depth", "lev", "level", "bottom", # "z" # z also used by `siconc`
-        "deptht", "isodepth",
+        "depth",
+        "lev",
+        "level",
+        "bottom",  # "z" # z also used by `siconc`
+        "deptht",
+        "isodepth",
         # NOTE: for argo data pressure = depth (pres_adjusted)
     },
     "quadrant": {"quadrant", "sector"},
@@ -34,15 +66,15 @@ COORD_ALIASES = {
 
 # Variable of interest dictionary: {generic name -> standard_name(s), common aliases}
 VARIABLES_ALIASES = {
-    #"sla": {   # TODO : check about computing sla from ssh
+    # "sla": {   # TODO : check about computing sla from ssh
     #    "standard_names": ["sea_surface_height_above_sea_level"],
     #    "aliases": ["sla", "data_01__ku__ssha", "ssha"]
-    #},
-    #"sst": {
+    # },
+    # "sst": {
     #    "standard_names": ["sea_surface_temperature"],
     #    "aliases": ["sst", "surface_temperature", "temperature_surface"]
-    #},
-    #"sst_foundation": {
+    # },
+    # "sst_foundation": {
     #    "standard_names": ["sea_surface_foundation_temperature"],
     #    "aliases": [
     #        "sst_foundation", "sst_fnd",
@@ -54,140 +86,152 @@ VARIABLES_ALIASES = {
     "sst": {
         "standard_names": ["sea_surface_temperature", "sea_surface_foundation_temperature"],
         "aliases": [
-            "sst", "surface_temperature", "temperature_surface",
-            "sst_foundation", "sst_fnd",
-            "sstfoundation", "sstfnd", "sst_ref",
-            "foundation_temperature", "t_surf_foundation",
-            "adjusted_sea_surface_temperature",    # TODO : check this one
-        ]
+            "sst",
+            "surface_temperature",
+            "temperature_surface",
+            "sst_foundation",
+            "sst_fnd",
+            "sstfoundation",
+            "sstfnd",
+            "sst_ref",
+            "foundation_temperature",
+            "t_surf_foundation",
+            "adjusted_sea_surface_temperature",  # TODO : check this one
+        ],
     },
     "sss": {
         "standard_names": ["sea_surface_salinity"],
         "aliases": [
-            "sss", "surface_salinity", "salinity_surface", "SSS", "SST_sal",
+            "sss",
+            "surface_salinity",
+            "salinity_surface",
+            "SSS",
+            "SST_sal",
             "Sea_Surface_Salinity_Rain_Corrected",  # TODO : check mixing validity
-        ]
+        ],
     },
     "ssh": {
         "standard_names": [
             "sea_surface_height",
             "sea_surface_height_above_geoid",
-            "sea_surface_height_above_reference_ellipsoid"
+            "sea_surface_height_above_reference_ellipsoid",
         ],
         "aliases": [
-            "ssh", "sea_level", "surface_height",
-            "ssha_filtered", "zos", "data_01__ku__ssha",  "ssha",
-        ]
+            "ssh",
+            "sea_level",
+            "surface_height",
+            "ssha_filtered",
+            "zos",
+            "data_01__ku__ssha",
+            "ssha",
+        ],
     },
     "temperature": {
         "standard_names": ["sea_water_potential_temperature", "sea_water_temperature"],
-        "aliases": ["temperature", "temp", "thetao", "temp_adjusted"]
+        "aliases": ["temperature", "temp", "thetao", "temp_adjusted"],
     },
     "salinity": {
         "standard_names": ["sea_water_salinity"],
-        "aliases": ["salinity", "psu", "sal", "psal", "s", "salt", "so", "psal_adjusted"]
+        "aliases": ["salinity", "psu", "sal", "psal", "s", "salt", "so", "psal_adjusted"],
     },
     "u_current": {
         "standard_names": ["eastward_sea_water_velocity"],
-        "aliases": ["u", "uo", "u_velocity"]
+        "aliases": ["u", "uo", "u_velocity"],
     },
     "v_current": {
         "standard_names": ["northward_sea_water_velocity"],
-        "aliases": ["v", "vo", "v_velocity"]
+        "aliases": ["v", "vo", "v_velocity"],
     },
     "w_current": {
         "standard_names": ["upward_sea_water_velocity"],
-        "aliases": ["w", "wo", "w_velocity"]
+        "aliases": ["w", "wo", "w_velocity"],
     },
-    "mld": {
-        "standard_names": ["mixed_layer_depth"],
-        "aliases": ["mld", "mix_layer_depth"]
-    },
+    "mld": {"standard_names": ["mixed_layer_depth"], "aliases": ["mld", "mix_layer_depth"]},
     "mean_dynamic_topography": {
         "standard_names": ["mean_dynamic_topography_cnes_cls", "mean_dynamic_topography"],
         "aliases": [
-            "mdt", "mean_topography", "mean_dynamic_topography", "mean_dynamic_topography_cnes_cls",
+            "mdt",
+            "mean_topography",
+            "mean_dynamic_topography",
+            "mean_dynamic_topography_cnes_cls",
             "data_01__mean_dynamic_topography",
-        ]   # TODO : check "mean_topography"
+        ],  # TODO : check "mean_topography"
     },
     "mean_sea_surface": {
         "standard_names": ["mean_sea_surface_height"],
         "aliases": [
-            "mean_sea_surface", "mss", "mean_sea_surface_height", "mss_cnes_clsXX",
-            "data_01__mean_sea_surface_cnescls"
-        ]
+            "mean_sea_surface",
+            "mss",
+            "mean_sea_surface_height",
+            "mss_cnes_clsXX",
+            "data_01__mean_sea_surface_cnescls",
+        ],
     },
-    "quality_level": {
-        "standard_names": ["quality_level"],
-        "aliases": ["quality_level"]
-    },
+    "quality_level": {"standard_names": ["quality_level"], "aliases": ["quality_level"]},
     # ARGO specific pressure
     "pressure": {
         "standard_names": ["sea_water_pressure"],
-        "aliases": ["pres", "pres_adjusted", "pressure"]
+        "aliases": ["pres", "pres_adjusted", "pressure"],
     },
     # dimensions/coordinates are variables in some datasets
     "time": {
         "standard_names": ["time"],
         "aliases": [
-            "time", "date", "datetime", "valid_time", "forecast_time", "time_counter",
-            "data_01__time_tai", "profile_date"
-        ]
+            "time",
+            "date",
+            "datetime",
+            "valid_time",
+            "forecast_time",
+            "time_counter",
+            "data_01__time_tai",
+            "profile_date",
+        ],
     },
-    "lat": {
-        "standard_names": ["latitude"],
-        "aliases": ["lat", "latitude", "nav_lat"]
-    },
-    "lon": {
-        "standard_names": ["longitude"],
-        "aliases": ["lon", "longitude", "nav_lon"]
-    },
+    "lat": {"standard_names": ["latitude"], "aliases": ["lat", "latitude", "nav_lat"]},
+    "lon": {"standard_names": ["longitude"], "aliases": ["lon", "longitude", "nav_lon"]},
     "depth": {
         "standard_names": ["depth"],
         "aliases": [
-            "depth", "lev", "level", "bottom", "deptht", "isodepth",
-            "data_01__depth_or_elevation", "data_01__altitude"
-        ]
+            "depth",
+            "lev",
+            "level",
+            "bottom",
+            "deptht",
+            "isodepth",
+            "data_01__depth_or_elevation",
+            "data_01__altitude",
+        ],
         # NOTE: Removed "z" from aliases as it is already used by `siconc`
     },
     # Polar coordinates (EPSG:3413)
     "x": {
         "standard_names": ["x"],
-        "aliases": ["x", "xc", "x_center", "easting", "projection_x_coordinate", "grid_xt", "i"]
+        "aliases": ["x", "xc", "x_center", "easting", "projection_x_coordinate", "grid_xt", "i"],
     },
     "y": {
         "standard_names": ["y"],
-        "aliases": ["y", "yc", "y_center", "northing", "projection_y_coordinate", "grid_yt", "j"]
+        "aliases": ["y", "yc", "y_center", "northing", "projection_y_coordinate", "grid_yt", "j"],
     },
-    "leadmap": {# MODIS ArcLeads
+    "leadmap": {  # MODIS ArcLeads
         "standard_names": ["leadmap"],
-        "aliases": ["leadmap"]
+        "aliases": ["leadmap"],
     },
     # IABP variables
-    "barometric_pressure": { # TODO: check for conflicts with sea_water_pressure
+    "barometric_pressure": {  # TODO: check for conflicts with sea_water_pressure
         "standard_names": ["barometric_pressure"],
-        "aliases": ["bp", "BP"]
+        "aliases": ["bp", "BP"],
     },
     "barometric_pressure_tendency": {
         "standard_names": ["barometric_pressure_tendency"],
-        "aliases": ["bpt", "BPT"]
+        "aliases": ["bpt", "BPT"],
     },
-    "air_temperature": {
-        "standard_names": ["air_temperature"],
-        "aliases": ["Ta"]
-    },
-    "hull_temperature": {
-        "standard_names": ["hull_temperature"],
-        "aliases": ["Th"]
-    },
-    "surface_temperature": {
-        "standard_names": ["surface_temperature"],
-        "aliases": ["Ts"]
-    },
+    "air_temperature": {"standard_names": ["air_temperature"], "aliases": ["Ta"]},
+    "hull_temperature": {"standard_names": ["hull_temperature"], "aliases": ["Th"]},
+    "surface_temperature": {"standard_names": ["surface_temperature"], "aliases": ["Ts"]},
     # DC3 (AMSR2) variables
     "siconc": {
         "standard_names": ["sea_ice_area_fraction"],
-        "aliases": ["siconc", "sea_icea_area_fraction", "z"] # "z" used for siconc on AMSR2
+        "aliases": ["siconc", "sea_icea_area_fraction", "z"],  # "z" used for siconc on AMSR2
     },
     "n_points": {
         "standard_names": ["n_points"],
@@ -217,29 +261,82 @@ GLOBAL_ZONE_COORDINATES = ZoneCoordinates(
 
 LIST_VARS_GLONET = ["thetao", "zos", "uo", "vo", "so", "depth", "lat", "lon", "time"]
 
-TARGET_DEPTH_VALS = [0.494025, 47.37369, 92.32607, 155.8507, 222.4752, 318.1274, 380.213,
-        453.9377, 541.0889, 643.5668, 763.3331, 902.3393, 1245.291, 1684.284,
-        2225.078, 3220.82, 3597.032, 3992.484, 4405.224, 4833.291, 5274.784]
 
-TARGET_DEPTH_VALS_SURFACE = [0.494025]
+def _as_dict(cfg: Any) -> Dict[str, Any]:
+    if cfg is None:
+        return {}
+    if isinstance(cfg, dict):
+        return cfg
+    try:
+        return dict(vars(cfg))
+    except Exception:
+        return {}
 
-GLONET_TIME_VALS = range(0, 10)
 
-TARGET_DIM_RANGES = {
-    "lat": np.arange(-78, 90, 0.25),
-    "lon": np.arange(-180, 180, 0.25),
-    "depth": TARGET_DEPTH_VALS,
-    #"time": GLONET_TIME_VALS,
-}
+def _build_axis_from_spec(spec: Any) -> Any:
+    """Build a 1D axis from a YAML-friendly spec.
 
-TARGET_DIM_RANGES_SURFACE = {
-    "lat": np.arange(-78, 90, 0.25),
-    "lon": np.arange(-180, 180, 0.25),
-    "depth": TARGET_DEPTH_VALS_SURFACE,
-    #"time": GLONET_TIME_VALS,
-}
+    Supported forms:
+    - list/tuple: returned as-is
+    - {start, stop, step}: returns np.arange(start, stop, step)
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, (list, tuple, range, np.ndarray)):
+        return spec
+    if isinstance(spec, dict):
+        if {"start", "stop", "step"}.issubset(spec.keys()):
+            return np.arange(float(spec["start"]), float(spec["stop"]), float(spec["step"]))
+    return spec
 
-'''GLONET_ENCODING = {"depth": {"dtype": "float32"},
+
+def get_target_dimensions(cfg: Any, *, surface: bool = False) -> Dict[str, Any]:
+    """Return the target dimensions dict from global config.
+
+    This replaces the former module-level constants (TARGET_DIM_RANGES, TARGET_DEPTH_VALS, ...)
+    and keeps the grid definition in the YAML config.
+    """
+    cfg_dict = _as_dict(cfg)
+    key = "target_dimensions_surface" if surface else "target_dimensions"
+    spec = cfg_dict.get(key) or {}
+    if not isinstance(spec, dict):
+        return {}
+
+    out: Dict[str, Any] = {}
+    for axis_name, axis_spec in spec.items():
+        out[axis_name] = _build_axis_from_spec(axis_spec)
+    return out
+
+
+def get_target_depth_values(cfg: Any, *, surface: bool = False) -> Optional[List[float]]:
+    """Extract configured depth values from a global config dict."""
+    dims = get_target_dimensions(cfg, surface=surface)
+    depth = dims.get("depth")
+    if depth is None:
+        return None
+    if isinstance(depth, np.ndarray):
+        return [float(x) for x in depth.tolist()]
+    if isinstance(depth, range):
+        return [float(x) for x in list(depth)]
+    if isinstance(depth, (list, tuple)):
+        return [float(x) for x in depth]
+    return None
+
+
+def get_target_time_values(cfg: Any) -> Optional[List[Any]]:
+    """Extract configured target time values from a global config dict."""
+    cfg_dict = _as_dict(cfg)
+    vals = cfg_dict.get("target_time_values")
+    if vals is None:
+        return None
+    if isinstance(vals, range):
+        return list(vals)
+    if isinstance(vals, (list, tuple)):
+        return list(vals)
+    return None
+
+
+"""GLONET_ENCODING = {"depth": {"dtype": "float32"},
                    "lat": {"dtype": "float64"},
                    "lon": {"dtype": "float64"},
                    "time": {"dtype": "str"},
@@ -247,7 +344,8 @@ TARGET_DIM_RANGES_SURFACE = {
                    "thetao": {"dtype": "float32"},
                    "uo": {"dtype": "float32"},
                    "vo": {"dtype": "float32"},
-                   "zos": {"dtype": "float32"},'''
+                   "zos": {"dtype": "float32"},"""
+
 
 def get_standardized_var_name(name: str):
     """
@@ -259,6 +357,18 @@ def get_standardized_var_name(name: str):
     Returns:
         str: Standardized key if found, else None.
     """
+    # Many observation products include bookkeeping/index variables that are
+    # not meant to be standardized or evaluated.
+    _ignorable = {
+        "i_num_pixel",
+        "i_num_line",
+        "num_pixels",
+        "num_lines",
+        "num_nadir",
+    }
+    if name.lower() in _ignorable:
+        logger.debug(f"Ignoring non-science variable: {name}.")
+        return None
     for key, config in VARIABLES_ALIASES.items():
         list_aliases = config["aliases"]
         if name.lower() in list_aliases:
@@ -274,8 +384,8 @@ class CoordinateSystem:
 
     def __init__(
         self,
-        coord_type: str,      # "geographic", "polar", etc.
-        coord_level: str,     # "grid", "point", "sparse", etc.
+        coord_type: str,  # "geographic", "polar", etc.
+        coord_level: str,  # "grid", "point", "sparse", etc.
         coordinates: Dict[str, str],
         crs: str,
     ):
@@ -307,13 +417,7 @@ class CoordinateSystem:
 
     def toJSON(self):
         """Convert the object to a JSON string."""
-        return json.dumps(
-            self,
-            default=lambda o: o.__dict__,
-            sort_keys=True,
-            indent=4
-        )
-
+        return json.dumps(self, default=lambda o: o.__dict__, sort_keys=True, indent=4)
 
     @staticmethod
     def detect_data_level(data: object, names_dict: dict) -> str:
@@ -354,8 +458,12 @@ class CoordinateSystem:
                 time = data[time_name]
                 # 1D arrays of same length, not dims
                 if (
-                    lat is not None and lon is not None and time is not None
-                    and hasattr(lat, "ndim") and hasattr(lon, "ndim") and hasattr(time, "ndim")
+                    lat is not None
+                    and lon is not None
+                    and time is not None
+                    and hasattr(lat, "ndim")
+                    and hasattr(lon, "ndim")
+                    and hasattr(time, "ndim")
                     and lat.ndim == lon.ndim == time.ndim == 1
                     and not {lat_name, lon_name, time_name} <= dims
                     and len(lat) == len(lon) == len(time)
@@ -369,8 +477,8 @@ class CoordinateSystem:
             if not ({lat_name, lon_name} & all_names):
                 return "L1"
 
-        # DataFrame / GeoDataFrame
-        if isinstance(data, (pd.DataFrame, gpd.GeoDataFrame)):
+        # DataFrame (GeoDataFrame is a pandas.DataFrame subclass)
+        if isinstance(data, pd.DataFrame):
             cols = set(data.columns)
             # L2: lat/lon/time as columns
             if {lat_name, lon_name, time_name} <= cols:
@@ -394,7 +502,6 @@ class CoordinateSystem:
                 return str(attrs["level"])
 
         return "unknown"
-
 
     @staticmethod
     def get_coordinate_system(ds: Union[xr.Dataset, xr.DataArray]) -> "CoordinateSystem":
@@ -495,6 +602,7 @@ class CoordinateSystem:
             logger.error(f"Error in variable detection: {repr(exc)}")
             raise ValueError("Failed to detect oceanographic variables.") from exc
 
+
 def get_dataset_geometry(
     ds: xr.Dataset, coord_sys: CoordinateSystem, max_points: int = 50000
 ) -> BaseGeometry:
@@ -537,12 +645,12 @@ def get_dataset_geometry(
 
         # Check that unique_points is of shape (N, 2) and float type
         if not (
-            isinstance(unique_points, np.ndarray) and
-            unique_points.ndim == 2 and unique_points.shape[1] == 2
+            isinstance(unique_points, np.ndarray)
+            and unique_points.ndim == 2
+            and unique_points.shape[1] == 2
         ):
             raise ValueError(
-                f"unique_points malformed: shape={unique_points.shape}, "
-                f"type={type(unique_points)}"
+                f"unique_points malformed: shape={unique_points.shape}, type={type(unique_points)}"
             )
 
         # Detection grid or point cloud
@@ -565,7 +673,9 @@ def get_dataset_geometry(
         raise
 
 
-def get_dataset_geometry_light(ds: xr.Dataset, coord_sys: CoordinateSystem) -> gpd.GeoSeries:
+def get_dataset_geometry_light(
+    ds: xr.Dataset, coord_sys: CoordinateSystem
+) -> Optional[BaseGeometry]:
     """Simplified version to avoid memory issues."""
     try:
         coords = coord_sys.coordinates
@@ -588,7 +698,8 @@ def get_dataset_geometry_light(ds: xr.Dataset, coord_sys: CoordinateSystem) -> g
     except Exception as exc:
         logger.error(f"Safe geometry extraction failed: {repr(exc)}")
         from shapely.geometry import Point
-        return gpd.GeoSeries([Point(0, 0)])
+
+        return Point(0, 0)
 
 
 def is_rectangular_grid(points: np.ndarray, tol: float = 1e-5) -> bool:

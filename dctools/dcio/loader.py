@@ -14,8 +14,11 @@ import traceback
 import xarray as xr
 
 # Dask configuration for compatibility
-os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-os.environ['NETCDF4_DEACTIVATE_MPI'] = '1'
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+os.environ["NETCDF4_DEACTIVATE_MPI"] = "1"
+os.environ["NETCDF4_USE_FILE_LOCKING"] = "FALSE"
+os.environ["HDF5_DISABLE_VERSION_CHECK"] = "1"
+os.environ["ARGOPY_NETCDF_LOCKING"] = "FALSE"
 
 
 def configure_xarray_for_dask():
@@ -26,13 +29,15 @@ def configure_xarray_for_dask():
     import dask
 
     # Dask configuration for xarray
-    dask.config.set({
-        'array.chunk-size': '128MB',
-        'array.slicing.split_large_chunks': False,
-        'distributed.worker.daemon': False,
-        'distributed.comm.timeouts.tcp': 300,
-        'distributed.comm.timeouts.connect': 180,
-    })
+    dask.config.set(
+        {
+            "array.chunk-size": "128MB",
+            "array.slicing.split_large_chunks": False,
+            "distributed.worker.daemon": False,
+            "distributed.comm.timeouts.tcp": 300,
+            "distributed.comm.timeouts.connect": 180,
+        }
+    )
 
     # xarray configuration - Minimize file cache to avoid memory accumulation
     # This prevents file handles from being kept in memory between batches
@@ -85,30 +90,31 @@ def list_all_group_paths(nc_path: str) -> List[str]:
     Thread-safe for use with Dask.
     Tries h5netcdf first (faster), then netCDF4.
     """
+
     def walk(grp, prefix=""):
         paths: List[str] = []
         # h5netcdf and netCDF4 have slightly different APIs for groups
         # netcdf4: .groups (dict)
         # h5netcdf: .keys() but must check if it is a group
         items = getattr(grp, "groups", None)
-        if items is None: # h5netcdf loop approach
-             items = grp
+        if items is None:  # h5netcdf loop approach
+            items = grp
 
         # Generic iteration
         for name in items:
-             # h5netcdf key iter
-             try:
-                 item = grp[name]
-             except Exception:
-                 continue # skip if error
+            # h5netcdf key iter
+            try:
+                item = grp[name]
+            except Exception:
+                continue  # skip if error
 
-             # Check if it is a group
-             # h5netcdf.Group ou netCDF4.Group
-             is_group = False
-             if hasattr(item, "groups") or "Group" in type(item).__name__:
-                 is_group = True
+            # Check if it is a group
+            # h5netcdf.Group ou netCDF4.Group
+            is_group = False
+            if hasattr(item, "groups") or "Group" in type(item).__name__:
+                is_group = True
 
-             if is_group:
+            if is_group:
                 full = f"{prefix}/{name}" if prefix else name
                 paths.append(full)
                 paths.extend(walk(item, full))
@@ -117,10 +123,11 @@ def list_all_group_paths(nc_path: str) -> List[str]:
     # Attempt with h5netcdf (often faster for listing)
     try:
         import h5netcdf
-        with h5netcdf.File(nc_path, 'r') as nc:
-             # The walk function must be adapted for h5netcdf if necessary
-             # To keep it simple, we recreate a specific walk for h5netcdf
-             def walk_h5(grp: Any, prefix: str = "") -> List[str]:
+
+        with h5netcdf.File(nc_path, "r") as nc:
+            # The walk function must be adapted for h5netcdf if necessary
+            # To keep it simple, we recreate a specific walk for h5netcdf
+            def walk_h5(grp: Any, prefix: str = "") -> List[str]:
                 paths: List[str] = []
                 for name in grp.keys():
                     item = grp[name]
@@ -130,7 +137,7 @@ def list_all_group_paths(nc_path: str) -> List[str]:
                         paths.extend(walk_h5(item, full))
                 return paths
 
-             groups = walk_h5(nc)
+            groups = walk_h5(nc)
         gc.collect()
         return groups
     except (ImportError, OSError, Exception):
@@ -139,7 +146,8 @@ def list_all_group_paths(nc_path: str) -> List[str]:
 
     try:
         # Use mode 'r' with format='NETCDF4' for Dask compatibility
-        with netCDF4.Dataset(nc_path, "r", format='NETCDF4') as nc:
+        with netCDF4.Dataset(nc_path, "r", format="NETCDF4") as nc:
+
             def walk_nc(grp: Any, prefix: str = "") -> List[str]:
                 paths: List[str] = []
                 for name, subgrp in grp.groups.items():
@@ -147,6 +155,7 @@ def list_all_group_paths(nc_path: str) -> List[str]:
                     paths.append(full)
                     paths.extend(walk_nc(subgrp, full))
                 return paths
+
             groups = walk_nc(nc)
         gc.collect()
         return groups
@@ -191,7 +200,7 @@ class FileLoader:
         if target_chunk_mb is None:
             target_chunk_mb = 128
 
-        os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+        os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
         try:
             # force lazy loading: chunks={} tells xarray to use dask with file's chunks
             base_chunks: Dict[Any, Any] = {}
@@ -212,10 +221,9 @@ class FileLoader:
                         try:
                             sub_ds = xr.open_dataset(file_path, group=group_path, **open_kwargs)
                             prefix = group_path.replace("/", "__")
-                            sub_ds = sub_ds.rename({
-                                var: f"{prefix}__{var}"
-                                for var in sub_ds.data_vars
-                            })
+                            sub_ds = sub_ds.rename(
+                                {var: f"{prefix}__{var}" for var in sub_ds.data_vars}
+                            )
                             datasets.append(sub_ds)
                         except Exception as e:
                             logger.warning(f"Failed to open group {group_path}: {e}")
@@ -240,6 +248,7 @@ class FileLoader:
                             store = file_storage.get_mapper(file_path)  # <-- mapping, not file-like
                             # kvstore = zarr.storage.KVStore(store)
                             ds = xr.open_zarr(store, **zarr_kwargs)
+                            break  # success — do NOT open the store again on next iteration
                         except Exception as e:
                             logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
                             if attempt == reading_retries - 1:
@@ -248,10 +257,22 @@ class FileLoader:
                     for attempt in range(reading_retries):
                         try:
                             ds = xr.open_zarr(file_path, **zarr_kwargs)
+                            break
                         except Exception as e:
-                            logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
-                            if attempt == reading_retries - 1:
-                                raise
+                            # If consolidated metadata is missing, retry without it
+                            if "zmetadata" in str(e).lower() or "consolidated" in str(e).lower():
+                                try:
+                                    fallback_kw = {**zarr_kwargs, "consolidated": False}
+                                    ds = xr.open_zarr(file_path, **fallback_kw)
+                                    break
+                                except Exception as e2:
+                                    logger.warning(f"Reading attempt {attempt + 1} failed: {e2}")
+                                    if attempt == reading_retries - 1:
+                                        raise
+                            else:
+                                logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
+                                if attempt == reading_retries - 1:
+                                    raise
             else:
                 raise ValueError(f"Unsupported file format {file_path}.")
 

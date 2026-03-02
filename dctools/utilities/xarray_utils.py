@@ -7,9 +7,9 @@ import traceback
 from typing import Any, Dict, List, Optional, Union
 
 # New (compatible with recent versions)
-#from pangeo_forge_recipes.recipes.xarray.zarr import XarrayZarrRecipe
-#from pangeo_forge_recipes.patterns import FilePattern
-#from pangeo_forge_recipes.executors.python import PythonPipelineExecutor
+# from pangeo_forge_recipes.recipes.xarray.zarr import XarrayZarrRecipe
+# from pangeo_forge_recipes.patterns import FilePattern
+# from pangeo_forge_recipes.executors.python import PythonPipelineExecutor
 import cftime
 from loguru import logger
 import numpy as np
@@ -17,7 +17,6 @@ import pandas as pd
 from pathlib import Path
 import shutil
 import xarray as xr
-
 
 
 def create_empty_dataset(dimensions: dict) -> xr.Dataset:
@@ -50,8 +49,7 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
     """
     # Rename coordinates (without touching dimensions)
     coords_to_rename = {
-        k: v for k, v in rename_dict.items()
-        if k in ds.coords and k != v and v not in ds.coords
+        k: v for k, v in rename_dict.items() if k in ds.coords and k != v and v not in ds.coords
     }
     if coords_to_rename:
         ds = ds.rename(coords_to_rename)
@@ -74,6 +72,7 @@ def rename_coordinates(ds: xr.Dataset, rename_dict: dict) -> xr.Dataset:
         if old in ds.coords and old != new:
             ds = ds.drop_vars(old)
     return ds
+
 
 def quantize_on_dimension(
     ds: xr.Dataset, dim: str, target_values: list, tol: float = 1e-2
@@ -107,6 +106,7 @@ def quantize_on_dimension(
     # Select corresponding slices
     ds_quantized = ds.isel({dim: selected_indices})
     return ds_quantized
+
 
 def rename_variables(ds: xr.Dataset, rename_dict: Optional[Optional[dict]] = None):
     """
@@ -164,6 +164,7 @@ def rename_coords_and_vars(
         logger.error(f"Error renaming coordinates or variables: {e}")
         raise ValueError(f"Failed to rename coordinates or variables in dataset: {e}") from e
 
+
 def subset_variables(ds: xr.Dataset, list_vars: List[str]):
     """
     Extract a sub-dataset containing only listed variables, preserving attributes.
@@ -171,9 +172,9 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
     Also handles coordinate preservation and standard_name attribute updates.
     """
     for variable_name in ds.variables:
-        var_std_name = str(ds[variable_name].attrs.get("standard_name", '')).lower()
+        var_std_name = str(ds[variable_name].attrs.get("standard_name", "")).lower()
         if not var_std_name:
-            var_std_name = str(ds[variable_name].attrs.get("std_name", '')).lower()
+            var_std_name = str(ds[variable_name].attrs.get("std_name", "")).lower()
 
     real_vars = [var for var in list_vars if var in ds.data_vars]
     # Creates a sub-dataset with only listed variables
@@ -185,9 +186,9 @@ def subset_variables(ds: xr.Dataset, list_vars: List[str]):
         subset = subset.set_coords(coords_to_set)
 
     for variable_name in subset.variables:
-        var_std_name = str(subset[variable_name].attrs.get("standard_name",'')).lower()
+        var_std_name = str(subset[variable_name].attrs.get("standard_name", "")).lower()
         if not var_std_name:
-            var_std_name = str(subset[variable_name].attrs.get("std_name", '')).lower()
+            var_std_name = str(subset[variable_name].attrs.get("std_name", "")).lower()
 
     return subset
 
@@ -199,7 +200,7 @@ def apply_standard_dimension_order(da: xr.DataArray) -> xr.DataArray:
     If a dimension does not exist, it is ignored.
     """
     # Desired standard order
-    standard_order = ['time', 'depth', 'lat', 'lon']
+    standard_order = ["time", "depth", "lat", "lon"]
 
     # Keep only dimensions that exist in DataArray
     existing_dims = [dim for dim in standard_order if dim in da.dims]
@@ -210,6 +211,7 @@ def apply_standard_dimension_order(da: xr.DataArray) -> xr.DataArray:
 
     return da.transpose(*final_order)
 
+
 def assign_coordinate(
     ds: xr.Dataset, coord_name: str, coord_vals: List[Any], coord_attrs: Dict[str, str]
 ):
@@ -217,12 +219,15 @@ def assign_coordinate(
     ds = ds.assign_coords({coord_name: (coord_name, coord_vals, coord_attrs)})
     return ds
 
+
 def get_glonet_time_attrs(start_date: str):
     """Get time attributes for Glonet dataset."""
     glonet_time_attrs = {
-        'units': f"days since {start_date} 00:00:00", 'calendar': "proleptic_gregorian"
+        "units": f"days since {start_date} 00:00:00",
+        "calendar": "proleptic_gregorian",
     }
     return glonet_time_attrs
+
 
 def get_time_info(ds: xr.Dataset):
     """
@@ -249,8 +254,9 @@ def get_time_info(ds: xr.Dataset):
             calendar = time_coord.attrs.get("calendar", "standard")
 
             # Case 1: Already decoded to datetime-like values
-            if (np.issubdtype(time_coord.dtype, np.datetime64) or
-                    isinstance(time_coord.values[0], cftime.DatetimeBase)):
+            if np.issubdtype(time_coord.dtype, np.datetime64) or isinstance(
+                time_coord.values[0], cftime.DatetimeBase
+            ):
                 times = pd.to_datetime(time_coord.values)
                 break
 
@@ -276,32 +282,18 @@ def get_time_info(ds: xr.Dataset):
                 duration = parsed_end - parsed_start
             except Exception:
                 pass
-        return {
-            "start": start,
-            "end": end,
-            "duration": duration,
-            "calendar": None
-        }
+        return {"start": start, "end": end, "duration": duration, "calendar": None}
 
     # Step 3: Extract times and compute
     if len(times) == 0:
-        return {
-            "start": None,
-            "end": None,
-            "duration": None,
-            "calendar": calendar
-        }
+        return {"start": None, "end": None, "duration": None, "calendar": calendar}
 
     start = times.min()
     end = times.max()
     duration = end - start
 
-    return {
-        "start": start,
-        "end": end,
-        "duration": duration,
-        "calendar": calendar
-    }
+    return {"start": start, "end": end, "duration": duration, "calendar": calendar}
+
 
 def filter_time_interval(ds: xr.Dataset, start_time: str, end_time: str) -> Optional[xr.Dataset]:
     """
@@ -370,10 +362,9 @@ def extract_spatial_bounds(ds: xr.Dataset) -> dict:
         "lon_max": float(lon_vals.max()),
     }
 
+
 def filter_spatial_area(
-    ds: xr.Dataset,
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float
+    ds: xr.Dataset, lat_min: float, lat_max: float, lon_min: float, lon_max: float
 ) -> Optional[xr.Dataset]:
     """
     Filters an xarray Dataset to only include data within a specified spatial area.
@@ -443,11 +434,12 @@ def reset_time_coordinates(dataset: xr.Dataset) -> xr.Dataset:
     dataset = dataset.assign_coords(time=new_time_values)
     return dataset
 
+
 def subsample_dataset(
     ds: xr.Dataset,
     subsample_values: Optional[Dict[str, Union[List, np.ndarray, slice]]] = None,
     method: str = "nearest",
-    tolerance: Optional[Optional[Dict[str, float]]] = None
+    tolerance: Optional[Optional[Dict[str, float]]] = None,
 ) -> xr.Dataset:
     """
     Subsamples an xarray Dataset over one or many dimensions.
@@ -499,7 +491,6 @@ def subsample_dataset(
 
     # Iterate over each dimension to subsample
     for dim_name, values in subsample_values.items():
-
         # Check that dimension exists in dataset
         if dim_name not in ds_result.dims:
             logger.warning(
@@ -518,9 +509,9 @@ def subsample_dataset(
                 dim_tolerance = tolerance.get(dim_name, None)
 
                 # Build arguments for sel()
-                sel_kwargs: Dict[str, Any] = {dim_name: values, 'method': method}
+                sel_kwargs: Dict[str, Any] = {dim_name: values, "method": method}
                 if dim_tolerance is not None:
-                    sel_kwargs['tolerance'] = dim_tolerance
+                    sel_kwargs["tolerance"] = dim_tolerance
 
                 ds_result = ds_result.sel(**sel_kwargs)
 
@@ -529,7 +520,7 @@ def subsample_dataset(
             # In case of error, drop=True to ignore missing values
             try:
                 if not isinstance(values, slice):
-                    sel_kwargs['drop'] = True
+                    sel_kwargs["drop"] = True
                     ds_result = ds_result.sel(**sel_kwargs)
                     logger.info(f"Successfully subsampled '{dim_name}' with drop=True")
                 else:
@@ -554,7 +545,7 @@ def subsample_dataset(
 
 def subsample_dataset_by_indices(
     ds: xr.Dataset,
-    subsample_indices: Optional[Dict[str, Union[List[int], np.ndarray, slice]]] = None
+    subsample_indices: Optional[Dict[str, Union[List[int], np.ndarray, slice]]] = None,
 ) -> xr.Dataset:
     """
     Subsample an xarray Dataset using indices instead of values.
@@ -588,7 +579,6 @@ def subsample_dataset_by_indices(
 
     # Iterate over each dimension to subsample
     for dim_name, indices in subsample_indices.items():
-
         # Check that dimension exists in dataset
         if dim_name not in ds_result.dims:
             logger.warning(
@@ -616,8 +606,7 @@ def subsample_dataset_by_indices(
 
 
 def subsample_dataset_uniform(
-    ds: xr.Dataset,
-    subsample_steps: Optional[Dict[str, int]] = None
+    ds: xr.Dataset, subsample_steps: Optional[Dict[str, int]] = None
 ) -> xr.Dataset:
     """
     Uniformly subsample an xarray Dataset using a specified step size for each dimension.
@@ -655,7 +644,6 @@ def subsample_dataset_uniform(
 
     # Iterate over each dimension to subsample
     for dim_name, step in subsample_steps.items():
-
         # Check that the dimension exists in the dataset
         if dim_name not in ds_result.dims:
             logger.warning(
@@ -708,11 +696,7 @@ def get_dimension_info(ds: xr.Dataset, dim_name: str) -> Dict[str, Any]:
 
     coord = ds.coords.get(dim_name)
     if coord is None:
-        return {
-            "exists": True,
-            "size": ds.dims[dim_name],
-            "has_coordinates": False
-        }
+        return {"exists": True, "size": ds.dims[dim_name], "has_coordinates": False}
 
     values = coord.values
 
@@ -734,8 +718,7 @@ def get_dimension_info(ds: xr.Dataset, dim_name: str) -> Dict[str, Any]:
 
 
 def suggest_subsample_values(
-    ds: xr.Dataset,
-    target_sizes: Optional[Dict[str, int]] = None
+    ds: xr.Dataset, target_sizes: Optional[Dict[str, int]] = None
 ) -> Dict[str, Union[List, slice]]:
     """
     Suggest subsampling values to reduce the dataset to target sizes.
@@ -788,8 +771,7 @@ def suggest_subsample_values(
             suggestions[dim_name] = slice(None, None, step)
             estimated_size = (current_size + step - 1) // step
             logger.info(
-                f"Dimension '{dim_name}': {current_size} -> "
-                f"~{estimated_size} values (step={step})"
+                f"Dimension '{dim_name}': {current_size} -> ~{estimated_size} values (step={step})"
             )
 
     return suggestions
@@ -802,7 +784,7 @@ def preview_display_dataset(ds, variables=None, max_values=500000):
     Prints dimensions, coordinates, and variable stats.
     """
     print("DATASET SUMMARY")
-    print("="*50)
+    print("=" * 50)
     print(f"Dimensions: {ds.dims}")
     print(f"Coordinates: {ds.coords}")
     print(f"Variables: {ds.data_vars}")
@@ -842,7 +824,6 @@ def preview_display_dataset(ds, variables=None, max_values=500000):
                     print(f"    Mean: {float(valid_data.mean()):.3f}")
         except Exception as e:
             print(f"    (Error calculating stats: {e})")
-
 
 
 def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
@@ -887,7 +868,7 @@ def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
 
     # Build the new dataset from selected data_vars
     if data_vars_to_keep:
-        new_ds = ds[data_vars_to_keep].copy()   # xarray keeps necessary coords
+        new_ds = ds[data_vars_to_keep].copy()  # xarray keeps necessary coords
     else:
         # No data_var requested -> empty dataset
         new_ds = xr.Dataset()
@@ -901,6 +882,7 @@ def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
     new_ds.attrs = ds.attrs.copy()
 
     return new_ds
+
 
 def filter_dataset_by_depth(ds: xr.Dataset, depth_vals, depth_tol=1) -> xr.Dataset:
     """
@@ -935,6 +917,7 @@ def filter_dataset_by_depth(ds: xr.Dataset, depth_vals, depth_tol=1) -> xr.Datas
     else:  # aligned on n_points
         return ds.isel(N_POINTS=mask)
 
+
 def promote_pres_adjusted_to_depth_with_npoints(ds: xr.Dataset) -> xr.Dataset:
     """Promote PRES_ADJUSTED to depth coordinate and handle N_POINTS dimension."""
     # Rename PRES_ADJUSTED to depth
@@ -950,6 +933,7 @@ def promote_pres_adjusted_to_depth_with_npoints(ds: xr.Dataset) -> xr.Dataset:
         ds = ds.assign_coords(N_POINTS=("depth", np.arange(ds.sizes["depth"])))
         ds = ds.set_coords("N_POINTS")
     return ds
+
 
 def interp_single_argo_profile(ds: xr.Dataset, target_depths: np.ndarray) -> xr.Dataset:
     """
@@ -973,8 +957,11 @@ def interp_single_argo_profile(ds: xr.Dataset, target_depths: np.ndarray) -> xr.
     """
     ds = promote_pres_adjusted_to_depth_with_npoints(ds)
     # Detect vertical dimension
-    if ("PRES_ADJUSTED" in ds.dims or "PRES_ADJUSTED" in ds.coords
-            or "PRES_ADJUSTED" in ds.data_vars):
+    if (
+        "PRES_ADJUSTED" in ds.dims
+        or "PRES_ADJUSTED" in ds.coords
+        or "PRES_ADJUSTED" in ds.data_vars
+    ):
         zdim = "PRES_ADJUSTED"
     elif "DEPTH" in ds.dims or "DEPTH" in ds.coords:
         zdim = "DEPTH"
@@ -988,7 +975,7 @@ def interp_single_argo_profile(ds: xr.Dataset, target_depths: np.ndarray) -> xr.
         target_depths,
         dims=("depth",),
         coords={"depth": target_depths},
-        attrs={"units": "dbar", "long_name": "Interpolated depth levels"}
+        attrs={"units": "dbar", "long_name": "Interpolated depth levels"},
     )
 
     # Interpolation
@@ -1005,6 +992,7 @@ def interp_single_argo_profile(ds: xr.Dataset, target_depths: np.ndarray) -> xr.
 
     return ds_interp
 
+
 def sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
     """Prepare dataset for Zarr writing by cleaning encoding and converting data types."""
     # ds = ds_init.copy()
@@ -1019,9 +1007,17 @@ def sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
             enc = dict(ds[v].encoding)
             # Remove all inherited NetCDF encodings that cause issues
             keys_to_remove = [
-                "_FillValue", "dtype", "scale_factor", "add_offset",
-                "zlib", "complevel", "shuffle", "fletcher32",
-                "preferred_chunks", "source", "original_shape"
+                "_FillValue",
+                "dtype",
+                "scale_factor",
+                "add_offset",
+                "zlib",
+                "complevel",
+                "shuffle",
+                "fletcher32",
+                "preferred_chunks",
+                "source",
+                "original_shape",
             ]
             for key in keys_to_remove:
                 if key in enc:
@@ -1045,11 +1041,13 @@ def sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
         traceback.print_exc()
         return ds
 
+
 def netcdf_to_zarr(
-    ds: xr.Dataset, zarr_path: str,
+    ds: xr.Dataset,
+    zarr_path: str,
     overwrite: bool = True,
     chunk_size: Optional[dict] = None,
-    compression: str = 'zlib',
+    compression: str = "zlib",
     compression_level: int = 3,
 ):
     """
@@ -1058,10 +1056,9 @@ def netcdf_to_zarr(
     Saves in the same folder with suffix `.zarr`.
     """
     try:
-
         if overwrite and Path(zarr_path).exists():
             shutil.rmtree(zarr_path)
-        #ds = xr.open_dataset(nc_path, decode_cf=True)
+        # ds = xr.open_dataset(nc_path, decode_cf=True)
         ds_clean = sanitize_for_zarr(ds)
         ds_clean = ds_clean.chunk()  # automatic chunk, Zarr compatible
         ds_clean.to_zarr(str(zarr_path), mode="w", consolidated=True)

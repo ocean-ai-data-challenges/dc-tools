@@ -14,18 +14,20 @@ except Exception:
     xe = None
 
 try:
-    import pyinterp # noqa: F401
+    import pyinterp  # noqa: F401
     # import pyinterp.backends.xarray
 except ImportError:
     pass
 
 from loguru import logger
-from oceanbench.core.distributed import DatasetProcessor
+
+try:
+    from oceanbench.core.distributed import DatasetProcessor  # type: ignore
+except Exception:  # pragma: no cover
+    DatasetProcessor = Any  # type: ignore
 from scipy.interpolate import RegularGridInterpolator
 
-from dctools.data.coordinates import (
-    GEO_STD_COORDS
-)
+from dctools.data.coordinates import GEO_STD_COORDS
 from dctools.utilities.xarray_utils import rename_coords_and_vars, create_empty_dataset
 
 
@@ -109,9 +111,7 @@ def interpolate_scipy(
         # Forced optimization for Pairwise: Use our specialized apply_ufunc implementation
         # standard .interp() can be slow/memory-intensive for Grid-to-Track on Dask
         if pairwise:
-             raise NotImplementedError(
-                 "Force fallback to optimized apply_over_time_depth"
-             )
+            raise NotImplementedError("Force fallback to optimized apply_over_time_depth")
 
         # Grid-to-Grid: Cartesian product (default behavior)
         interp_coords = {lat_name: tgt_lat, lon_name: tgt_lon}
@@ -121,12 +121,12 @@ def interpolate_scipy(
             interp_coords,
             method="linear",
             kwargs={"fill_value": np.nan},
-            assume_sorted=True  # Important for RAM/CPU with Dask
+            assume_sorted=True,  # Important for RAM/CPU with Dask
         )
 
     except Exception as e:
         if not pairwise and not isinstance(e, NotImplementedError):
-             logger.warning(f"Lazy interpolation failed: {e}. Falling back to eager.")
+            logger.warning(f"Lazy interpolation failed: {e}. Falling back to eager.")
 
         # Fallback to optimized manual kernel implementation
         # (This uses apply_ufunc now, so it is actually the PREFERRED path for pairwise)
@@ -134,23 +134,30 @@ def interpolate_scipy(
         lon_src = np.asarray(ds[lon_name])
 
         out_vars = apply_over_time_depth(
-            ds, var_names, depth_name, lat_name, lon_name,
-            lat_src, lon_src, tgt_lat, tgt_lon,
+            ds,
+            var_names,
+            depth_name,
+            lat_name,
+            lon_name,
+            lat_src,
+            lon_src,
+            tgt_lat,
+            tgt_lon,
             tol_depth=tol_depth,
             pairwise=pairwise,
         )
         if len(out_vars) == 0:
             logger.warning("No variables interpolated. Returning empty dataset.")
-            return create_empty_dataset({}) # Fallback empty
+            return create_empty_dataset({})  # Fallback empty
 
         ds_out = xr.Dataset(out_vars)
-
 
     # Writing / returning according to mode
     if output_mode == "zarr":
         # Use temporary file system
         if output_path is None:
             import tempfile
+
             temp_dir = tempfile.mkdtemp()
             output_path = str(Path(temp_dir) / "pairwise_interp.zarr")
             logger.info(f"Using temporary file: {output_path}")
@@ -162,21 +169,22 @@ def interpolate_scipy(
                     zarr_target_chunks_dict[d] = 1
             ds_out = ds_out.chunk(zarr_target_chunks_dict)
         else:
-             ds_out = ds_out.chunk(zarr_target_chunks)
+            ds_out = ds_out.chunk(zarr_target_chunks)
 
         outp = Path(output_path)
         if outp.exists():
             import shutil
+
             shutil.rmtree(outp)
         ds_out.to_zarr(output_path, mode="w", consolidated=True)
         ds_out.close()
         ds_out = xr.open_zarr(output_path, chunks=zarr_target_chunks)
 
     elif output_mode == "lazy":
-        pass # return ds_out
+        pass  # return ds_out
 
     elif output_mode == "inmemory":
-        ds_out = ds_out.compute()
+        ds_out = ds_out.compute(scheduler="synchronous")
 
     else:
         raise ValueError(f"Unknown mode {output_mode}")
@@ -237,8 +245,8 @@ def apply_over_time_depth(
         out_dims = ["points"]
         out_coords = {"points": np.arange(len(tgt_lat))}
         # Optionally keep track of lat/lon as non-dim coords
-        out_coords[lat_name] = ("points", tgt_lat) # type: ignore[assignment]
-        out_coords[lon_name] = ("points", tgt_lon) # type: ignore[assignment]
+        out_coords[lat_name] = ("points", tgt_lat)  # type: ignore[assignment]
+        out_coords[lon_name] = ("points", tgt_lon)  # type: ignore[assignment]
     else:
         out_dims = [lat_name, lon_name]
         out_coords = {lat_name: tgt_lat, lon_name: tgt_lon}
@@ -255,13 +263,10 @@ def apply_over_time_depth(
         # This replaces the explicit Python loops over time/depth
 
         # Definition of wrapper to handle argument mapping
-        def _wrapper_scipy_bilinear(data, l_src=lat_src, l_tgt=tgt_lat,
-                                  ln_src=lon_src, ln_tgt=tgt_lon,
-                                  pw=pairwise):
-            return scipy_bilinear(
-                data, l_src, ln_src, l_tgt, ln_tgt,
-                pairwise=pw
-            )
+        def _wrapper_scipy_bilinear(
+            data, l_src=lat_src, l_tgt=tgt_lat, ln_src=lon_src, ln_tgt=tgt_lon, pw=pairwise
+        ):
+            return scipy_bilinear(data, l_src, ln_src, l_tgt, ln_tgt, pairwise=pw)
 
         output_sizes: Dict[Any, Any] = {}
         if pairwise:
@@ -304,7 +309,7 @@ def apply_over_time_depth(
             has_time = "time" in da.dims
             has_depth = depth_name in da.dims
 
-            for t in (ds.time.values if has_time else [None]):
+            for t in ds.time.values if has_time else [None]:
                 depth_slices_out: List[Any] = []
                 # ... existing loop logic ...
                 if depth_name in ds:
@@ -332,10 +337,7 @@ def apply_over_time_depth(
                             continue
 
                     result_array = scipy_bilinear(
-                        da_sel.values,
-                        lat_src, lon_src,
-                        tgt_lat, tgt_lon,
-                        pairwise=pairwise
+                        da_sel.values, lat_src, lon_src, tgt_lat, tgt_lon, pairwise=pairwise
                     )
 
                     # Convert numpy.ndarray to DataArray
@@ -344,7 +346,7 @@ def apply_over_time_depth(
                         dims=out_dims,  # Output coordinate dimensions
                         coords=out_coords,
                         attrs=da_sel.attrs.copy(),
-                        name=da_sel.name
+                        name=da_sel.name,
                     )
 
                     # add time/depth dims if needed
@@ -358,7 +360,8 @@ def apply_over_time_depth(
                 if len(depth_slices_out) > 0:
                     depth_concat = (
                         xr.concat(depth_slices_out, dim=depth_name)
-                        if has_depth else depth_slices_out[0]
+                        if has_depth
+                        else depth_slices_out[0]
                     )
                     time_slices_out.append(depth_concat)
 
@@ -421,8 +424,8 @@ def interpolate_pyinterp(
         da = ds[var_name]
 
         # We need to recognize Lat/Lon dims
-        lat_dim = 'latitude' if 'latitude' in da.dims else 'lat'
-        lon_dim = 'longitude' if 'longitude' in da.dims else 'lon'
+        lat_dim = "latitude" if "latitude" in da.dims else "lat"
+        lon_dim = "longitude" if "longitude" in da.dims else "lon"
 
         # Check if variable has spatial dims
         if lat_dim not in da.dims or lon_dim not in da.dims:
@@ -437,7 +440,7 @@ def interpolate_pyinterp(
             yt=y_target,
             pw=pairwise,
             t_lat=tgt_lat,
-            t_lon=tgt_lon
+            t_lon=tgt_lon,
         ):
             # Use PyInterp Core directly
             try:
@@ -452,23 +455,19 @@ def interpolate_pyinterp(
 
                 # Check shapes
                 if data.shape == (len(lat_src), len(lon_src)):
-                     grid_data = data.T # (lon, lat)
+                    grid_data = data.T  # (lon, lat)
                 elif data.shape == (len(lon_src), len(lat_src)):
-                     grid_data = data
+                    grid_data = data
                 else:
-                     # Attempt reshape if flattened
-                     grid_data = data.reshape(len(lon_src), len(lat_src))
+                    # Attempt reshape if flattened
+                    grid_data = data.reshape(len(lon_src), len(lat_src))
 
                 grid = pyinterp.Grid2D(x_axis, y_axis, grid_data)
 
-                res = grid.bivariate(
-                    x=xt,
-                    y=yt,
-                    interpolator="bilinear"
-                )
+                res = grid.bivariate(x=xt, y=yt, interpolator="bilinear")
 
                 if pw:
-                    return res # 1D array
+                    return res  # 1D array
                 else:
                     return res.reshape(len(t_lat), len(t_lon))
             except Exception as e:
@@ -481,11 +480,11 @@ def interpolate_pyinterp(
 
         # Determine output setup
         if pairwise:
-             output_core_dims = [['points']]
-             output_sizes = {'points': output_dim_size}
+            output_core_dims = [["points"]]
+            output_sizes = {"points": output_dim_size}
         else:
-             output_core_dims = [['lat', 'lon']]
-             output_sizes = {'lat': len(tgt_lat), 'lon': len(tgt_lon)}
+            output_core_dims = [["lat", "lon"]]
+            output_sizes = {"lat": len(tgt_lat), "lon": len(tgt_lon)}
 
         # apply_ufunc
         res = xr.apply_ufunc(
@@ -495,18 +494,18 @@ def interpolate_pyinterp(
             src_lon,
             input_core_dims=[[lat_dim, lon_dim], [], []],
             output_core_dims=output_core_dims,
-            vectorize=True, # Loop over Time/Depth
-            dask='parallelized', # Enable Dask
+            vectorize=True,  # Loop over Time/Depth
+            dask="parallelized",  # Enable Dask
             output_dtypes=[np.float32 if reduce_precision else np.float64],
-            dask_gufunc_kwargs={'allow_rechunk': True},
-            output_sizes=output_sizes
+            dask_gufunc_kwargs={"allow_rechunk": True},
+            output_sizes=output_sizes,
         )
 
         # Assign coords
         if pairwise:
-             res = res.assign_coords(points=out_coords["points"])
+            res = res.assign_coords(points=out_coords["points"])
         else:
-             res = res.assign_coords(lat=tgt_lat, lon=tgt_lon)
+            res = res.assign_coords(lat=tgt_lat, lon=tgt_lon)
 
         out_vars[var_name] = res
 
@@ -518,14 +517,14 @@ def interpolate_dataset(
     target_grid: dict,
     dataset_processor: Optional[DatasetProcessor] = None,
     weights_filepath: Optional[str] = None,
-    interpolation_lib: str = 'pyinterp',
+    interpolation_lib: str = "pyinterp",
     reduce_precision: bool = False,
     pairwise: bool = False,
 ) -> xr.Dataset:
     """Unified interface which uses only scatter logic with Dask."""
     # Add missing standard_names
     for variable_name in ds.variables:
-        var_std_name = str(ds[variable_name].attrs.get("standard_name", '')).lower()
+        var_std_name = str(ds[variable_name].attrs.get("standard_name", "")).lower()
         if not var_std_name:
             ds[variable_name].attrs["standard_name"] = str(variable_name).lower()
 
@@ -553,7 +552,7 @@ def interpolate_dataset(
 
     # Choose interpolation method
     # Standardize coordinate names first for all methods relying on standard names
-    ds_renamed, coord_mapping = rename_to_standard_pyinterp(ds, 'lat', 'lon')
+    ds_renamed, coord_mapping = rename_to_standard_pyinterp(ds, "lat", "lon")
 
     # OPTIMIZATION: Subset dataset around target track to minimize I/O and memory
     # This prevents loading the full global grid when only a sparse track is needed.
@@ -561,15 +560,15 @@ def interpolate_dataset(
 
     if pairwise:
         try:
-            tgt_lats: Any = target_grid.get('lat')
-            tgt_lons: Any = target_grid.get('lon')
+            tgt_lats: Any = target_grid.get("lat")
+            tgt_lons: Any = target_grid.get("lon")
 
             # Identify actual coordinate names in ds_renamed
             d_lat = next(
-                (d for d in ds_renamed.coords if d in ['latitude', 'lat', 'nav_lat']), None
+                (d for d in ds_renamed.coords if d in ["latitude", "lat", "nav_lat"]), None
             )
             d_lon = next(
-                (d for d in ds_renamed.coords if d in ['longitude', 'lon', 'nav_lon']), None
+                (d for d in ds_renamed.coords if d in ["longitude", "lon", "nav_lon"]), None
             )
 
             if tgt_lats is not None and tgt_lons is not None and d_lat and d_lon:
@@ -586,7 +585,8 @@ def interpolate_dataset(
                     lat_increasing = bool(lat_vals[0] < lat_vals[-1])
 
                 lat_slice = (
-                    slice(lat_min - buffer, lat_max + buffer) if lat_increasing
+                    slice(lat_min - buffer, lat_max + buffer)
+                    if lat_increasing
                     else slice(lat_max + buffer, lat_min - buffer)
                 )
                 ds_renamed = ds_renamed.sel({d_lat: lat_slice})
@@ -594,15 +594,16 @@ def interpolate_dataset(
                 # Check lon increasing / wrap
                 lon_vals = ds_renamed[d_lon]
                 if (lon_max - lon_min) < 350:
-                        lon_increasing = True
-                        if lon_vals.size > 1:
-                            lon_increasing = bool(lon_vals[0] < lon_vals[-1])
+                    lon_increasing = True
+                    if lon_vals.size > 1:
+                        lon_increasing = bool(lon_vals[0] < lon_vals[-1])
 
-                        lon_slice = (
-                            slice(lon_min - buffer, lon_max + buffer) if lon_increasing
-                            else slice(lon_max + buffer, lon_min - buffer)
-                        )
-                        ds_renamed = ds_renamed.sel({d_lon: lon_slice})
+                    lon_slice = (
+                        slice(lon_min - buffer, lon_max + buffer)
+                        if lon_increasing
+                        else slice(lon_max + buffer, lon_min - buffer)
+                    )
+                    ds_renamed = ds_renamed.sel({d_lon: lon_slice})
 
                 # Log volume
                 vol_points = ds_renamed[d_lat].size * ds_renamed[d_lon].size
@@ -624,22 +625,19 @@ def interpolate_dataset(
         except Exception as e:
             logger.warning(f"Could not subset dataset (using full grid): {e}")
 
-
-    if interpolation_lib == 'pyinterp':
+    if interpolation_lib == "pyinterp":
         # Apply Track Chunking if needed, otherwise run directly
         if pairwise and track_chunking_strategy:
-             # Iterate just like Scipy but calling interpolate_pyinterp
-             track_chunk_size = 10000
-             n_points = len(tgt_lats)
-             datasets_list: List[Any] = []
+            # Iterate just like Scipy but calling interpolate_pyinterp
+            track_chunk_size = 10000
+            n_points = len(tgt_lats)
+            datasets_list: List[Any] = []
 
-             logger.info(
-                 f"Starting Iterative Track Tiling (PyInterp): {n_points} points."
-             )
+            logger.info(f"Starting Iterative Track Tiling (PyInterp): {n_points} points.")
 
-             for i in range(0, n_points, track_chunk_size):
-                sub_lats = tgt_lats[i:i+track_chunk_size]
-                sub_lons = tgt_lons[i:i+track_chunk_size]
+            for i in range(0, n_points, track_chunk_size):
+                sub_lats = tgt_lats[i : i + track_chunk_size]
+                sub_lons = tgt_lons[i : i + track_chunk_size]
 
                 buffer = 2.0
                 loc_lat_min, loc_lat_max = np.min(sub_lats), np.max(sub_lats)
@@ -653,7 +651,8 @@ def interpolate_dataset(
                 if lat_vals.size > 1:
                     lat_inc = bool(lat_vals[0] < lat_vals[-1])
                 l_slice = (
-                    slice(loc_lat_min - buffer, loc_lat_max + buffer) if lat_inc
+                    slice(loc_lat_min - buffer, loc_lat_max + buffer)
+                    if lat_inc
                     else slice(loc_lat_max + buffer, loc_lat_min - buffer)
                 )
                 ds_chunk = ds_chunk.sel({d_lat: l_slice})
@@ -665,7 +664,8 @@ def interpolate_dataset(
                     if lon_vals.size > 1:
                         lon_inc = bool(lon_vals[0] < lon_vals[-1])
                     ln_slice = (
-                        slice(loc_lon_min - buffer, loc_lon_max + buffer) if lon_inc
+                        slice(loc_lon_min - buffer, loc_lon_max + buffer)
+                        if lon_inc
                         else slice(loc_lon_max + buffer, loc_lon_min - buffer)
                     )
                     ds_chunk = ds_chunk.sel({d_lon: ln_slice})
@@ -678,8 +678,8 @@ def interpolate_dataset(
                 )
                 datasets_list.append(ds_chunk_res)
 
-             # Concatenate all chunks after the loop
-             ds_interp_internal = xr.concat(datasets_list, dim="points")
+            # Concatenate all chunks after the loop
+            ds_interp_internal = xr.concat(datasets_list, dim="points")
         else:
             ds_interp_internal = interpolate_pyinterp(
                 ds_renamed, target_grid, reduce_precision, pairwise=pairwise
@@ -687,22 +687,19 @@ def interpolate_dataset(
 
         ds_interp = rename_back(ds, ds_interp_internal, coord_mapping)
 
-    elif interpolation_lib == 'scipy':
-
+    elif interpolation_lib == "scipy":
         if pairwise and track_chunking_strategy:
             # OPTIMIZATION: Iterative Track Tiling
             track_chunk_size = 10000  # Process 10000 points at a time
             n_points = len(tgt_lats)
             datasets_list_scipy: List[Any] = []
 
-            logger.info(
-                f"Starting Iterative Track Tiling (Scipy): {n_points} points."
-            )
+            logger.info(f"Starting Iterative Track Tiling (Scipy): {n_points} points.")
 
             for i in range(0, n_points, track_chunk_size):
                 # 1. Extract track segment
-                sub_lats = tgt_lats[i:i+track_chunk_size]
-                sub_lons = tgt_lons[i:i+track_chunk_size]
+                sub_lats = tgt_lats[i : i + track_chunk_size]
+                sub_lons = tgt_lons[i : i + track_chunk_size]
 
                 # 2. Identify local BBox + Buffer
                 buffer = 2.0
@@ -718,7 +715,8 @@ def interpolate_dataset(
                 if lat_vals.size > 1:
                     lat_inc = bool(lat_vals[0] < lat_vals[-1])
                 l_slice = (
-                    slice(loc_lat_min - buffer, loc_lat_max + buffer) if lat_inc
+                    slice(loc_lat_min - buffer, loc_lat_max + buffer)
+                    if lat_inc
                     else slice(loc_lat_max + buffer, loc_lat_min - buffer)
                 )
                 ds_chunk = ds_chunk.sel({d_lat: l_slice})
@@ -730,7 +728,8 @@ def interpolate_dataset(
                     if lon_vals.size > 1:
                         lon_inc = bool(lon_vals[0] < lon_vals[-1])
                     ln_slice = (
-                        slice(loc_lon_min - buffer, loc_lon_max + buffer) if lon_inc
+                        slice(loc_lon_min - buffer, loc_lon_max + buffer)
+                        if lon_inc
                         else slice(loc_lon_max + buffer, loc_lon_min - buffer)
                     )
                     ds_chunk = ds_chunk.sel({d_lon: ln_slice})
@@ -750,21 +749,20 @@ def interpolate_dataset(
         elif dataset_processor is not None:
             # We assume apply_single distributes the call to interpolate_scipy
             ds_renamed_res = dataset_processor.apply_single(
-                ds_renamed, interpolate_scipy,
-                target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
+                ds_renamed,
+                interpolate_scipy,
+                target_grid={"lat": target_grid["lat"], "lon": target_grid["lon"]},
                 output_mode="lazy",
                 pairwise=pairwise,
             )
         else:
             ds_renamed_res = interpolate_scipy(
                 ds_renamed,
-                target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
+                target_grid={"lat": target_grid["lat"], "lon": target_grid["lon"]},
                 output_mode="lazy",
                 pairwise=pairwise,
             )
         ds_interp = rename_back(ds, ds_renamed_res, coord_mapping)
-
-
 
     elif interpolation_lib == "xesmf":
         ds_interp = interpolate_xesmf(
@@ -788,20 +786,15 @@ def interpolate_dataset(
 
     # Add missing standard_names to result
     for variable_name in ds_interp.variables:
-        var_std_name = str(ds_interp[variable_name].attrs.get("standard_name", '')).lower()
+        var_std_name = str(ds_interp[variable_name].attrs.get("standard_name", "")).lower()
         if not var_std_name:
             ds_interp[variable_name].attrs["standard_name"] = str(variable_name).lower()
 
     return xr.Dataset(ds_interp)
 
+
 def scipy_bilinear(
-    data2d: np.ndarray,
-    lat_src,
-    lon_src,
-    target_lat,
-    target_lon,
-    batch_size=100,
-    pairwise=False
+    data2d: np.ndarray, lat_src, lon_src, target_lat, target_lon, batch_size=100, pairwise=False
 ):
     """
     Memory-efficient bilinear interpolation using scipy.
@@ -832,8 +825,7 @@ def scipy_bilinear(
 
     # Interpolator
     interpolator = RegularGridInterpolator(
-        (lat_src, lon_src), data2d,
-        method="linear", bounds_error=False, fill_value=np.nan
+        (lat_src, lon_src), data2d, method="linear", bounds_error=False, fill_value=np.nan
     )
 
     if pairwise:
@@ -842,40 +834,41 @@ def scipy_bilinear(
 
         # Process in batches
         for i in range(0, len(target_lat), batch_size):
-            lat_batch = target_lat[i:i+batch_size]
-            lon_batch = target_lon[i:i+batch_size]
+            lat_batch = target_lat[i : i + batch_size]
+            lon_batch = target_lon[i : i + batch_size]
             points = np.column_stack([lat_batch, lon_batch])
-            out[i:i+batch_size] = interpolator(points)
+            out[i : i + batch_size] = interpolator(points)
     else:
         # Output is 2D array (M x N)
         out = np.empty((len(target_lat), len(target_lon)), dtype=np.float64)
 
         # Process in batches of rows
         for i in range(0, len(target_lat), batch_size):
-            lat_batch = target_lat[i:i+batch_size]
+            lat_batch = target_lat[i : i + batch_size]
             # Build points for this batch
             lat_grid, lon_grid = np.meshgrid(lat_batch, target_lon, indexing="ij")
             points = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
-            out[i:i+batch_size, :] = interpolator(points).reshape(len(lat_batch), len(target_lon))
+            out[i : i + batch_size, :] = interpolator(points).reshape(
+                len(lat_batch), len(target_lon)
+            )
 
     return out
+
 
 def rename_to_standard_pyinterp(ds, lat_name, lon_name):
     """Rename coordinates to 'lat' and 'lon' for pyinterp compatibility."""
     # save original names
 
     coord_mapping: Dict[Any, Any] = {}
-    if lat_name != 'latitude':
-        coord_mapping[lat_name] = 'latitude'
-    if lon_name != 'longitude':
-        coord_mapping[lon_name] = 'longitude'
+    if lat_name != "latitude":
+        coord_mapping[lat_name] = "latitude"
+    if lon_name != "longitude":
+        coord_mapping[lon_name] = "longitude"
 
     # Apply renaming
     if len(coord_mapping) > 0:
         logger.debug(f"Renaming coordinates for pyinterp compatibility: {coord_mapping}")
-        ds_renamed = rename_coords_and_vars(
-            ds, coord_mapping, coord_mapping
-        )
+        ds_renamed = rename_coords_and_vars(ds, coord_mapping, coord_mapping)
     else:
         ds_renamed = ds
     return ds_renamed, coord_mapping
@@ -894,9 +887,7 @@ def rename_back(orig_ds, renamed_ds, coord_mapping):
         if isinstance(renamed_ds, xr.DataArray):
             ds_final = renamed_ds.rename(reverse_mapping)
         if isinstance(renamed_ds, xr.Dataset):
-            ds_final = rename_coords_and_vars(
-                renamed_ds, reverse_mapping, reverse_mapping
-            )
+            ds_final = rename_coords_and_vars(renamed_ds, reverse_mapping, reverse_mapping)
     else:
         ds_final = renamed_ds
 
@@ -914,10 +905,11 @@ def rename_back(orig_ds, renamed_ds, coord_mapping):
 
 
 def interpolate_xesmf(  # TODO : check and uncomment
-        ds: xr.Dataset, target_grid: Dict[str, np.ndarray],
-        weights_filepath: Optional[Optional[str]] = None,
-        method: str = "bilinear",
-    ) -> xr.Dataset:
+    ds: xr.Dataset,
+    target_grid: Dict[str, np.ndarray],
+    weights_filepath: Optional[Optional[str]] = None,
+    method: str = "bilinear",
+) -> xr.Dataset:
     """
     Interpolate Dataset using xESMF.
 
@@ -937,10 +929,7 @@ def interpolate_xesmf(  # TODO : check and uncomment
     # Prepare target lat/lon grid
     lat_out = target_grid["lat"]
     lon_out = target_grid["lon"]
-    target_grid_ds = xr.Dataset({
-        "lat": ("lat", lat_out),
-        "lon": ("lon", lon_out)
-    })
+    target_grid_ds = xr.Dataset({"lat": ("lat", lat_out), "lon": ("lon", lon_out)})
 
     # Regridder cache mechanism
     regridder_cache: Dict[Any, Any] = {}
@@ -959,7 +948,7 @@ def interpolate_xesmf(  # TODO : check and uncomment
         da = ds[var]
         # Loop over each depth
         if "depth" in da.dims:
-            depth_vals = target_grid['depth']
+            depth_vals = target_grid["depth"]
             slices: List[Any] = []
             for d in depth_vals:
                 da_sel = da.sel(depth=d)
@@ -998,7 +987,7 @@ def interpolate_xesmf(  # TODO : check and uncomment
             new_coord = xr.DataArray(
                 ds_out.coords[coord].values,
                 dims=ds_out.coords[coord].dims,
-                attrs=coords_attrs[coord].copy()
+                attrs=coords_attrs[coord].copy(),
             )
             ds_out = ds_out.assign_coords({coord: new_coord})
 

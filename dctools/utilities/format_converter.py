@@ -9,7 +9,7 @@ from loguru import logger
 
 def convert_format1_to_format2(
     format1_results: Union[Dict[str, List[float]], Dict[str, Dict[str, float]]],
-    metric_name: Optional[Optional[str]] = None
+    metric_name: Optional[Optional[str]] = None,
 ) -> List[Dict[str, Union[str, float]]]:
     """
     Convert Format1 results to Format2.
@@ -72,11 +72,13 @@ def convert_format1_to_format2(
 
                 for variable_name, var_value in variables_dict.items():
                     if var_value is not None:
-                        format2_results.append({
-                            'Metric': str(metric),
-                            'Variable': str(variable_name),
-                            'Value': var_value
-                        })
+                        format2_results.append(
+                            {
+                                "Metric": str(metric),
+                                "Variable": str(variable_name),
+                                "Value": var_value,
+                            }
+                        )
         else:
             # Simple format: {'Variable name': [value], ...} or {'Variable name': value, ...}
             if metric_name is None:
@@ -98,17 +100,19 @@ def convert_format1_to_format2(
                 else:
                     result_value = values if isinstance(values, (int, float)) else 0.0
 
-                format2_results.append({
-                    'Metric': str(metric_name),
-                    'Variable': str(variable_name),
-                    'Value': result_value
-                })
+                format2_results.append(
+                    {
+                        "Metric": str(metric_name),
+                        "Variable": str(variable_name),
+                        "Value": result_value,
+                    }
+                )
 
     return format2_results
 
 
 def convert_format2_to_format1(
-    format2_results: List[Dict[str, Union[str, float]]]
+    format2_results: List[Dict[str, Union[str, float]]],
 ) -> Dict[str, List[float]]:
     """
     Convert Format2 results to Format1.
@@ -140,14 +144,14 @@ def convert_format2_to_format1(
             logger.warning(f"Each result should be a dictionary, got {type(result_dict)}")
             continue
 
-        required_keys = {'Metric', 'Variable', 'Value'}
+        required_keys = {"Metric", "Variable", "Value"}
         if not required_keys.issubset(result_dict.keys()):
             missing_keys = required_keys - set(result_dict.keys())
             logger.warning(f"Missing required keys {missing_keys} in result: {result_dict}")
             continue
 
-        variable_name = result_dict['Variable']
-        value = result_dict['Value']
+        variable_name = result_dict["Variable"]
+        value = result_dict["Value"]
 
         # Convert to float if possible
         try:
@@ -165,7 +169,7 @@ def convert_format2_to_format1(
 
 
 def group_format2_by_metric(
-    format2_results: List[Dict[str, Union[str, float]]]
+    format2_results: List[Dict[str, Union[str, float]]],
 ) -> Dict[str, List[Dict[str, Union[str, float]]]]:
     """
     Group Format2 results by metric.
@@ -196,11 +200,11 @@ def group_format2_by_metric(
     grouped_results: Dict[str, List[Dict[str, Union[str, float]]]] = {}
 
     for result in format2_results:
-        if not isinstance(result, dict) or 'Metric' not in result:
+        if not isinstance(result, dict) or "Metric" not in result:
             logger.warning(f"Invalid result format: {result}")
             continue
 
-        metric = result['Metric']
+        metric = result["Metric"]
         if not isinstance(metric, str):
             logger.warning(f"Metric must be a string, got {type(metric)}")
             continue
@@ -213,8 +217,7 @@ def group_format2_by_metric(
 
 
 def filter_format2_by_variables(
-    format2_results: List[Dict[str, Union[str, float]]],
-    variables: List[str]
+    format2_results: List[Dict[str, Union[str, float]]], variables: List[str]
 ) -> List[Dict[str, Union[str, float]]]:
     """
     Filter Format2 results to keep only specific variables.
@@ -229,11 +232,11 @@ def filter_format2_by_variables(
     filtered_results: List[Dict[str, Union[str, float]]] = []
 
     for result in format2_results:
-        if not isinstance(result, dict) or 'Variable' not in result:
+        if not isinstance(result, dict) or "Variable" not in result:
             logger.warning(f"Invalid result format: {result}")
             continue
 
-        if result['Variable'] in variables:
+        if result["Variable"] in variables:
             filtered_results.append(result)
 
     return filtered_results

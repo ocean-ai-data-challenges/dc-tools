@@ -14,12 +14,56 @@ delta_time: 12   # delta time (hours) when matching observation data
 max_samples: 
 max_cache_files: 1000  # max files to store (older files are deleted)
 
+############################# TARGET COORDINATES ###################################
+
+# Target dimensions that prediction/reference datasets must conform to.
+target_dimensions:
+  lat: {start: -78, stop: 90, step: 0.25}
+  lon: {start: -180, stop: 180, step: 0.25}
+  depth:
+    - 0.494025
+    - 47.37369
+    - 92.32607
+    - 155.8507
+    - 222.4752
+    - 318.1274
+    - 380.213
+    - 453.9377
+    - 541.0889
+    - 643.5668
+    - 763.3331
+    - 902.3393
+    - 1245.291
+    - 1684.284
+    - 2225.078
+    - 3220.82
+    - 3597.032
+    - 3992.484
+    - 4405.224
+    - 4833.291
+    - 5274.784
+
+target_dimensions_surface:
+  lat: {start: -78, stop: 90, step: 0.25}
+  lon: {start: -180, stop: 180, step: 0.25}
+  depth: [0.494025]
+
+target_time_values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+############################# LOGGING ###################################
+
+logging:
+  level: INFO
+  console: true
+  colorize: true
+  backtrace: false
+  diagnose: false
+  enqueue: true
+  python_level: WARNING
+
 ############################# PARALLELIZATION ###################################
 
 batch_size: 32
-n_parallel_workers: 8
-nthreads_per_worker: 2
-memory_limit_per_worker: "5GB"
 reduce_precision: true
 restart_workers_per_batch: true
 
@@ -63,6 +107,10 @@ catalog_connection:
 
 sources:  # lists all datasets used in the DC
   - dataset: saral_edito
+    # Per-dataset Dask sizing (replaces former global PARALLELIZATION keys)
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -92,6 +140,9 @@ sources:  # lists all datasets used in the DC
     - "ssha"
 
   - dataset: glorys_cmems
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: false
     metrics:
       - "rmsd"
@@ -115,6 +166,9 @@ sources:  # lists all datasets used in the DC
       - "zos"
 
   - dataset: glorys_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: false
     metrics:
       - "rmsd"
@@ -146,6 +200,9 @@ sources:  # lists all datasets used in the DC
       - "v_current"
   
   - dataset: swot_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -176,6 +233,9 @@ sources:  # lists all datasets used in the DC
 
 
   - dataset: argo_velocities_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -202,6 +262,9 @@ sources:  # lists all datasets used in the DC
       - "V"
 
   - dataset: argo_profiles
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -229,6 +292,9 @@ sources:  # lists all datasets used in the DC
       - "TEMP"
 
   - dataset: jason3_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -262,6 +328,9 @@ sources:  # lists all datasets used in the DC
 
 
   - dataset: SST_fields
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -283,6 +352,9 @@ sources:  # lists all datasets used in the DC
     #- "adjusted_sea_surface_temperature"
 
   - dataset: jason1_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -310,6 +382,9 @@ sources:  # lists all datasets used in the DC
     - "ssha"
 
   - dataset: jason2_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -338,6 +413,9 @@ sources:  # lists all datasets used in the DC
     - "ssha"
 
   - dataset: SSS_fields_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: true
     metrics:
       - "rmsd"
@@ -369,6 +447,9 @@ sources:  # lists all datasets used in the DC
     - Sea_Surface_Salinity_Rain_Corrected
 
   - dataset: glonet_edito
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: false
     metrics:
       - "rmsd"
@@ -397,6 +478,9 @@ sources:  # lists all datasets used in the DC
 
 
   - dataset: glonet_edito_2
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: false
     metrics:
       - "rmsd"
@@ -422,6 +506,9 @@ sources:  # lists all datasets used in the DC
       - "zos"
 
   - dataset: glonet_wasabi_2
+    n_parallel_workers: 8
+    nthreads_per_worker: 2
+    memory_limit_per_worker: "8GB"
     observation_dataset: false
     metrics:
       - "rmsd"
