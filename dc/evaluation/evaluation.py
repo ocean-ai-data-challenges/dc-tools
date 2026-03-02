@@ -7,8 +7,14 @@ All generic evaluation logic lives in :class:`.base.BaseDCEvaluation`.
 """
 
 from argparse import Namespace
+from pathlib import Path
+
+import yaml
 
 from dctools.processing.base import BaseDCEvaluation
+
+# Path to the leaderboard text/name customisation shipped with this package.
+_LEADERBOARD_TEXTS_YAML = Path(__file__).parent.parent / "config" / "leaderboard_texts.yaml"
 
 
 class DC2Evaluation(BaseDCEvaluation):
@@ -21,6 +27,15 @@ class DC2Evaluation(BaseDCEvaluation):
             arguments (Namespace): Namespace with config.
         """
         super().__init__(arguments)
+
+        # Load leaderboard display config from the YAML shipped in dc/config/.
+        if _LEADERBOARD_TEXTS_YAML.is_file():
+            try:
+                self.leaderboard_custom_config = (
+                    yaml.safe_load(_LEADERBOARD_TEXTS_YAML.read_text(encoding="utf-8")) or {}
+                )
+            except Exception:  # noqa: BLE001
+                pass  # leave self.leaderboard_custom_config as None (base default)
 
         self.dataset_references = {
             "glonet": [

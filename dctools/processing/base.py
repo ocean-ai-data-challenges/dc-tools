@@ -68,6 +68,10 @@ class BaseDCEvaluation:
         os.makedirs(self.results_directory, exist_ok=True)
         self.target_dimensions = get_target_dimensions(self.args)
         self.target_time_values = get_target_time_values(self.args)
+        # Subclasses can set this to a dict before run_eval() is called to
+        # customise the leaderboard (metric/variable/model names, page texts).
+        # It is passed directly to render_site_from_results_dir as custom_config.
+        self.leaderboard_custom_config: Optional[Dict[str, Any]] = None
 
         configure_dask_logging()
 
@@ -1135,6 +1139,7 @@ class BaseDCEvaluation:
             _render_leaderboard(
                 results_dir=_leaderboard_input_dir,
                 output_site_dir=_leaderboard_dir,
+                custom_config=self.leaderboard_custom_config,
             )
             # Clean up the temporary input dir
             _shutil.rmtree(_leaderboard_input_dir, ignore_errors=True)
