@@ -4,10 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import traceback
-from typing import (
-    Any, Callable, Dict, List,
-    Optional, Union, Sequence
-)
+from typing import Any, Callable, Dict, List, Optional, Union, Sequence
 
 import geopandas as gpd
 import json
@@ -24,15 +21,28 @@ from dctools.utilities.misc_utils import (
 )
 
 GLOBAL_METADATA = [
-    "coord_type", "crs", "dimensions", "keep_variables",
-     "resolution", "variables", "variables_rename_dict",
+    "coord_type",
+    "crs",
+    "dimensions",
+    "keep_variables",
+    "resolution",
+    "variables",
+    "variables_rename_dict",
 ]
 
 ALL_METADATA = [
-    "coord_type", "crs", "date_end", "date_start",
-    "dimensions", "geometry", "keep_variables", "path",
-    "resolution", "variables",
+    "coord_type",
+    "crs",
+    "date_end",
+    "date_start",
+    "dimensions",
+    "geometry",
+    "keep_variables",
+    "path",
+    "resolution",
+    "variables",
 ]
+
 
 @dataclass
 class CatalogEntry:
@@ -42,7 +52,37 @@ class CatalogEntry:
     date_start: pd.Timestamp
     date_end: pd.Timestamp
     # variables: Dict[str, List[str]]
-    geometry: gpd.GeoSeries
+    geometry: Optional[BaseGeometry]
+
+    @staticmethod
+    def _normalize_geometry(geometry_data: Any) -> Optional[BaseGeometry]:
+        """Normalize geometry payloads into a Shapely geometry object."""
+        if geometry_data is None:
+            return None
+
+        if isinstance(geometry_data, BaseGeometry):
+            return geometry_data
+
+        if isinstance(geometry_data, gpd.GeoSeries):
+            if geometry_data.empty:
+                return None
+            first_geom = geometry_data.iloc[0]
+            return first_geom if isinstance(first_geom, BaseGeometry) else None
+
+        if isinstance(geometry_data, dict):
+            gtype = str(geometry_data.get("type", "")).lower()
+            if gtype == "featurecollection":
+                for feature in geometry_data.get("features", []):
+                    geom = feature.get("geometry") if isinstance(feature, dict) else None
+                    if geom:
+                        return shape(geom)
+                return None
+            if gtype == "feature":
+                geom = geometry_data.get("geometry")
+                return shape(geom) if geom else None
+            return shape(geometry_data)
+
+        return None
 
     def to_dict(self):
         """Convert catalog entry to dictionary."""
@@ -50,8 +90,9 @@ class CatalogEntry:
             dct = asdict(self)
             dct["date_start"] = self.date_start.isoformat()
             dct["date_end"] = self.date_end.isoformat()
-            if self.geometry is not None:
-                dct["geometry"] = mapping(self.geometry)
+            normalized_geometry = self._normalize_geometry(self.geometry)
+            if normalized_geometry is not None:
+                dct["geometry"] = mapping(normalized_geometry)
             else:
                 dct["geometry"] = None
             return dct
@@ -66,8 +107,7 @@ class CatalogEntry:
         data_copy = data.copy()
         data_copy["date_start"] = pd.to_datetime(data_copy["date_start"])
         data_copy["date_end"] = pd.to_datetime(data_copy["date_end"])
-        if data_copy["geometry"] is not None:
-            data_copy["geometry"] = shape(data_copy["geometry"])
+        data_copy["geometry"] = cls._normalize_geometry(data_copy.get("geometry"))
         return cls(**data_copy)
 
 
@@ -91,7 +131,8 @@ class DatasetCatalog:
         self._global_metadata = global_metadata
         if dataframe is None:
             dataframe = gpd.GeoDataFrame()
-        if entries is None and dataframe.empty:
+        # Handle empty entries (None or empty list) and empty dataframe
+        if (entries is None or len(entries) == 0) and dataframe.empty:
             logger.warning("No entries or dataframe provided. Initializing empty catalog.")
             self.entries: List[CatalogEntry] = []
             self.gdf = gpd.GeoDataFrame()
@@ -101,9 +142,10 @@ class DatasetCatalog:
             self.entries = []
             for entry in entries:
                 if isinstance(entry, CatalogEntry):
+                    entry.geometry = CatalogEntry._normalize_geometry(entry.geometry)
                     self.entries.append(entry)
                 elif isinstance(entry, dict):
-                    self.entries.append(CatalogEntry(**entry))
+                    self.entries.append(CatalogEntry.from_dict(entry))
                 else:
                     logger.warning(f"Ignoring invalid entry: {entry}")
 
@@ -111,13 +153,9 @@ class DatasetCatalog:
             data_dicts: List[Any] = []
             for entry in self.entries:
                 entry_dict = asdict(entry)
-                # Convert geometry dict back to Shapely object if needed
-                geometry_data = entry_dict.get('geometry')
-                if isinstance(geometry_data, dict):
-                    entry_dict['geometry'] = shape(geometry_data)
-                elif geometry_data is None:
-                    entry_dict['geometry'] = None
-                # If it's already a Shapely object, keep it as is
+                entry_dict["geometry"] = CatalogEntry._normalize_geometry(
+                    entry_dict.get("geometry")
+                )
                 data_dicts.append(entry_dict)
 
             self.gdf = gpd.GeoDataFrame(
@@ -131,7 +169,6 @@ class DatasetCatalog:
         if not self.gdf.empty:
             self.gdf = self._clean_dataframe(self.gdf)
 
-
     def to_json(self, path: Optional[Optional[str]] = None) -> str:
         """
         Export the entire DatasetCatalog content to JSON format.
@@ -142,12 +179,14 @@ class DatasetCatalog:
         Returns:
             str: Complete JSON representation of the instance.
         """
+
         def coord_system_to_dict(coord_system):
             if isinstance(coord_system, dict):
                 return coord_system
             if hasattr(coord_system, "__dict__"):
                 return {k: v for k, v in coord_system.__dict__.items() if not k.startswith("_")}
             return str(coord_system)
+
         try:
             # Copy and conversion coord_system BEFORE serialize_structure
             meta_copy = self._global_metadata.copy() if self._global_metadata else {}
@@ -158,7 +197,7 @@ class DatasetCatalog:
             geojson_dict = json.loads(gdf_serializable.to_json())
             export_dict = {
                 "global_metadata": serial_metadata,
-                "features": geojson_dict.get("features", [])
+                "features": geojson_dict.get("features", []),
             }
             json_str = json.dumps(export_dict, indent=2)
             if path:
@@ -171,9 +210,10 @@ class DatasetCatalog:
 
     @classmethod
     def from_json(
-        cls, path: str, alias:str, limit: int, ignore_geometry = False
-    ) -> 'DatasetCatalog':
+        cls, path: str, alias: str, limit: int, ignore_geometry=False
+    ) -> "DatasetCatalog":
         """Reconstruct a DatasetCatalog instance from a GeoJSON file."""
+
         def process_feature(feat):
             try:
                 props = feat.get("properties", {})
@@ -232,7 +272,7 @@ class DatasetCatalog:
                 gdf = gpd.GeoDataFrame(records, geometry="geometry")
             else:
                 gdf = gpd.GeoDataFrame(records)
-            #if "keep_variables" in gdf.columns:
+            # if "keep_variables" in gdf.columns:
             #    gdf["keep_variables"] = gdf["keep_variables"].apply(
             #        lambda x: json.loads(x) if isinstance(x, str) and x.startswith("[") else x
             #    )
@@ -246,10 +286,7 @@ class DatasetCatalog:
             traceback.print_exc()
             raise
 
-
-    def filter_attrs(
-        self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]
-    ) -> None:
+    def filter_attrs(self, filters: dict[str, Union[Callable[[Any], bool], gpd.GeoSeries]]) -> None:
         """Filter catalog entries by attribute values using filter functions."""
         gdf = self.gdf.copy()
         for key, func in filters.items():
@@ -259,9 +296,7 @@ class DatasetCatalog:
                 # Special case for geometry filtering
                 roi = func(gdf[key])
                 if not isinstance(roi, gpd.GeoSeries):
-                    raise ValueError(
-                        f"Expected a gpd.GeoSeries for {key}, got {type(roi)}"
-                    )
+                    raise ValueError(f"Expected a gpd.GeoSeries for {key}, got {type(roi)}")
                 gdf = gdf[roi]
 
             if key not in gdf.columns:
@@ -302,8 +337,20 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: Cleaned and structured GeoDataFrame.
         """
-        gdf["date_start"] = pd.to_datetime(gdf["date_start"], errors="coerce")
-        gdf["date_end"] = pd.to_datetime(gdf["date_end"], errors="coerce")
+        # Use format="ISO8601" so mixed-precision timestamps (e.g. some with
+        # nanosecond fractional seconds, some without) are all parsed correctly.
+        # Plain errors="coerce" infers format from the first entries and silently
+        # coerces mismatching ones to NaT on pandas ≥ 2.x.
+        gdf["date_start"] = pd.to_datetime(
+            gdf["date_start"],
+            errors="coerce",
+            format="ISO8601",
+        )
+        gdf["date_end"] = pd.to_datetime(
+            gdf["date_end"],
+            errors="coerce",
+            format="ISO8601",
+        )
 
         return gdf
 
@@ -325,11 +372,11 @@ class DatasetCatalog:
         row = self._clean_dataframe(row)
         self.gdf = pd.concat([self.gdf, row], ignore_index=True)
         if not isinstance(self.gdf, gpd.GeoDataFrame):
-             self.gdf = gpd.GeoDataFrame(
-                 self.gdf, geometry="geometry" if "geometry" in self.gdf.columns else None
-             )
+            self.gdf = gpd.GeoDataFrame(
+                self.gdf, geometry="geometry" if "geometry" in self.gdf.columns else None
+            )
 
-    def extend(self, other_catalog: 'DatasetCatalog'):
+    def extend(self, other_catalog: "DatasetCatalog"):
         """
         Extend the catalog with another catalog.
 
@@ -339,11 +386,8 @@ class DatasetCatalog:
         self.gdf = pd.concat([self.gdf, other_catalog.gdf], ignore_index=True)
         if not isinstance(self.gdf, gpd.GeoDataFrame):
             self.gdf = gpd.GeoDataFrame(
-                self.gdf,
-                geometry="geometry" if "geometry" in self.gdf.columns else None
+                self.gdf, geometry="geometry" if "geometry" in self.gdf.columns else None
             )
-
-
 
     def filter_by_date(
         self,
@@ -360,26 +404,30 @@ class DatasetCatalog:
         Returns:
             gpd.GeoDataFrame: Filtered GeoDataFrame.
         """
+        if self.gdf.empty:
+            logger.warning("GeoDataFrame is empty, nothing to filter")
+            return
+
         if isinstance(start, datetime) and isinstance(end, datetime):
             mask = (self.gdf["date_end"] >= start) & (self.gdf["date_start"] < end)
-        elif isinstance(start, list) and isinstance(end, list) \
-            and bool(start) and all(isinstance(elem, datetime) for elem in start) \
-            and bool(end) and all(isinstance(elem, datetime) for elem in end):
+        elif (
+            isinstance(start, list)
+            and isinstance(end, list)
+            and bool(start)
+            and all(isinstance(elem, datetime) for elem in start)
+            and bool(end)
+            and all(isinstance(elem, datetime) for elem in end)
+        ):
             if len(start) != len(end):
                 logger.warning("Start and end must have the same number of elements.")
                 return
-            mask = (self.gdf["date_end"] >= start[0])
+            mask = self.gdf["date_end"] >= start[0]
             for start_el, end_el in zip(start, end, strict=False):
-                in_period = (
-                    (self.gdf["date_end"] >= start_el) &
-                    (self.gdf["date_start"] < end_el)
-                    )
+                in_period = (self.gdf["date_end"] >= start_el) & (self.gdf["date_start"] < end_el)
                 mask = mask | in_period
 
         else:
-            logger.warning(
-                "Start and end dates must be datetime objects or lists of datetimes."
-            )
+            logger.warning("Start and end dates must be datetime objects or lists of datetimes.")
             return
 
         self.gdf = self.gdf.loc[mask]
@@ -397,25 +445,31 @@ class DatasetCatalog:
             logger.warning("GeoDataFrame is empty, nothing to filter")
             return
 
-        # Verify if geometry column exists/is active
-        try:
-            _ = self.gdf.geometry
-        except AttributeError:
-             # Try to set it if column "geometry" exists
-             if "geometry" in self.gdf.columns:
-                 self.gdf = self.gdf.set_geometry("geometry")
-             else:
-                 logger.warning(
-                     "GeoDataFrame has no active geometry column. Skipping spatial filtering."
-                 )
-                 return
-
-        # Ensure GeoDataFrame has a defined CRS
+        # Ensure we have a GeoDataFrame with an ACTIVE geometry column.
+        # Some catalog builds end up with shapely geometries present but
+        # no active geometry column (GeoPandas then refuses spatial ops).
         if not isinstance(self.gdf, gpd.GeoDataFrame):
             if "geometry" in self.gdf.columns:
                 self.gdf = gpd.GeoDataFrame(self.gdf, geometry="geometry")
             else:
                 self.gdf = gpd.GeoDataFrame(self.gdf)
+
+        _geom_col = getattr(self.gdf, "_geometry_column_name", None)
+        if not _geom_col or _geom_col not in self.gdf.columns:
+            if "geometry" in self.gdf.columns:
+                self.gdf = self.gdf.set_geometry("geometry")
+            else:
+                # Heuristic fallback: common alternative names.
+                _fallback_cols = [c for c in ("geom", "geoms", "the_geom") if c in self.gdf.columns]
+                if _fallback_cols:
+                    self.gdf = self.gdf.set_geometry(_fallback_cols[0])
+                else:
+                    logger.debug(
+                        "GeoDataFrame has no active geometry column. Skipping spatial filtering."
+                    )
+                    return
+
+        # Ensure GeoDataFrame has a defined CRS
 
         if self.gdf.crs is None:
             logger.info("Setting CRS to EPSG:4326")
@@ -440,31 +494,31 @@ class DatasetCatalog:
                 logger.warning(
                     f"Found {invalid_geoms.sum()} invalid geometries, attempting to fix them"
                 )
-                self.gdf.loc[invalid_geoms, 'geometry'] = self.gdf.loc[
-                    invalid_geoms, 'geometry'
+                self.gdf.loc[invalid_geoms, "geometry"] = self.gdf.loc[
+                    invalid_geoms, "geometry"
                 ].buffer(0)
 
             # Check that the region is valid
             is_valid_check = region.is_valid
-            if hasattr(is_valid_check, 'all'):
-                 is_valid_bool = is_valid_check.all()
+            if hasattr(is_valid_check, "all"):
+                is_valid_bool = is_valid_check.all()
             else:
-                 is_valid_bool = bool(is_valid_check)
+                is_valid_bool = bool(is_valid_check)
 
             if not is_valid_bool:
                 logger.warning("Region geometry is invalid, attempting to fix it")
                 region = region.buffer(0)
 
             # Handle CRS conversion
-            if hasattr(region, 'crs') and region.crs is not None:
+            if hasattr(region, "crs") and region.crs is not None:
                 if self.gdf.crs != region.crs:
                     logger.info(f"Reprojecting region from {region.crs} to {self.gdf.crs}")
                     try:
                         region_gdf = gpd.GeoDataFrame(
-                            geometry=[region] if isinstance(
-                                region, (geometry.Polygon, geometry.base.BaseGeometry)
-                            ) else region,
-                            crs=region.crs
+                            geometry=[region]
+                            if isinstance(region, (geometry.Polygon, geometry.base.BaseGeometry))
+                            else region,
+                            crs=region.crs,
                         )
                         region_gdf = region_gdf.to_crs(self.gdf.crs)
                         region = region_gdf.geometry
@@ -481,9 +535,11 @@ class DatasetCatalog:
             self.gdf = self.gdf[mask]
 
             final_count = len(self.gdf)
-            percentage = (final_count/initial_count*100) if initial_count > 0 else 0
-            logger.info(f"Spatial filter applied: {initial_count} -> {final_count} entries "
-                    f"({percentage:.1f}% retained)")
+            percentage = (final_count / initial_count * 100) if initial_count > 0 else 0
+            logger.info(
+                f"Spatial filter applied: {initial_count} -> {final_count} entries "
+                f"({percentage:.1f}% retained)"
+            )
 
             # Diagnostic with original bounds
             if final_count == 0:
@@ -516,15 +572,14 @@ class DatasetCatalog:
             logger.warning("Spatial filtering failed, keeping original data")
 
     def check_geometries_compatibility(
-            self, gdf: gpd.GeoDataFrame,
-            region: Union[gpd.GeoSeries, geometry.base.BaseGeometry]
-        ):
+        self, gdf: gpd.GeoDataFrame, region: Union[gpd.GeoSeries, geometry.base.BaseGeometry]
+    ):
         """Diagnostic with automatic corrections."""
         logger.debug("=== SPATIAL FILTER DIAGNOSTICS ===")
 
         # Check CRS
         logger.debug(f"GeoDataFrame CRS: {gdf.crs}")
-        if hasattr(region, 'crs'):
+        if hasattr(region, "crs"):
             logger.debug(f"Region CRS: {region.crs}")
         else:
             logger.debug("Region CRS: None (shapely geometry, assumed EPSG:4326)")
@@ -536,15 +591,19 @@ class DatasetCatalog:
         if not gdf.empty:
             try:
                 data_bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
-                logger.debug(f"Data bounds: [{data_bounds[0]:.2f}, {data_bounds[1]:.2f}, "
-                            f"{data_bounds[2]:.2f}, {data_bounds[3]:.2f}]")
+                logger.debug(
+                    f"Data bounds: [{data_bounds[0]:.2f}, {data_bounds[1]:.2f}, "
+                    f"{data_bounds[2]:.2f}, {data_bounds[3]:.2f}]"
+                )
             except Exception as e:
                 logger.debug(f"Could not compute data bounds: {e}")
 
         try:
             region_bounds = region.bounds  # (minx, miny, maxx, maxy)
-            logger.debug(f"Region bounds: [{region_bounds[0]:.2f}, {region_bounds[1]:.2f}, "
-                        f"{region_bounds[2]:.2f}, {region_bounds[3]:.2f}]")
+            logger.debug(
+                f"Region bounds: [{region_bounds[0]:.2f}, {region_bounds[1]:.2f}, "
+                f"{region_bounds[2]:.2f}, {region_bounds[3]:.2f}]"
+            )
         except Exception as e:
             logger.debug(f"Could not compute region bounds: {e}")
 
@@ -561,10 +620,10 @@ class DatasetCatalog:
                 logger.warning(f"{invalid_count} invalid geometries in data")
 
         is_valid_check = region.is_valid
-        if hasattr(is_valid_check, 'all'):
-             is_valid_bool = is_valid_check.all()
+        if hasattr(is_valid_check, "all"):
+            is_valid_bool = is_valid_check.all()
         else:
-             is_valid_bool = bool(is_valid_check)
+            is_valid_bool = bool(is_valid_check)
 
         if not is_valid_bool:
             logger.warning("Region geometry is invalid")
@@ -583,8 +642,6 @@ class DatasetCatalog:
                 logger.debug(f"Sample intersection test failed: {e}")
 
         logger.debug("=== END DIAGNOSTICS ===")
-
-
 
     def filter_by_variables(self, variables: List[str]) -> None:
         """
@@ -614,8 +671,6 @@ class DatasetCatalog:
             gpd.GeoDataFrame: Catalog GeoDataFrame.
         """
         return self.gdf.copy()
-
-
 
     def list_paths(self):
         """

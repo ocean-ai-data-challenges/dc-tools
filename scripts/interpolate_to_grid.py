@@ -1,8 +1,16 @@
 """Grid interpolation script for spatial data processing."""
 
+import os
+
+# Set HDF5/NetCDF env vars BEFORE any imports that use them
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+os.environ["NETCDF4_DEACTIVATE_MPI"] = "1"
+os.environ["NETCDF4_USE_FILE_LOCKING"] = "FALSE"
+os.environ["HDF5_DISABLE_VERSION_CHECK"] = "1"
+os.environ["ARGOPY_NETCDF_LOCKING"] = "FALSE"
+
 import argparse
 from argparse import Namespace
-import os
 import dask
 import pandas as pd
 from typing import Any
@@ -11,30 +19,32 @@ from oceanbench.core.distributed import DatasetProcessor
 import yaml
 
 from dctools.data.connection.connection_manager import clean_for_serialization
-from dctools.data.coordinates import TARGET_DIM_RANGES, TARGET_DEPTH_VALS
+from dctools.data.coordinates import get_target_dimensions, get_target_depth_values
 from dctools.data.datasets.dataset import get_dataset_from_config
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.evaluator import (
-    CONNECTION_CONFIG_REGISTRY, CONNECTION_REGISTRY,
+    CONNECTION_CONFIG_REGISTRY,
+    CONNECTION_REGISTRY,
 )
 from dctools.processing.interpolation import interpolate_dataset
 from dctools.utilities.misc_utils import deep_copy_object
-
+from dctools.utilities.init_dask import configure_dask_workers_env
 
 
 def clean_namespace(namespace: Namespace) -> Namespace:
     """Clean namespace by removing unpicklable attributes."""
     ns = Namespace(**vars(namespace))
     # Removes unpicklable attributes
-    for key in ['dask_cluster', 'fs', 'dataset_processor', 'client', 'session']:
+    for key in ["dask_cluster", "fs", "dataset_processor", "client", "session"]:
         if hasattr(ns, key):
             delattr(ns, key)
     # Also clean objects in ns.params if present
     if hasattr(ns, "params"):
-        for key in ['fs', 'client', 'session', 'dataset_processor']:
+        for key in ["fs", "client", "session", "dataset_processor"]:
             if hasattr(ns.params, key):
                 delattr(ns.params, key)
     return ns
+
 
 def interpolate_cmems_to_zarr(
     source_config: dict,
@@ -59,8 +69,8 @@ def interpolate_cmems_to_zarr(
         end_date (str): end date (YYYY-MM-DD)
         weights_filepath (str): path to xESMF weights file (optional)
     """
-    #os.makedirs(output_dir, exist_ok=True)
-    #dates = pd.date_range(start=start_date, end=end_date, freq="D")
+    # os.makedirs(output_dir, exist_ok=True)
+    # dates = pd.date_range(start=start_date, end=end_date, freq="D")
     protocol = source_config.protocol
     delattr(source_config, "protocol")
 
@@ -68,16 +78,15 @@ def interpolate_cmems_to_zarr(
     connection_cls = CONNECTION_REGISTRY[protocol]
     config = config_cls(**vars(source_config))
 
-    if protocol == 'cmems':
-        if hasattr(config.params, 'fs'):
+    if protocol == "cmems":
+        if hasattr(config.params, "fs"):
             try:
-                if hasattr(config.params.fs, '_session'):
-                    if hasattr(config.params.fs._session, 'close'):
+                if hasattr(config.params.fs, "_session"):
+                    if hasattr(config.params.fs._session, "close"):
                         config.params.fs._session.close()
             except Exception:
                 pass
             delattr(config.params, "fs")
-
 
     if protocol == "argo":
         connection_manager = connection_cls(config, argo_index=argo_index)
@@ -87,7 +96,7 @@ def interpolate_cmems_to_zarr(
 
     if protocol == "cmems":
         # cmems not compatible with Dask workers (pickling errors)
-        with dask.config.set(scheduler='synchronous'):
+        with dask.config.set(scheduler="synchronous"):
             ds = open_func(file_path)
             # Selects variables to interpolate
             ds_sel = ds[variables].copy()
@@ -98,7 +107,7 @@ def interpolate_cmems_to_zarr(
                 target_grid=out_grid,
                 dataset_processor=None,
                 weights_filepath=weights_filepath,
-                interpolation_lib='xesmf',
+                interpolation_lib="xesmf",
             )
     else:
         # Selects variables to interpolate
@@ -111,7 +120,7 @@ def interpolate_cmems_to_zarr(
             target_grid=out_grid,
             dataset_processor=None,
             weights_filepath=weights_filepath,
-            interpolation_lib='xesmf',
+            interpolation_lib="xesmf",
         )
 
     if ds_interp is None:
@@ -127,10 +136,8 @@ def interpolate_cmems_to_zarr(
     file_name = file_name.replace(" ", "_").replace(":", "_")
     zarr_path = os.path.join(output_dir, f"{file_name}.zarr")
 
-
-
     # Save
-    with dask.config.set(scheduler='synchronous'):
+    with dask.config.set(scheduler="synchronous"):
         ds_interp.to_zarr(zarr_path, mode="w", consolidated=True)
     ds.close()
     print(f"Saved standardized dataset to {zarr_path}")
@@ -141,35 +148,35 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Interpolates CMEMS variables and saves daily to Zarr."
     )
-    default_config = os.path.join(
-        os.path.dirname(__file__), "interpolate_config.yaml"
+    default_config = os.path.join(os.path.dirname(__file__), "interpolate_config.yaml")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=default_config,
+        help=f"Path to YAML configuration file (default: {default_config})",
     )
     parser.add_argument(
-        "--config", type=str, default=default_config,
-        help=f"Path to YAML configuration file (default: {default_config})"
+        "--source", type=str, required=True, help="Name of source to process (e.g. glorys)"
     )
     parser.add_argument(
-        "--source", type=str, required=True,
-        help="Name of source to process (e.g. glorys)"
+        "--data_dir", type=str, required=True, help="Directory for intermediate files"
     )
     parser.add_argument(
-        "--data_dir", type=str, required=True,
-        help="Directory for intermediate files"
-    )
-    parser.add_argument(
-        "--output_dir", type=str, required=True,
-        help="Output directory for Zarr files"
+        "--output_dir", type=str, required=True, help="Output directory for Zarr files"
     )
 
     default_weights_filepath = os.path.join(os.path.dirname(__file__), "glorys_weights.nc")
-    parser.add_argument("--weights_filepath", type=str, default=default_weights_filepath,
-        help="Path to xESMF weights file (optional)")
+    parser.add_argument(
+        "--weights_filepath",
+        type=str,
+        default=default_weights_filepath,
+        help="Path to xESMF weights file (optional)",
+    )
     return parser.parse_args()
 
 
 def build_dataset_from_config(
-    args, source_config, dataset_processor, root_data_folder,
-    root_catalog_folder, file_cache=None
+    args, source_config, dataset_processor, root_data_folder, root_catalog_folder, file_cache=None
 ):
     """Builds a dictionary of datasets from YAML config."""
     max_samples = args.max_samples
@@ -182,7 +189,7 @@ def build_dataset_from_config(
         "min_lat": args.min_lat if args.min_lat is not None else -90,
         "max_lat": args.max_lat if args.max_lat is not None else 90,
     }
-    #dataset_name = config.get("dataset")
+    # dataset_name = config.get("dataset")
     dataset = get_dataset_from_config(
         source=source_config,
         root_data_folder=root_data_folder,
@@ -194,6 +201,7 @@ def build_dataset_from_config(
         filter_values=filter_values,
     )
     return dataset
+
 
 def main():
     """Main entry point for grid interpolation."""
@@ -209,7 +217,7 @@ def main():
 
     if config_path:
         config = None
-        with open(config_path, 'r') as fp:
+        with open(config_path, "r") as fp:
             config = yaml.safe_load(fp)
         for key, value in config.items():
             vars(args)[key] = value
@@ -230,9 +238,16 @@ def main():
     os.makedirs(root_catalog_folder, exist_ok=True)
 
     # Create DatasetProcessor (distributed=True for parallelism)
-    dataset_processor = DatasetProcessor(distributed=True, n_workers=args.n_parallel_workers,
-                                        threads_per_worker=args.nthreads_per_worker,
-                                        memory_limit=args.memory_limit_per_worker)
+    dataset_processor = DatasetProcessor(
+        distributed=True,
+        n_workers=args.n_parallel_workers,
+        threads_per_worker=args.nthreads_per_worker,
+        memory_limit=args.memory_limit_per_worker,
+    )
+
+    # Configure workers with HDF5/NetCDF env vars
+    if dataset_processor and dataset_processor.client:
+        configure_dask_workers_env(dataset_processor.client)
 
     # Build the dataset from the config
     dataset = build_dataset_from_config(
@@ -240,9 +255,10 @@ def main():
     )
 
     # Add to the MultiSourceDatasetManager
+    target_dims = get_target_dimensions(config)
     manager = MultiSourceDatasetManager(
         dataset_processor=dataset_processor,
-        target_dimensions=TARGET_DIM_RANGES,
+        target_dimensions=target_dims,
         time_tolerance=pd.Timedelta(hours=args.delta_time),
         list_references=[source_name],
         max_cache_files=args.max_cache_files,
@@ -261,31 +277,29 @@ def main():
     transform = manager.get_transform(
         "standardize",
         dataset_alias=source_name,
-        interp_ranges=TARGET_DIM_RANGES,
+        interp_ranges=target_dims,
         weights_path=weights_filepath,
-        depth_coord_vals=TARGET_DEPTH_VALS,
+        depth_coord_vals=get_target_depth_values(config) or [],
     )
 
-    if hasattr(transform, 'dataset_processor'):
-        delattr(transform, 'dataset_processor')
+    if hasattr(transform, "dataset_processor"):
+        delattr(transform, "dataset_processor")
 
-    all_managers,_, all_connection_params = manager.get_config()
+    all_managers, _, all_connection_params = manager.get_config()
     connection_params = all_connection_params.get(source_name, None)
     connection_manager = all_managers.get(source_name, None)
-    connection_params = deep_copy_object(
-        connection_params, skip_list=['dataset_processor', 'fs']
-    )
+    connection_params = deep_copy_object(connection_params, skip_list=["dataset_processor", "fs"])
     connection_params = clean_for_serialization(connection_params)
     connection_params = clean_namespace(connection_params)
     connection_params.dataset_processor = None
 
     argo_index = None
-    if hasattr(connection_manager, 'argo_index'):
+    if hasattr(connection_manager, "argo_index"):
         argo_index = connection_manager.get_argo_index()
     if argo_index is not None:
         scattered_argo_index = dataset_processor.scatter_data(
             argo_index,
-            broadcast_item = True,
+            broadcast_item=True,
         )
     else:
         scattered_argo_index = None
@@ -294,11 +308,11 @@ def main():
     catalog_df = dataset.get_catalog().get_dataframe()
     variables = source_cfg.get("keep_variables", None)
     out_grid = {
-        "lat": TARGET_DIM_RANGES["lat"],
-        "lon": TARGET_DIM_RANGES["lon"],
+        "lat": target_dims.get("lat"),
+        "lon": target_dims.get("lon"),
     }
-    if "depth" in TARGET_DIM_RANGES:
-        out_grid["depth"] = TARGET_DIM_RANGES["depth"]
+    if "depth" in target_dims and target_dims.get("depth") is not None:
+        out_grid["depth"] = target_dims["depth"]
 
     # Prepare tasks for workers
     delayed_tasks = []
@@ -324,6 +338,7 @@ def main():
     # Execute tasks in parallel and wait for results
     results = dataset_processor.client.gather(delayed_tasks)
     print(f"Interpolation completed for {len(results)} files.")
+
 
 if __name__ == "__main__":
     main()

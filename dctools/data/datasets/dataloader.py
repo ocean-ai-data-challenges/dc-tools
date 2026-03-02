@@ -3,7 +3,11 @@
 
 """Dataloder."""
 
+import atexit
 import gc
+import os
+import shutil
+import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type, Union
@@ -329,267 +333,103 @@ def filter_by_time(df: pd.DataFrame, t0: pd.Timestamp, t1: pd.Timestamp) -> pd.D
     return df_copy[mask]
 
 
-def extrapolate_to_surface(var_name, valid_depths, valid_vals):
-    """
-    Extrapolate profile data to the surface (depth=0) using linear gradient or constant.
-
-    Args:
-        var_name (str): Name of the variable (e.g., 'TEMP', 'PSAL').
-        valid_depths (array-like): Array of depth values where data exists.
-        valid_vals (array-like): Array of valid data values corresponding to depths.
-
-    Returns:
-        float: The extrapolated value at the surface.
-    """
-    if len(valid_vals) == 0:
-        return np.nan
-
-    if var_name in ["TEMP", "temperature"]:
-        # Temperature: reduced gradient towards surface
-        if len(valid_depths) >= 2:
-            # Search for depth different from valid_depths[0]
-            depth_diff = 0
-            i = 1
-            while i < len(valid_depths) and abs(depth_diff) < 1e-6:
-                depth_diff = valid_depths[i] - valid_depths[0]
-                i += 1
-
-            if abs(depth_diff) < 1e-6:  # All depths are identical
-                surface_val = valid_vals[0]
-            else:
-                gradient = (valid_vals[i-1] - valid_vals[0]) / depth_diff
-                surface_val = valid_vals[0] - gradient * 0.5 * valid_depths[0]
-        else:
-            surface_val = valid_vals[0]
-
-    elif var_name in ["PSAL", "salinity"]:
-        # Same logic for salinity
-        if len(valid_depths) >= 2:
-            depth_diff = 0
-            i = 1
-            while i < len(valid_depths) and abs(depth_diff) < 1e-6:
-                depth_diff = valid_depths[i] - valid_depths[0]
-                i += 1
-
-            if abs(depth_diff) < 1e-6:
-                surface_val = valid_vals[0]
-            else:
-                gradient = (valid_vals[i-1] - valid_vals[0]) / depth_diff
-                surface_val = valid_vals[0] - gradient * 0.3 * valid_depths[0]
-        else:
-            surface_val = valid_vals[0]
-
-    else:
-        # Other variables: standard linear extrapolation
-        if len(valid_depths) >= 2:
-            depth_diff = 0
-            i = 1
-            while i < len(valid_depths) and abs(depth_diff) < 1e-6:
-                depth_diff = valid_depths[i] - valid_depths[0]
-                i += 1
-
-            if abs(depth_diff) < 1e-6:
-                surface_val = valid_vals[0]
-            else:
-                gradient = (valid_vals[i-1] - valid_vals[0]) / depth_diff
-                surface_val = valid_vals[0] - gradient * valid_depths[0]
-        else:
-            surface_val = valid_vals[0]
-
-    return surface_val
-
 def preprocess_argo_profiles(
     profile_sources: List[str],
     open_func: Callable[..., xr.Dataset],
     alias: str,
     time_bounds: Tuple[pd.Timestamp, pd.Timestamp],
     depth_levels: Union[List[float], np.ndarray],
-    n_points_dim: str = "N_POINTS"
+    n_points_dim: str = "N_POINTS",
 ):
+    """Load ARGO data through ArgoManager for a single time window.
+
+    This is the **fallback** path used when the evaluator's shared-Zarr
+    prefetch (``ArgoManager.prefetch_batch_shared_zarr``) did not run or
+    failed.  The preferred pipeline is:
+
+    1. Driver merges all batch time-windows and downloads all profiles once
+       (``prefetch_batch_shared_zarr``).
+    2. Workers open the shared Zarr and filter by ``time_bounds`` via
+       ``searchsorted`` (fast, contiguous chunk reads).
+
+    When this fallback IS used, it opens the ArgoManager for the requested
+    window, which downloads and interpolates profiles on-demand.
+
+    Parameters
+    ----------
+    profile_sources : list[str]
+        Monthly catalog keys (unused in Kerchunk path — kept for API compat).
+    open_func : callable
+        ``ArgoManager.open`` bound method (or the ArgoManager itself).
+    alias : str
+        Dataset alias (``"argo_profiles"``).
+    time_bounds : tuple of pd.Timestamp
+        ``(start, end)`` time window.
+    depth_levels : array-like
+        Target depth levels for interpolation.
+    n_points_dim : str
+        Name of the points dimension (default ``"N_POINTS"``).
+
+    Returns
+    -------
+    xr.Dataset or None
     """
-    Load, filter, interpolate, and combine multiple Argo profile files into a single dataset.
+    argo_manager: Optional[ArgoManager] = None
+    if hasattr(open_func, "__self__") and isinstance(open_func.__self__, ArgoManager):
+        argo_manager = open_func.__self__
+    elif isinstance(open_func, ArgoManager):
+        argo_manager = open_func
 
-    Args:
-        profile_sources (List[str]): List of file paths or identifiers for Argo profiles.
-        open_func (Callable): Function to open a single profile.
-        alias (str): Dataset alias.
-        time_bounds (Tuple): Start and end time for filtering.
-        depth_levels (List[float]): Target depth levels for interpolation.
-        n_points_dim (str): Name of the points dimension (default "N_POINTS").
-
-    Returns:
-        xr.Dataset: Combined and interpolated dataset.
-    """
-    interp_profiles: List[Any] = []
-    time_vals: List[Any] = []
-    # TODO : remove this after storing preprocessed profiles to
-    # avoid reprocessing them at each timestep
-    threshold_list_profiles = 20
-
-    def process_one_profile(profile_source):
-        try:
-            # open dataset
-            if alias is not None:
-                ds = open_func(profile_source, alias)
-            else:
-                ds = open_func(profile_source)
-
-            if ds is None:
-                return None, None
-
-            # ds = ds.argo.interp_std_levels(target_dimensions['depth'])
-            # unusable on a single profile
-            # ds = ds.argo.filter_qc()   # useless in "research" mode of argopy
-            # ds_filtered = filter_variables(ds, keep_variables_list)
-
-            ds = ds.rename({"PRES_ADJUSTED": "depth"})
-            ds = ArgoManager.filter_argo_profile_by_time(
-                ds,
-                tmin=time_bounds[0],
-                tmax=time_bounds[1],
-            )
-            if n_points_dim not in ds.dims or ds.sizes.get(n_points_dim, 0) == 0:
-                logger.warning(
-                    f"Argo profile {profile_source} is empty after time filtering, skipping."
-                )
-                return None, None
-
-            lat = ds["LATITUDE"].isel(N_POINTS=0).values.item()
-            lon = ds["LONGITUDE"].isel(N_POINTS=0).values.item()
-            time = pd.to_datetime(ds["TIME"].values)
-            if isinstance(time, (np.ndarray, list)) and len(time) > 1:
-                mean_time = pd.to_datetime(time).mean()
-            else:
-                mean_time = pd.to_datetime(
-                    time[0] if isinstance(time, (np.ndarray, list)) else time
-                )
-
-            depths = ds["depth"].values
-
-            data_dict: Dict[Any, Any] = {}
-            for v in ds.data_vars:
-                if v == "depth":
-                    continue
-                vals = ds[v].values
-                # Filter NaNs
-                valid_mask = ~np.isnan(vals)
-                if not np.any(valid_mask):
-                    # If all are NaNs, create array of NaNs
-                    interp_vals = np.full_like(depth_levels, np.nan, dtype=float)
-                else:
-                    # Filter corresponding values and depths
-                    valid_vals = vals[valid_mask]
-                    valid_depths = depths[valid_mask]
-
-                    # Extrapolation to surface
-                    surface_val = extrapolate_to_surface(v, valid_depths, valid_vals)
-
-                    interp_vals = np.interp(
-                        depth_levels,
-                        valid_depths,
-                        valid_vals,
-                        left=surface_val,
-                        right=np.nan
-                    )
-                data_dict[v] = ("depth", interp_vals)
-
-            # Clean up to avoid memory retention
-            del vals, depths
-            if 'valid_mask' in locals():
-                del valid_mask, valid_vals, valid_depths
-            ds.close()
-            del ds
-
-            interp_ds = xr.Dataset(
-                data_dict,
-                coords={
-                    "depth": depth_levels,
-                    "lat": lat,
-                    "lon": lon,
-                    "time": time
-                }
-            )
-            return interp_ds, mean_time
-        except Exception as e:
-            logger.warning(f"Failed to process Argo profile {profile_source}: {e}")
-            traceback.print_exc()
-            return None, None
-
-    # Parallelization with ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=2) as executor:  # adapt max_workers to your CPU
-        # TODO remove this shortcut after optimizing the processing:
-        # thousands of files to preprocess at each timestep !
-        subset_sources = profile_sources[0:threshold_list_profiles]
-        futures = [executor.submit(process_one_profile, src) for src in subset_sources]
-        for future in as_completed(futures):
-            interp_ds, mean_time = future.result()
-            if interp_ds is not None:
-                interp_profiles.append(interp_ds)
-                time_vals.append(mean_time)
-
-    if len(interp_profiles) == 0:
+    if argo_manager is None:
+        logger.error(
+            "ARGO preprocessing requires ArgoManager.open bound method "
+            "(Kerchunk interface)."
+        )
         return None
-    # Convert each element to scalar pd.Timestamp
-    clean_time_vals: List[Any] = []
-    for t in time_vals:
-        if isinstance(t, (pd.DatetimeIndex, np.ndarray, list)):
-            # Takes first element if index or list
-            clean_time_vals.append(pd.to_datetime(t[0]))
-        else:
-            clean_time_vals.append(pd.to_datetime(t))
-    mean_time = pd.Series(clean_time_vals).mean()
-    interp_profiles = [
-        ds.drop_vars("time") if "time" in ds.coords else ds
-        for ds in interp_profiles
-    ]
 
-    if len(interp_profiles) == 1:
-        combined = interp_profiles[0]
-    else:
-        combined = xr.concat(interp_profiles, dim=n_points_dim)
+    try:
+        ds_window = argo_manager.open((time_bounds[0], time_bounds[1]))
+    except Exception as exc:
+        logger.error(f"Kerchunk open_time_window failed: {exc}")
+        return None
 
-    combined = combined.assign_coords(time=mean_time)
+    if ds_window is None:
+        logger.warning("Kerchunk open_time_window returned None")
+        return None
 
-    # Clean up temporary structures
-    del interp_profiles, time_vals, clean_time_vals
-    gc.collect()
+    if "obs" in ds_window.dims and n_points_dim not in ds_window.dims:
+        ds_window = ds_window.rename({"obs": n_points_dim})
 
-    return combined
+    if n_points_dim not in ds_window.dims:
+        logger.error(
+            f"Kerchunk dataset missing '{n_points_dim}' dimension "
+            f"(available: {list(ds_window.dims)})"
+        )
+        return None
+
+    if ds_window.sizes.get(n_points_dim, 0) == 0:
+        logger.warning("Kerchunk open_time_window returned empty dataset")
+        return None
+
+    return ds_window
 
 
 def preprocess_one_npoints(
-    source, is_swath,
+    source,
+    is_swath,
     n_points_dim,
-    filtered_df, idx,
-    alias, open_func,
+    filtered_df,
+    idx,
+    alias,
+    open_func,
     keep_variables_list,
     target_dimensions,
     coordinates,
     time_bounds=None,
     load_to_memory=False,
 ):
-    """
-    Preprocess a single N-point dataset (e.g., swath or track).
-
-    Args:
-        source: Source dataset or identifier.
-        is_swath (bool): Whether the data is a swath (2D) or track (1D).
-        n_points_dim (str): Name of the points dimension.
-        filtered_df: Filtered metadata DataFrame.
-        idx: Index of the current file in filtered_df.
-        alias (str): Dataset alias.
-        open_func (Callable): Function to open the dataset.
-        keep_variables_list (List[str]): Variables to keep.
-        target_dimensions (Dict): Format definitions.
-        coordinates (Dict): Coordinate system info.
-        time_bounds (Tuple, optional): Time bounds for filtering.
-        load_to_memory (bool): Whether to load data into memory.
-
-    Returns:
-        xr.Dataset: Preprocessed dataset.
-    """
+    """Preprocess a single N-point dataset (e.g., swath or track)."""
     try:
-        # open dataset
         if alias is not None:
             ds = open_func(source, alias)
         else:
@@ -597,16 +437,9 @@ def preprocess_one_npoints(
         if ds is None:
             return None
 
-        # Filter variables early to reduce graph size
-        # Only keep what is needed + coordinates
         if keep_variables_list:
             ds = filter_variables(ds, keep_variables_list)
 
-        # Load individual files immediately into memory.
-        # Single observation files (traces) are small. Managing a Dask graph
-        # for each operation (where, stack, assign) on these small files costs
-        # more in "scheduling" than the computation itself.
-        # Switching to pure NumPy here drastically speeds up preprocessing.
         if load_to_memory:
             try:
                 ds = ds.compute()
@@ -615,10 +448,10 @@ def preprocess_one_npoints(
 
         if is_swath:
             coords_to_keep = [
-                coordinates.get('time', None),
-                coordinates.get('depth', None),
-                coordinates.get('lat', None),
-                coordinates.get('lon', None),
+                coordinates.get("time", None),
+                coordinates.get("depth", None),
+                coordinates.get("lat", None),
+                coordinates.get("lon", None),
             ]
             coords_to_keep = list(filter(lambda x: x is not None, coords_to_keep))
             ds = swath_to_points(
@@ -627,19 +460,15 @@ def preprocess_one_npoints(
                 n_points_dim=n_points_dim,
             )
 
-        # Search for coordinate/time variable
-        time_name = coordinates['time']
+        time_name = coordinates["time"]
         if time_name in ds.variables and time_name not in ds.coords:
             ds = ds.set_coords(time_name)
 
         time_coord = ds.coords[time_name]
 
-        # Check for alternative 'time' dimension for 1D tracks and rename it
         if n_points_dim not in ds.dims and "time" in ds.dims and len(ds.dims) == 1:
-            # Create integer index for n_points and swap, preserving original time variable
             ds = ds.assign_coords({n_points_dim: ("time", np.arange(ds.sizes["time"]))})
             ds = ds.swap_dims({"time": n_points_dim})
-            # Refresh time_coord to ensure it has the correct dimension name (n_points)
             if time_name in ds.coords:
                 time_coord = ds.coords[time_name]
 
@@ -648,14 +477,41 @@ def preprocess_one_npoints(
             return None
 
         ds_with_time = add_time_dim(
-            ds, filtered_df, n_points_dim=n_points_dim, time_coord=time_coord, idx=idx
+            ds,
+            filtered_df,
+            n_points_dim=n_points_dim,
+            time_coord=time_coord,
+            idx=idx,
         )
 
-        import gc
-        ds_interp = ds_with_time
-        # Use balanced chunks for n_points to avoid memory spiking in concatenation
-        # 100k points is a moderate compromise (~8-10MB per var)
-        ds_interp = ds_interp.chunk({n_points_dim: 100000})
+        ds_interp = ds_with_time.chunk({n_points_dim: 100000})
+
+        # Reset MultiIndex on n_points to a simple integer index.
+        # After swath_to_points (xr.stack), n_points has a MultiIndex of
+        # (num_lines, num_pixels) tuples.  xr.concat of N such datasets must
+        # concatenate N such MultiIndexes (each ~500 K entries) even with
+        # compat/join="override" — this is a pure-Python pandas operation
+        # that can saturate one CPU for seconds per batch.
+        # Replacing with a plain integer range lets concat proceed in
+        # microseconds while all DATA variables (lat, lon, time, ssh …)
+        # remain as lazy dask arrays untouched.
+        if n_points_dim in ds_interp.indexes:
+            idx_obj = ds_interp.indexes[n_points_dim]
+            if isinstance(idx_obj, pd.MultiIndex):
+                n_pts = ds_interp.sizes[n_points_dim]
+                # Drop only the MultiIndex level sub-coordinates
+                # (e.g. num_lines, num_pixels) plus the composite
+                # n_points coordinate itself.  lat/lon/time etc. are
+                # ordinary data variables — they are NOT dropped here
+                # and stay backed by their lazy dask arrays.
+                sub_coords = list(idx_obj.names)  # ['num_lines', 'num_pixels']
+                ds_interp = (
+                    ds_interp
+                    .drop_vars(sub_coords + [n_points_dim], errors='ignore')
+                    .assign_coords(
+                        {n_points_dim: np.arange(n_pts, dtype=np.int64)}
+                    )
+                )
 
         del ds
         del ds_with_time
@@ -745,9 +601,6 @@ class EvaluationDataloader:
                 return
 
             for ref_alias in self.ref_aliases:
-                logger.info(
-                    f"=============  PREPROCESSING REFERENCE DATASET: {ref_alias} =============="
-                )
                 for _, row in self.forecast_index.iterrows():
                     # Check if enough data for this forecast
                     forecast_reference_time = row["forecast_reference_time"]
@@ -840,9 +693,22 @@ class EvaluationDataloader:
                             entry["ref_is_observation"] = False
 
                     batch.append(entry)
-                    # Adapt batch size according to parallelization mode
-                    # target_batch_size = self._get_optimal_batch_size()
-                    if len(batch) >= self.batch_size:
+                    # Adapt batch size according to observation/gridded type:
+                    # - observation datasets (SWOT, saral …): use obs_batch_size
+                    #   to limit per-batch S3 download volume.
+                    # - gridded datasets (GLORYS …): use gridded_batch_size
+                    #   to limit per-batch 3-D I/O and worker RAM pressure.
+                    # - fallback: global batch_size.
+                    _effective_bs = self.batch_size
+                    if entry.get("ref_is_observation") and getattr(
+                        self, "obs_batch_size", None
+                    ):
+                        _effective_bs = self.obs_batch_size
+                    elif not entry.get("ref_is_observation") and getattr(
+                        self, "gridded_batch_size", None
+                    ):
+                        _effective_bs = self.gridded_batch_size
+                    if len(batch) >= _effective_bs:
                         yield batch
                         batch = []
                 if batch:  # last batch of ref_alias
@@ -933,6 +799,230 @@ class TorchCompatibleDataloader:
         return torch.tensor(patches)
 
 
+def _drop_nan_points(ds: xr.Dataset, n_points_dim: str) -> xr.Dataset:
+    """Drop points where ALL data variables are NaN along n_points_dim.
+
+    SWOT swath grids stack every (num_lines, num_pixels) cell, including
+    land, ice, and orbital-gap areas that are entirely fill-value.  These
+    NaN-only points can represent 60-90 % of each file's size and have
+    zero scientific value.  Removing them immediately after per-file
+    compute() keeps the accumulator list lean before the final concat.
+    """
+    if n_points_dim not in ds.dims:
+        return ds
+
+    n_pts = ds.sizes[n_points_dim]
+    if n_pts == 0:
+        return ds
+
+    valid_mask: Optional[np.ndarray] = None
+    for vname in ds.data_vars:
+        v = ds[vname]
+        if n_points_dim not in v.dims:
+            continue
+        arr = v.values
+        if arr.ndim == 1:
+            finite = np.isfinite(arr)
+        else:
+            # Multi-dim variable: a point is valid if any element along
+            # non-n_points axes is finite.
+            ax0_size = arr.shape[v.dims.index(n_points_dim)]
+            try:
+                flat = arr.reshape(ax0_size, -1)
+                finite = np.any(np.isfinite(flat), axis=1)
+            except Exception:
+                continue
+        valid_mask = finite if valid_mask is None else (valid_mask | finite)
+
+    if valid_mask is None or valid_mask.all():
+        return ds
+
+    n_valid = int(valid_mask.sum())
+    if n_valid == 0:
+        return ds  # keep caller's None-check handling
+
+    return ds.isel({n_points_dim: valid_mask})
+
+
+# ---------------------------------------------------------------------------
+# Module-level temp-dir registry: cleaned on worker/process exit.
+# Zarr stores written during SWOT preprocessing are registered here so that
+# they are reliably removed even if an exception propagates.
+# ---------------------------------------------------------------------------
+_SWOT_TEMP_DIRS: List[str] = []
+
+
+def _atexit_cleanup_swot_dirs() -> None:  # noqa: D401
+    """Remove all temporary zarr directories created during preprocessing."""
+    for _d in _SWOT_TEMP_DIRS:
+        shutil.rmtree(_d, ignore_errors=True)
+
+
+atexit.register(_atexit_cleanup_swot_dirs)
+
+
+def _build_nan_mask(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
+    """Return a pre-computed 1-D boolean mask of *valid* (non-all-NaN) points.
+
+    Unlike :func:`_drop_nan_points` (which works on already-computed numpy
+    arrays), this function builds the mask from the **lazy** dask graph so
+    that xarray never needs to materialise the full dataset in RAM.  Dask
+    evaluates the mask chunk-by-chunk (peak ≈ one chunk); the returned numpy
+    array is only *n_pts* booleans (≪ full data).
+
+    Returns
+    -------
+    np.ndarray or None
+        1-D boolean mask (True = valid point).  ``None`` when all points are
+        valid (caller should skip filtering).
+    """
+    if n_points_dim not in ds.dims or ds.sizes.get(n_points_dim, 0) == 0:
+        return None
+
+    import dask.array as da  # local import to keep module-level deps clean
+
+    combined_mask = None
+    for vname in ds.data_vars:
+        v = ds[vname]
+        if n_points_dim not in v.dims:
+            continue
+        raw = v.data  # dask array or numpy
+        n_pts_axis = v.dims.index(n_points_dim)
+        other_axes = tuple(i for i in range(raw.ndim) if i != n_pts_axis)
+        if isinstance(raw, da.Array):
+            finite: Any = da.isfinite(raw)
+            if other_axes:
+                finite = da.any(finite, axis=other_axes)
+        else:
+            finite = np.isfinite(raw)
+            if other_axes:
+                finite = np.any(finite, axis=other_axes)
+        combined_mask = (
+            finite if combined_mask is None else (combined_mask | finite)
+        )
+
+    if combined_mask is None:
+        return None
+
+    # Compute only the small 1-D mask (cheap: n_pts × 1 byte).
+    if hasattr(combined_mask, "compute"):
+        mask_np: np.ndarray = combined_mask.compute()
+    else:
+        mask_np = np.asarray(combined_mask)
+
+    if mask_np.all():
+        return None  # all valid — caller can skip isel
+    return mask_np
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for process-pool based batch preprocessing.
+# These must be at module scope so they are picklable by ProcessPoolExecutor.
+# ---------------------------------------------------------------------------
+
+def _open_local_zarr_simple(path: str, _alias: Any = None) -> xr.Dataset:
+    """Open a local zarr file — prefer consolidated metadata.
+
+    Module-level function (picklable for multiprocessing).
+    """
+    try:
+        return xr.open_zarr(path, consolidated=True, chunks={})
+    except Exception:
+        return xr.open_zarr(path, consolidated=False, chunks={})
+
+
+def _nan_mask_numpy(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
+    """Build NaN mask from an already-computed (in-memory) dataset.
+
+    Unlike :func:`_build_nan_mask` (which creates a dask graph and reads data
+    lazily), this operates on numpy arrays directly.  Use it **after**
+    ``.compute()`` to avoid the double-read penalty.
+    """
+    if n_points_dim not in ds.dims or ds.sizes.get(n_points_dim, 0) == 0:
+        return None
+    combined: Optional[np.ndarray] = None
+    for vname in ds.data_vars:
+        v = ds[vname]
+        if n_points_dim not in v.dims:
+            continue
+        vals = v.values  # already numpy
+        n_pts_axis = v.dims.index(n_points_dim)
+        other_axes = tuple(i for i in range(vals.ndim) if i != n_pts_axis)
+        finite = np.isfinite(vals)
+        if other_axes:
+            finite = np.any(finite, axis=other_axes)
+        combined = finite if combined is None else (combined | finite)
+    if combined is None or combined.all():
+        return None
+    return combined
+
+
+# Shared dummy dataframe for add_time_dim fallback (SWOT files contain
+# their own per-point time coordinate — this is the fallback sentinel).
+_DUMMY_TIME_DF = pd.DataFrame({
+    "path": [""],
+    "date_start": [pd.Timestamp("2000-01-01")],
+    "date_end": [pd.Timestamp("2100-01-01")],
+})
+
+
+def _process_file_to_zarr(args: Tuple) -> Tuple[Optional[str], int]:
+    """Process one observation file → compute → NaN-filter → write mini zarr.
+
+    Designed for ``ProcessPoolExecutor``: all arguments are picklable, each
+    invocation is self-contained, and the result is just a ``(path, n_pts)``
+    tuple.
+
+    **Single-pass I/O** — the file is read/decompressed exactly once
+    (the old code did it twice: once for the dask NaN mask, once for the
+    final ``.compute()``).
+    """
+    (path, file_idx, is_swath, n_points_dim, alias,
+     keep_vars, coordinates, output_dir) = args
+    try:
+        # Force synchronous dask scheduler — avoid any interaction with
+        # a distributed Client that may have been inherited via fork().
+        import dask as _dask_mod
+        _dask_mod.config.set(scheduler="synchronous")
+
+        result = preprocess_one_npoints(
+            path, is_swath, n_points_dim,
+            _DUMMY_TIME_DF, 0,
+            alias, _open_local_zarr_simple,
+            keep_vars, None, coordinates,
+            None, False,
+        )
+        if result is None:
+            return (None, 0)
+
+        # ── Single-pass compute ─────────────────────────────────────
+        # Read + decompress data ONCE into memory.
+        result = result.compute(scheduler="synchronous")
+
+        # NaN filter on in-memory numpy arrays (negligible cost).
+        _nmask = _nan_mask_numpy(result, n_points_dim)
+        if _nmask is not None:
+            if int(_nmask.sum()) == 0:
+                del result
+                return (None, 0)
+            result = result.isel({n_points_dim: _nmask})
+
+        n_pts = result.sizes.get(n_points_dim, 0)
+        if n_pts == 0:
+            del result
+            return (None, 0)
+
+        # Write mini zarr directly from this worker process.
+        zarr_path = os.path.join(output_dir, f"file_{file_idx}.zarr")
+        result.to_zarr(zarr_path, mode="w")
+        del result
+        gc.collect()
+        return (zarr_path, n_pts)
+    except Exception as exc:
+        logger.debug(f"Batch preproc ({alias}) file {file_idx}: {exc}")
+        return (None, 0)
+
+
 def concat_with_dim_delayed(
     datasets: List[xr.Dataset],
     concat_dim: str,
@@ -1003,6 +1093,308 @@ def concat_with_dim(
         result = result.sortby(concat_dim)
     return result
 
+def preprocess_batch_obs_files(
+    local_paths: List[str],
+    alias: str,
+    keep_vars: Optional[List[str]],
+    coordinates: Dict[str, str],
+    n_points_dim: str = "n_points",
+    output_zarr_dir: Optional[str] = None,
+) -> Optional[str]:
+    """Preprocess all unique observation files on the driver into a single zarr.
+
+    Eliminates redundant per-worker preprocessing when multiple tasks share
+    the same observation files (typical for SWOT/swath data with wide
+    time_tolerance).  Each unique file is processed exactly once:
+    ``open → swath_to_points → NaN-mask → compute``.
+
+    The resulting zarr contains all valid ocean points with a ``time``
+    coordinate along *n_points_dim*, enabling per-worker time filtering.
+
+    Parameters
+    ----------
+    local_paths : list of str
+        Unique local file paths (post-prefetch).
+    alias : str
+        Dataset alias (e.g. ``"swot"``).
+    keep_vars : list of str or None
+        Variables to retain in the output.
+    coordinates : dict
+        Coordinate name mapping, must contain ``"time"`` key.
+    n_points_dim : str
+        Name of the points dimension (default ``"n_points"``).
+    output_zarr_dir : str or None
+        Directory for temp zarr files.  Created automatically when *None*.
+
+    Returns
+    -------
+    str or None
+        Absolute path to the shared batch zarr, or *None* on failure.
+    """
+    import time as _time
+
+    if not local_paths:
+        return None
+
+    # ── File-count guard ──────────────────────────────────────────────
+    # For very large observation sets (e.g. SWOT with 9 000+ files over
+    # a full year), building the shared Zarr on the driver can take over
+    # an hour (one mini-flush every ~12 s × 300 flushes).  Skip the
+    # shared build when the number of unique files exceeds the limit;
+    # workers will fall back to processing only their ~25 files each.
+    _MAX_SHARED_OBS_FILES = int(
+        os.environ.get("DCTOOLS_SHARED_OBS_MAX_FILES", "5000")
+    )
+    if len(local_paths) > _MAX_SHARED_OBS_FILES:
+        logger.info(
+            f"Shared batch preprocessing ({alias}): {len(local_paths)} "
+            f"files exceeds limit {_MAX_SHARED_OBS_FILES} — skipping. "
+            f"Workers will process files individually."
+        )
+        return None
+
+    t_start = _time.perf_counter()
+
+    if output_zarr_dir is None:
+        output_zarr_dir = tempfile.mkdtemp(prefix=f"dctools_batch_{alias}_")
+    os.makedirs(output_zarr_dir, exist_ok=True)
+    output_zarr_path = os.path.join(output_zarr_dir, "batch_shared.zarr")
+
+    # If a previous run already produced this zarr, reuse it.
+    if os.path.isdir(output_zarr_path):
+        try:
+            _probe = xr.open_zarr(output_zarr_path, consolidated=False)
+            if _probe.sizes.get(n_points_dim, 0) > 0:
+                logger.debug(
+                    f"Shared batch zarr ({alias}): reusing existing "
+                    f"({_probe.sizes[n_points_dim]:,} pts)"
+                )
+                _probe.close()
+                return output_zarr_path
+            _probe.close()
+        except Exception:
+            pass  # stale zarr — rebuild
+
+    # ── Probe first file to detect swath structure ──────────────────────
+    # These zarr stores often lack per-variable _ARRAY_DIMENSIONS
+    # attributes; dimension info lives only in the consolidated
+    # .zmetadata file.  Use consolidated=True first (with fallback).
+    try:
+        try:
+            _first = xr.open_zarr(local_paths[0], consolidated=True, chunks={})
+        except Exception:
+            _first = xr.open_zarr(local_paths[0], consolidated=False, chunks={})
+        is_swath = {"num_lines", "num_pixels"}.issubset(_first.dims)
+        _first.close()
+        del _first
+    except Exception as exc:
+        logger.error(f"Cannot probe first obs file for batch preproc: {exc}")
+        return None
+
+    # ── Per-file parallel preprocessing ──────────────────────────────
+    # Architecture overview (v2 — ProcessPoolExecutor):
+    #   • Each unique obs file is processed by a *separate OS process*
+    #     → open_zarr → swath_to_points → single-pass compute → NaN mask
+    #     → write mini zarr.  True CPU parallelism (no GIL).
+    #   • Single-pass I/O: data is read/decompressed ONCE per file
+    #     (v1 read twice: once for the dask NaN mask, once for compute).
+    #   • No mini-batch accumulation or serial flush — each process
+    #     writes its own zarr directly.
+    #   • Falls back to ThreadPoolExecutor if process creation fails
+    #     (e.g. container restrictions, fork issues).
+    _mini_zarr_paths: List[str] = []
+    n_ok = 0
+    n_pts_total = 0
+
+    _cpu_count = os.cpu_count() or 4
+    _env_max = int(os.environ.get("DCTOOLS_PREP_WORKERS", "0"))
+    _MAX_PREP_WORKERS = min(
+        _env_max if _env_max > 0 else min(_cpu_count, 16),
+        len(local_paths),
+    )
+
+    _args_list = [
+        (p, idx, is_swath, n_points_dim, alias,
+         keep_vars, dict(coordinates) if not isinstance(coordinates, dict) else coordinates,
+         output_zarr_dir)
+        for idx, p in enumerate(local_paths)
+    ]
+
+    _use_processes = os.environ.get(
+        "DCTOOLS_PREP_THREADS_ONLY", ""
+    ).lower() not in ("1", "true", "yes")
+
+    logger.info(
+        f"Shared batch preprocessing ({alias}): "
+        f"{len(local_paths)} unique files, "
+        f"{_MAX_PREP_WORKERS} {'processes' if _use_processes else 'threads'}"
+    )
+
+    try:
+        if _use_processes:
+            from concurrent.futures import ProcessPoolExecutor as _FilePool
+        else:
+            raise RuntimeError("threads-only requested via env")  # → fallback
+
+        with _FilePool(max_workers=_MAX_PREP_WORKERS) as pool:
+            from concurrent.futures import as_completed as _proc_ac
+            _futs = [pool.submit(_process_file_to_zarr, a) for a in _args_list]
+            for fut in _proc_ac(_futs):
+                try:
+                    zarr_path, n_pts = fut.result()
+                except Exception as _fe:
+                    logger.debug(f"Batch preproc ({alias}): worker failed: {_fe}")
+                    continue
+                if zarr_path is not None:
+                    _mini_zarr_paths.append(zarr_path)
+                    n_ok += 1
+                    n_pts_total += n_pts
+
+    except (RuntimeError, OSError, BrokenPipeError) as _pool_exc:
+        # Fallback: ThreadPoolExecutor (GIL-limited but portable).
+        if _use_processes:
+            logger.warning(
+                f"Batch preproc ({alias}): ProcessPoolExecutor failed "
+                f"({_pool_exc!r}), falling back to threads"
+            )
+        from concurrent.futures import ThreadPoolExecutor as _ThrPool
+        from concurrent.futures import as_completed as _thr_ac
+
+        with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
+            _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
+            for fut in _thr_ac(_futs):
+                try:
+                    zarr_path, n_pts = fut.result()
+                except Exception as _fe:
+                    logger.debug(f"Batch preproc ({alias}): worker failed: {_fe}")
+                    continue
+                if zarr_path is not None:
+                    _mini_zarr_paths.append(zarr_path)
+                    n_ok += 1
+                    n_pts_total += n_pts
+
+    if not _mini_zarr_paths:
+        logger.warning(f"Shared batch preprocessing ({alias}): no valid data")
+        shutil.rmtree(output_zarr_dir, ignore_errors=True)
+        return None
+
+    # ── Final concat → shared zarr ─────────────────────────────────────
+    lazy_parts = [
+        xr.open_zarr(p, consolidated=False) for p in _mini_zarr_paths
+    ]
+    if len(lazy_parts) == 1:
+        combined = lazy_parts[0]
+    else:
+        combined = xr.concat(
+            lazy_parts, dim=n_points_dim,
+            coords="minimal", compat="override", join="override",
+        )
+
+    if n_points_dim in combined.coords:
+        combined = combined.drop_vars(n_points_dim)
+
+    # Drop inherited zarr encoding from mini-batch stores — the lazy
+    # concat produces dask chunks that don't align with the original
+    # per-file zarr chunk sizes, causing a validation error on write.
+    # IMPORTANT: preserve datetime encoding for the time coordinate
+    # so that workers can decode it correctly after open_zarr().
+    _time_encoding = None
+    if "time" in combined.variables:
+        _time_encoding = dict(combined["time"].encoding)
+    for var in combined.variables:
+        combined[var].encoding.clear()
+    if _time_encoding and "time" in combined.variables:
+        # Restore only the CF datetime keys needed for correct roundtrip
+        for _ek in ("units", "calendar", "dtype"):
+            if _ek in _time_encoding:
+                combined["time"].encoding[_ek] = _time_encoding[_ek]
+
+    # ── Sort by time so workers can use fast contiguous slicing ────────
+    # Boolean-mask isel on a dask-backed zarr forces reading ALL chunks
+    # (35 M pts × N vars).  When 8 worker threads do this simultaneously
+    # the I/O bandwidth is saturated and tasks either time out or OOM.
+    # Sorting by time lets workers use slice(i0, i1) which reads only
+    # the relevant contiguous chunks — typically 10-100× less I/O.
+    _time_name = coordinates.get("time", "time")
+    if _time_name in combined.variables:
+        _tarr = combined[_time_name].values
+        if hasattr(_tarr, "compute"):
+            _tarr = _tarr.compute()
+        _tarr = np.asarray(_tarr)
+        if not np.issubdtype(_tarr.dtype, np.datetime64):
+            try:
+                _tarr = _tarr.astype("datetime64[ns]")
+            except Exception:
+                _tarr = None
+        if _tarr is not None and len(_tarr) > 1:
+            if not bool(np.all(_tarr[:-1] <= _tarr[1:])):
+                logger.info(
+                    f"Shared batch ({alias}): sorting {len(_tarr):,} "
+                    "points by time for fast worker slicing…"
+                )
+                _sort_idx = np.argsort(_tarr, kind="mergesort")
+                combined = combined.isel({n_points_dim: _sort_idx})
+
+    # Rechunk to uniform sizes — xr.concat of files with varying n_points
+    # produces non-uniform dask chunks which zarr cannot store.
+    # Use a fixed chunk size; the total is n_pts_total accumulated above.
+    _target_chunk = max(1, n_pts_total // max(1, len(lazy_parts)))
+    combined = combined.chunk({n_points_dim: _target_chunk})
+
+    # Write the shared zarr (streams chunk-by-chunk from mini zarrs)
+    combined.to_zarr(output_zarr_path, mode="w")
+
+    # ── Save time index as sidecar .npy for zero-copy worker access ───
+    # Workers need the full time array for searchsorted filtering.
+    # Loading it from the zarr means each worker independently calls
+    # .compute() on a 107 M-element dask array → ~860 MB per worker.
+    # By saving it as a contiguous .npy file, workers can np.load()
+    # with mmap_mode='r' and share the same OS page cache pages.
+    _time_npy_path = os.path.join(output_zarr_dir, "time_index.npy")
+    try:
+        _time_name_coord = coordinates.get("time", "time")
+        if _time_name_coord in combined.variables:
+            _tv = combined[_time_name_coord].values
+            if hasattr(_tv, "compute"):
+                _tv = _tv.compute()
+            _tv = np.asarray(_tv)
+            if np.issubdtype(_tv.dtype, np.integer):
+                _tv = _tv.astype("datetime64[ns]")
+            np.save(_time_npy_path, _tv)
+            logger.debug(
+                f"Shared batch ({alias}): saved time index "
+                f"({len(_tv):,} pts) to {_time_npy_path}"
+            )
+    except Exception as _exc_npy:
+        logger.debug(f"Could not save time index .npy: {_exc_npy}")
+
+    # Consolidate metadata so worker threads don't each stat hundreds
+    # of small .zarray/.zattrs files simultaneously.
+    try:
+        import zarr as _zarr_mod
+        _zarr_mod.consolidate_metadata(output_zarr_path)
+    except Exception:
+        pass  # non-critical — workers fall back to consolidated=False
+
+    # Cleanup mini zarrs
+    for lp in lazy_parts:
+        lp.close()
+    for p in _mini_zarr_paths:
+        shutil.rmtree(p, ignore_errors=True)
+
+    # Register for cleanup at exit
+    _SWOT_TEMP_DIRS.append(output_zarr_dir)
+
+    elapsed = _time.perf_counter() - t_start
+    logger.info(
+        f"Shared batch preprocessing ({alias}): "
+        f"{n_ok}/{len(local_paths)} files → "
+        f"{n_pts_total:,} points in {elapsed:.1f}s"
+    )
+
+    return output_zarr_path
+
+
 class ObservationDataViewer:
     """Class to view and preprocess observation data."""
 
@@ -1018,7 +1410,9 @@ class ObservationDataViewer:
         # time_tolerance: pd.Timedelta = pd.Timedelta("12h"),
         n_points_dim: str,
         dataset_processor: Optional[Optional[DatasetProcessor]] = None,
+        results_dir: Optional[str] = None,
         include_geometry: bool = False,
+        save_preprocessed: bool = False,
     ):
         """
         Initialize the ObservationDataViewer.
@@ -1036,6 +1430,7 @@ class ObservationDataViewer:
             n_points_dim: name of points dimension
             dataset_processor: optional processor
             include_geometry: whether to include geometry column
+            save_preprocessed: whether to persist preprocessed data to Zarr
         """
         self.is_metadata = isinstance(source, (pd.DataFrame, gpd.GeoDataFrame))
         self.load_fn = load_fn
@@ -1046,6 +1441,8 @@ class ObservationDataViewer:
         self.n_points_dim = n_points_dim
         self.dataset_processor = dataset_processor
         self.time_bounds = time_bounds
+        self.results_dir = results_dir
+        self.save_preprocessed = save_preprocessed
 
         if self.is_metadata:
             if self.load_fn is None:
@@ -1056,6 +1453,25 @@ class ObservationDataViewer:
         self.coordinates = dataset_metadata['coord_system'].coordinates
         self.include_geometry = include_geometry
 
+    def save_to_zarr(self, dataset: xr.Dataset, root_path: str):
+        """
+        Save preprocessed dataset to a Zarr file in the specified root path.
+
+        Parameters:
+            dataset: The xarray Dataset to save.
+            root_path: The root directory path where the Zarr file will be saved.
+        """
+        # Save preprocessed dataset in a Zarr file
+        time_val = dataset.coords["time"].values
+
+        # If it's an array with a single value
+        if isinstance(time_val, (np.ndarray, list)) and len(time_val) == 1:
+            time_str = str(pd.to_datetime(time_val[0]))
+        else:
+            time_str = str(pd.to_datetime(time_val))
+        argo_name = f"argo_profiles_{time_str}.zarr"
+        path = os.path.join(root_path, argo_name)
+        dataset.to_zarr(path, mode="w", consolidated=True)
 
     def preprocess_datasets(
         self,
@@ -1074,6 +1490,9 @@ class ObservationDataViewer:
 
         # File loading
         dataset_paths = [row["path"] for _, row in dataframe.iterrows()]
+        if not dataset_paths:
+            logger.warning(f"No dataset paths found for alias '{self.alias}'")
+            return None
 
         # log diagnostic
         total_files = len(dataset_paths)
@@ -1083,20 +1502,18 @@ class ObservationDataViewer:
                 "This may generate a large Dask graph."
             )
 
-        first_ds = None
-        while first_ds is None:
-            if self.alias is not None:
-                first_ds = self.load_fn(dataset_paths[0], self.alias)
-            else:
-                first_ds = self.load_fn.open(dataset_paths[0])
-
         # swath_dims = {"num_lines", "num_pixels", "num_nadir"}
         reduced_swath_dims = {"num_lines", "num_pixels"}
 
         # if argo profiles, special preprocessing:
+        # NOTE: This is the FALLBACK path.  The preferred pipeline is the
+        # shared-Zarr approach in evaluator._evaluate_batch() which merges
+        # all batch time-windows, downloads once, and lets workers filter
+        # by searchsorted.  This branch only runs when the evaluator's
+        # prefetch did not happen (e.g. standalone ObservationDataViewer
+        # usage outside the Evaluator class).
 
         if self.alias == "argo_profiles":
-            # logger.info("Argo profiles detected - special preprocessing")
             try:
                 result = preprocess_argo_profiles(
                     profile_sources=dataset_paths,
@@ -1108,40 +1525,58 @@ class ObservationDataViewer:
                 if result is None:
                     logger.error("No Argo profiles could be processed")
                     return None
-                # logger.info(f"Final Argo result: {result.sizes.get('profile', 1)} profiles, "
-                #        f"{len(result.data_vars)} variables")
+
                 if load_to_memory:
                     result = result.compute()
 
-                '''# Save preprocessed dataset in a Zarr file
-                argo_dir = "..."
-                time_val = result.coords["time"].values
-
-                # If it's an array with a single value
-                if isinstance(time_val, (np.ndarray, list)) and len(time_val) == 1:
-                    time_str = str(pd.to_datetime(time_val[0]))
-                else:
-                    time_str = str(pd.to_datetime(time_val))
-                argo_name = f"argo_profiles_{time_str}.zarr"
-                import os
-                argo_path = os.path.join(argo_dir, argo_name)
-                result.to_zarr(argo_path, mode="w", consolidated=True)'''
-
-                return xr.Dataset(result) if result is not None else None
+                if self.save_preprocessed and self.results_dir:
+                    save_path = os.path.join(self.results_dir, self.alias + "_preprocessed")
+                    os.makedirs(save_path, exist_ok=True)
+                    self.save_to_zarr(result, save_path)
+                result = xr.Dataset(result) if result is not None else None
+                return result
             except Exception as e:
                 logger.error(f"Argo preprocessing failed: {e}")
                 traceback.print_exc()
                 return None
 
+        first_ds = None
+        try:
+            if self.alias is not None:
+                first_ds = self.load_fn(dataset_paths[0], self.alias)
+            else:
+                first_ds = self.load_fn(dataset_paths[0])
+        except Exception as exc:
+            logger.error(
+                f"Failed to open first dataset for alias '{self.alias}' "
+                f"during preprocessing probe: {exc}"
+            )
+            traceback.print_exc()
+            return None
+
+        if first_ds is None:
+            logger.error(
+                f"Failed to open first dataset for alias '{self.alias}' "
+                "during preprocessing probe (received None)."
+            )
+            return None
+
+        # --- Capture dimension flags, then immediately free the probe dataset ---
+        # first_ds is only needed to decide which preprocessing branch to take.
+        # Keeping it alive through the N-file loop wastes RAM equal to one full
+        # SWOT file (often 50-300 MB) and can double-open the first file.
+        _probe_has_npoints = (
+            self.n_points_dim in first_ds.dims
+            or ("time" in first_ds.dims and len(first_ds.dims) == 1)
+        )
+        _probe_is_swath = reduced_swath_dims.issubset(first_ds.dims)
+        _probe_dims = dict(first_ds.sizes)  # lightweight copy
+        del first_ds
+        gc.collect()
+
         # Data with n_points/N_POINTS dimension only
         # OR special case: unique "time" dimension (saral tracks, etc)
-        elif (
-            (
-                self.n_points_dim in first_ds.dims
-                or ("time" in first_ds.dims and len(first_ds.dims) == 1)
-            )
-            and not reduced_swath_dims.issubset(first_ds.dims)
-        ):
+        if _probe_has_npoints and not _probe_is_swath:
             try:
                 # Clean and process datasets
                 # Use the processor only if loading into memory (eager loading distributed)
@@ -1194,7 +1629,7 @@ class ObservationDataViewer:
                 return None
 
         # Swath data (num_lines, num_pixels)
-        elif reduced_swath_dims.issubset(first_ds.dims):
+        elif _probe_is_swath:
             try:
                 # Clean and process datasets
                 if self.dataset_processor is not None and load_to_memory:
@@ -1240,5 +1675,7 @@ class ObservationDataViewer:
                 traceback.print_exc()
                 return None
         else:
-            logger.error(f"Dataset for {self.alias} has unsupported dimensions: {first_ds.dims}")
+            logger.error(
+                f"Dataset for {self.alias} has unsupported dimensions: {_probe_dims}"
+            )
             return None

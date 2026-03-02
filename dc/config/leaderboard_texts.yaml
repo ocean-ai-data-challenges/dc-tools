@@ -1,0 +1,30 @@
+# Leaderboard customization for dcleaderboard
+# This file matches the custom_config structure used by dcleaderboard.
+
+texts:
+  page_title: "Data Challenge 2 Leaderboard"
+  reference_header: "## Reference dataset: {ref_alias}"
+  metric_header: "### Metric: {metric_name}"
+  variable_group_header: "#### {var_type} Variables"
+
+metrics_names:
+  rmse: "Root Mean Squared Error (RMSE)"
+  rmsd: "Root Mean Squared Deviation (RMSD)"
+  rmsd_geostrophic_currents: "RMSD of Geostrophic Currents"
+  rmsd_mld: "RMSD of Mixed Layer Depth"
+  lagrangian: "Lagrangian analysis"
+
+variables_names:
+  # Examples (add more as needed)
+  ssh: "Sea Surface Height (SSH)"
+  sst: "Sea Surface Temperature (SST)"
+  u: "Velocity U"
+  v: "Velocity V"
+  u_geostrophic: "Velocity U (Geo)"
+  v_geostrophic: "Velocity V (Geo)"
+
+models_names:
+  # Examples (add more as needed)
+  glonet: "GLONET"
+  challenger_model_1: "Virtual model 1"
+  challenger_model_2: "Virtual model 2"

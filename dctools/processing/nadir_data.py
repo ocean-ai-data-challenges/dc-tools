@@ -45,31 +45,33 @@ class NadirDataProcessor:
             coord_sys = CoordinateSystem.get_coordinate_system(data)
             coord_name_dict = coord_sys.coordinates
         if time_range is not None:
-            result = result.sel(
-                {coord_name_dict["time"]: slice(time_range[0], time_range[1])}
-            )
+            result = result.sel({coord_name_dict["time"]: slice(time_range[0], time_range[1])})
 
         # Create mask for .where
         mask = xr.ones_like(data[coord_name_dict["lat"]])
         if lat_range is not None:
-            mask = xr.DataArray(np.logical_and(
-                mask,
+            mask = xr.DataArray(
                 np.logical_and(
-                    data[coord_name_dict["lat"]] >= lat_range[0],
-                    data[coord_name_dict["lat"]] <= lat_range[1],
-                ),
-            ))
+                    mask,
+                    np.logical_and(
+                        data[coord_name_dict["lat"]] >= lat_range[0],
+                        data[coord_name_dict["lat"]] <= lat_range[1],
+                    ),
+                )
+            )
         if lon_range is not None:
-            mask = xr.DataArray(np.logical_and(
-                mask,
+            mask = xr.DataArray(
                 np.logical_and(
-                    data[coord_name_dict["lon"]] >= lon_range[0],
-                    data[coord_name_dict["lon"]] <= lon_range[1],
-                ),
-            ))
+                    mask,
+                    np.logical_and(
+                        data[coord_name_dict["lon"]] >= lon_range[0],
+                        data[coord_name_dict["lon"]] <= lon_range[1],
+                    ),
+                )
+            )
 
         # .compute() needed if data is a dask array
         # https://github.com/hainegroup/oceanspy/issues/332
-        result = result.where(mask.compute(), drop=True)
+        result = result.where(mask.compute(scheduler="synchronous"), drop=True)
 
         return result

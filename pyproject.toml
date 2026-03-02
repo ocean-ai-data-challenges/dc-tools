@@ -18,6 +18,7 @@ dependencies = [
     "argopy>=1.1.0",
     "cartopy>=0.24.1",
     "copernicusmarine>=2.2.2",
+    "cupy-cuda11x>=13.0.0",
     "dask>=2025.7.0",
     "dask[distributed]>=2025.01.0",
     "ftputil (>=5.1.0,<6.0.0)",
@@ -46,7 +47,7 @@ dependencies = [
     "xskillscore>=0.0.27",
     "zarr (>=2.14.2,<3.0.0)",
     "scipy (>=1.13.1,<2.0.0)",
-    "dill (>=0.4.0,<0.5.0)"
+    "dill (>=0.4.0,<0.5.0)",
 ]
 
 [project.urls]
@@ -74,6 +75,7 @@ optional = false
 oceanbench = { git = "git+https://github.com/aitmohandk/oceanbench", branch = "main" }
 xrpatcher = { git = "git+https://github.com/jejjohnson/xrpatcher.git", branch = "main" }
 xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
+dcleaderboard = { git = "git+https://github.com/ocean-ai-data-challenges/dc_leaderboard.git", branch = "main" }
 
 [tool.poetry.group.docs]
 optional = true
@@ -113,6 +115,21 @@ exclude = [
     "node_modules",
     "site-packages",
     "venv",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-m \"not slow\" -p no:pytest_cov -p no:cov"
+markers = [
+    "slow: slow/integration-style tests (network, dask clusters, large IO)",
+]
+norecursedirs = [
+    ".*",
+    "build",
+    "dist",
+    "docs",
+    "test_cache",
 ]
 
 [tool.ruff.lint]

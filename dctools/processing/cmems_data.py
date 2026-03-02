@@ -12,9 +12,8 @@ import xarray as xr
 
 from dctools.dcio.loader import FileLoader
 from dctools.dcio.saver import DataSaver
-from dctools.utilities.xarray_utils import (
-    get_glonet_time_attrs, assign_coordinate
-)
+from dctools.utilities.xarray_utils import get_glonet_time_attrs, assign_coordinate
+
 
 def create_glorys_ndays_forecast(
     nc_path: str,
@@ -41,47 +40,50 @@ def create_glorys_ndays_forecast(
         # concatenate downloaded files from CMEMS
         for fname in list_nc_files:
             fpath = os.path.join(nc_path, fname)
-            tmp_ds = FileLoader.open_dataset_auto(fpath) # replaced lazy_load_dataset
+            tmp_ds = FileLoader.open_dataset_auto(fpath)  # replaced lazy_load_dataset
             if tmp_ds and transform_fct:
                 tmp_ds = transform_fct(tmp_ds)
 
             if tmp_ds is not None:
                 tmp_ds = assign_coordinate(
-                    tmp_ds, "time", coord_vals=[time_step],
-                    coord_attrs=get_glonet_time_attrs(start_date)
+                    tmp_ds,
+                    "time",
+                    coord_vals=[time_step],
+                    coord_attrs=get_glonet_time_attrs(start_date),
                 )
 
             assert tmp_ds is not None, f"Error while loading dataset: {fpath}."
 
             if time_step == 0:
-                kwargs_w: Dict[str, Any] = {"file_format":"zarr", "mode":"w", "compute":True}
+                kwargs_w: Dict[str, Any] = {"file_format": "zarr", "mode": "w", "compute": True}
                 DataSaver.save_dataset(
-                    tmp_ds, zarr_path,
+                    tmp_ds,
+                    zarr_path,
                     **kwargs_w,
                 )
             else:
                 kwargs_a: Dict[str, Any] = {
-                    "file_format":"zarr", "mode":"a",
-                    "append_dim":'time', "compute":True
+                    "file_format": "zarr",
+                    "mode": "a",
+                    "append_dim": "time",
+                    "compute": True,
                 }
                 DataSaver.save_dataset(
-                    tmp_ds, zarr_path,
+                    tmp_ds,
+                    zarr_path,
                     **kwargs_a,
                 )
             time_step += 1
 
-        glorys_data = FileLoader.open_dataset_auto(zarr_path) # replaced lazy_load_dataset
+        glorys_data = FileLoader.open_dataset_auto(zarr_path)  # replaced lazy_load_dataset
         if glorys_data is None:
-             raise ValueError("Failed to reload created Zarr dataset.")
+            raise ValueError("Failed to reload created Zarr dataset.")
 
     except Exception as err:
-        logger.error(
-            f"Error while creating Glorys forecast dataset: {repr(err)}"
-        )
+        logger.error(f"Error while creating Glorys forecast dataset: {repr(err)}")
         raise
 
     return glorys_data
-
 
 
 def extract_dates_from_filename(filename: str) -> Optional[Tuple[str, str]]:
@@ -100,8 +102,9 @@ def extract_dates_from_filename(filename: str) -> Optional[Tuple[str, str]]:
     if match_range:
         start_date = match_range.group(1)
         end_date = match_range.group(2)
-        return start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:], \
-               end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
+        return start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:], end_date[
+            :4
+        ] + "-" + end_date[4:6] + "-" + end_date[6:]
 
     # Regex to extract a single date (YYYYMMDD)
     match_single = re.search(r"(\d{8})", filename)
@@ -109,8 +112,7 @@ def extract_dates_from_filename(filename: str) -> Optional[Tuple[str, str]]:
         date = match_single.group(1)
         return (
             date[:4] + "-" + date[4:6] + "-" + date[6:],
-            date[:4] + "-" + date[4:6] + "-" + date[6:]
+            date[:4] + "-" + date[4:6] + "-" + date[6:],
         )
 
     return None
-

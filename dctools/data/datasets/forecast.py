@@ -5,6 +5,7 @@ from typing import Any, List
 from loguru import logger
 import pandas as pd
 
+
 def build_forecast_index_from_catalog(
     catalog: pd.DataFrame,
     init_date: str,
@@ -53,10 +54,11 @@ def build_forecast_index_from_catalog(
         - 'file' (path to file covering valid_time)
     """
     # Column verification
-    assert start_time_col in catalog.columns and \
-           end_time_col in catalog.columns and \
-           file_col in catalog.columns, \
-           f"Catalog must contain '{start_time_col}', '{end_time_col}', and '{file_col}' columns"
+    assert (
+        start_time_col in catalog.columns
+        and end_time_col in catalog.columns
+        and file_col in catalog.columns
+    ), f"Catalog must contain '{start_time_col}', '{end_time_col}', and '{file_col}' columns"
 
     init_start = pd.Timestamp(init_date)
     init_end = pd.Timestamp(end_date)
@@ -98,8 +100,8 @@ def build_forecast_index_from_catalog(
 
             # Selection of files containing valid_time
             matching_files = catalog[
-                (catalog[start_time_col] <= valid_time) &
-                (catalog[end_time_col] >= valid_time_plus1)
+                (catalog[start_time_col] <= valid_time)
+                & (catalog[end_time_col] >= valid_time_plus1)
             ]
 
             if matching_files.empty:
@@ -117,12 +119,14 @@ def build_forecast_index_from_catalog(
                 else:
                     selected_file = matching_files.iloc[0]
 
-            sequence_records.append({
-                "forecast_reference_time": init_time,
-                "lead_time": lead_time_value,
-                "valid_time": valid_time,
-                "file": selected_file[file_col]
-            })
+            sequence_records.append(
+                {
+                    "forecast_reference_time": init_time,
+                    "lead_time": lead_time_value,
+                    "valid_time": valid_time,
+                    "file": selected_file[file_col],
+                }
+            )
 
         # Add sequence only if complete
         if complete_sequence and len(sequence_records) == n_days_forecast:
@@ -130,9 +134,9 @@ def build_forecast_index_from_catalog(
 
     df_result = pd.DataFrame.from_records(records)
 
-    logger.info(
+    logger.debug(
         f"Built forecast index with {len(df_result)} entries "
-        f"({len(df_result)//n_days_forecast if not df_result.empty else 0} "
+        f"({len(df_result) // n_days_forecast if not df_result.empty else 0} "
         "complete forecast sequences)"
     )
 

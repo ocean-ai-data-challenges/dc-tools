@@ -33,8 +33,9 @@ def get_dates_from_startdate(start_date: str, ndays: int) -> List[str]:
     list_days: List[Any] = []
     for nday in range(0, ndays):
         time_stamp = pd.to_datetime(start_date) + pd.DateOffset(days=nday)
-        list_days.append(time_stamp.strftime('%Y-%m-%d'))
+        list_days.append(time_stamp.strftime("%Y-%m-%d"))
     return list_days
+
 
 def get_home_path() -> str:
     """Get the user home directory path in a cross-platform way.
@@ -42,19 +43,17 @@ def get_home_path() -> str:
     Returns:
         str: The path to the user's home directory.
     """
-    if 'HOME' in os.environ:
-        home_path = os.environ['HOME']
-    elif 'USERPROFILE' in os.environ:
-        home_path = os.environ['USERPROFILE']
-    elif 'HOMEPATH' in os.environ:
-        home_path = os.environ['HOMEPATH']
+    if "HOME" in os.environ:
+        home_path = os.environ["HOME"]
+    elif "USERPROFILE" in os.environ:
+        home_path = os.environ["USERPROFILE"]
+    elif "HOMEPATH" in os.environ:
+        home_path = os.environ["HOMEPATH"]
     return home_path
 
 
-
 def visualize_netcdf_with_geometry(
-    ds: xr.Dataset, geometry: gpd.GeoSeries, coordinates: Dict[str, str],
-    variable_name: str = "zos"
+    ds: xr.Dataset, geometry: gpd.GeoSeries, coordinates: Dict[str, str], variable_name: str = "zos"
 ):
     """Visualize a NetCDF dataset variable along with a geometry on a map.
 
@@ -68,27 +67,26 @@ def visualize_netcdf_with_geometry(
     # Load NetCDF data
 
     # Extract coordinates and variable to visualize
-    lon = ds[coordinates['lon']]
-    lat = ds[coordinates['lat']]
+    lon = ds[coordinates["lon"]]
+    lat = ds[coordinates["lat"]]
     variable = ds[variable_name]  # variable to visualize
 
-
     # Create a GeoDataFrame for geometry
-    gdf = gpd.GeoDataFrame({'geometry': [geometry]}, crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame({"geometry": [geometry]}, crs="EPSG:4326")
 
     # Configure projection
-    fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()})
+    fig, ax = plt.subplots(subplot_kw={"projection": ccrs.PlateCarree()})
     ax.set_extent([lon.min(), lon.max(), lat.min(), lat.max()], crs=ccrs.PlateCarree())  # type: ignore
 
     # Plot NetCDF data
-    variable.plot(ax=ax, transform=ccrs.PlateCarree(), cmap='viridis')  # type: ignore
+    variable.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="viridis")  # type: ignore
 
     # Plot geometry
-    gdf.plot(ax=ax, edgecolor='red', facecolor='none', linewidth=2, transform=ccrs.PlateCarree())
-
+    gdf.plot(ax=ax, edgecolor="red", facecolor="none", linewidth=2, transform=ccrs.PlateCarree())
 
     # Show map
     plt.show()
+
 
 def walk_obj(obj):
     """Recursively yield all leaf elements from a nested structure.
@@ -107,6 +105,7 @@ def walk_obj(obj):
             yield from walk_obj(item)
     else:
         yield obj
+
 
 def transform_in_place(obj, func):
     """Recursively apply a function to all elements of a nested structure in place.
@@ -129,6 +128,7 @@ def transform_in_place(obj, func):
     else:
         # For immutable types: apply function directly
         return func(obj)
+
 
 def make_serializable(obj):
     """
@@ -161,6 +161,7 @@ def make_serializable(obj):
         return [make_serializable(v) for v in obj]
     return obj
 
+
 def make_timestamps_serializable(gdf: pd.DataFrame) -> pd.DataFrame:
     """
     Convert datetime columns in a DataFrame to ISO format strings.
@@ -177,6 +178,7 @@ def make_timestamps_serializable(gdf: pd.DataFrame) -> pd.DataFrame:
             gdf[col] = gdf[col].apply(lambda x: x.isoformat() if pd.notnull(x) else None)
     return gdf
 
+
 def _replace_nan_in_nested_list(obj):
     """Helper function to replace NaNs in nested lists."""
     if isinstance(obj, list):
@@ -191,7 +193,6 @@ def _replace_nan_in_nested_list(obj):
         return obj
     else:
         return obj
-
 
 
 def serialize_optimized(obj):
@@ -239,8 +240,7 @@ def serialize_optimized(obj):
         records: List[Any] = []
         for row in obj.itertuples(index=False, name=None):
             row_dict = {
-                col: serialize_optimized(val)
-                for col, val in zip(obj.columns, row, strict=False)
+                col: serialize_optimized(val) for col, val in zip(obj.columns, row, strict=False)
             }
             records.append(row_dict)
         return records
@@ -273,8 +273,9 @@ def _safe_repr(x, maxlen=120):
     except Exception:
         s = str(type(x))
     if len(s) > maxlen:
-        return s[:maxlen-3] + "..."
+        return s[: maxlen - 3] + "..."
     return s
+
 
 def to_float32(obj: Any) -> Any:
     """Recursively converts all float64 data to float32 in xarray objects or dicts."""
@@ -417,7 +418,7 @@ def print_structure_types(
         vars_list = list(obj.data_vars)[:max_items]
         print(
             f"{prefix}  data_vars: {vars_list} "
-            f"(+{max(0, len(obj.data_vars)-len(vars_list))} more)"
+            f"(+{max(0, len(obj.data_vars) - len(vars_list))} more)"
         )
         return
     if isinstance(obj, xr.DataArray):
@@ -509,7 +510,7 @@ def add_noise_with_snr(signal: np.ndarray, snr_db: float, seed: Optional[int] = 
     if seed is not None:
         np.random.seed(seed)
 
-    signal_power = np.mean(signal ** 2)
+    signal_power = np.mean(signal**2)
     snr_linear = 10 ** (snr_db / 10)
     noise_power = signal_power / snr_linear
 
@@ -611,11 +612,14 @@ def log_memory(stage):
 
 def is_dask_worker():
     """Check via environment variables."""
-    return any([
-        'DASK_WORKER_NAME' in os.environ,
-        'DASK_SCHEDULER_ADDRESS' in os.environ,
-        os.environ.get('DASK_WORKER', False)
-    ])
+    return any(
+        [
+            "DASK_WORKER_NAME" in os.environ,
+            "DASK_SCHEDULER_ADDRESS" in os.environ,
+            os.environ.get("DASK_WORKER", False),
+        ]
+    )
+
 
 def ensure_timestamp(date_input):
     """Converts to Timestamp only if not already a Timestamp."""
@@ -630,7 +634,7 @@ def deep_copy_object(obj: Any, skip_list: Optional[Optional[List[Union[str, type
     if skip_list is None:
         safe_skip_list: List[Any] = []
     else:
-        safe_skip_list = list(skip_list) # copy to be safe
+        safe_skip_list = list(skip_list)  # copy to be safe
 
     # Primitive types
     if obj is None or isinstance(obj, (str, int, float, bool, bytes, type)):
@@ -642,20 +646,25 @@ def deep_copy_object(obj: Any, skip_list: Optional[Optional[List[Union[str, type
         return obj
 
     # Non-copyable types
-    non_copyable_types = ['Client', 'LocalCluster', 'DatasetProcessor', 'ArgoIndex', 'DataFetcher']
+    non_copyable_types = ["Client", "LocalCluster", "DatasetProcessor", "ArgoIndex", "DataFetcher"]
     if any(name in obj_type.__name__ for name in non_copyable_types):
         return obj
 
     # Special handling first to avoid errors
     if isinstance(obj, SimpleNamespace):
-        copied_vars = {k: deep_copy_object(v, safe_skip_list) if k not in safe_skip_list else v
-                      for k, v in vars(obj).items()}
+        copied_vars = {
+            k: deep_copy_object(v, safe_skip_list) if k not in safe_skip_list else v
+            for k, v in vars(obj).items()
+        }
         return SimpleNamespace(**copied_vars)
 
-    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Namespace':
+    if hasattr(obj, "__class__") and obj.__class__.__name__ == "Namespace":
         from argparse import Namespace
-        copied_vars = {k: deep_copy_object(v, safe_skip_list) if k not in safe_skip_list else v
-                      for k, v in vars(obj).items()}
+
+        copied_vars = {
+            k: deep_copy_object(v, safe_skip_list) if k not in safe_skip_list else v
+            for k, v in vars(obj).items()
+        }
         return Namespace(**copied_vars)
 
     # Try pickle first
@@ -671,37 +680,41 @@ def deep_copy_object(obj: Any, skip_list: Optional[Optional[List[Union[str, type
     elif isinstance(obj, tuple):
         return tuple(deep_copy_object(item, safe_skip_list) for item in obj)
     elif isinstance(obj, dict):
-        return {k: deep_copy_object(v, safe_skip_list) if k not in safe_skip_list else v
-                for k, v in obj.items()}
+        return {
+            k: deep_copy_object(v, safe_skip_list) if k not in safe_skip_list else v
+            for k, v in obj.items()
+        }
     elif isinstance(obj, set):
         return {deep_copy_object(item, safe_skip_list) for item in obj}
 
     # Fallback: return original
     return obj
 
+
 def get_active_workers_count():
     """Returns the number of active Dask workers."""
     try:
         # Method 1: Via Dask client
         client = get_client()
-        workers_info = client.scheduler_info()['workers']
+        workers_info = client.scheduler_info()["workers"]
         active_workers = len(workers_info)
         return active_workers
     except Exception:
         # No active Dask client
         return 0
 
+
 def get_dask_config_workers():
     """Returns Dask workers configuration."""
     try:
         client = get_client()
         return {
-            'n_workers': len(client.scheduler_info()['workers']),
-            'threads_per_worker': client.scheduler_info().get('threads_per_worker', 1),
-            'total_cores': sum(w['nthreads'] for w in client.scheduler_info()['workers'].values())
+            "n_workers": len(client.scheduler_info()["workers"]),
+            "threads_per_worker": client.scheduler_info().get("threads_per_worker", 1),
+            "total_cores": sum(w["nthreads"] for w in client.scheduler_info()["workers"].values()),
         }
     except Exception:
-        return {'n_workers': 0, 'threads_per_worker': 0, 'total_cores': 0}
+        return {"n_workers": 0, "threads_per_worker": 0, "total_cores": 0}
 
 
 def get_current_worker_id():
@@ -709,14 +722,14 @@ def get_current_worker_id():
     try:
         worker = get_worker()
         return {
-            'worker_id': worker.id,
-            'worker_address': worker.address,
-            'worker_name': getattr(worker, 'name', 'unknown'),
-            'worker_threads': getattr(worker.state, 'nthreads', 'unknown'),
-            'worker_memory_limit': getattr(worker.memory_manager, 'memory_limit', 'unknown'),
+            "worker_id": worker.id,
+            "worker_address": worker.address,
+            "worker_name": getattr(worker, "name", "unknown"),
+            "worker_threads": getattr(worker.state, "nthreads", "unknown"),
+            "worker_memory_limit": getattr(worker.memory_manager, "memory_limit", "unknown"),
         }
     except Exception as e:
-        return {'error': f"Not running in worker context: {e}"}
+        return {"error": f"Not running in worker context: {e}"}
 
 
 def show_worker_info():
@@ -728,7 +741,7 @@ def show_worker_info():
         # Worker information
         worker_id = worker.id
         worker_address = worker.address
-        worker_name = getattr(worker, 'name', 'unknown')
+        worker_name = getattr(worker, "name", "unknown")
         process_id = os.getpid()
 
         print(f"Worker ID: {worker_id}")
@@ -775,10 +788,7 @@ def show_worker_info():
 #                 find_unpicklable_objects(v, f"{path}.{k}", max_depth-1, visited)
 
 
-def list_all_days(
-        start_date: datetime,
-        end_date: datetime
-    ) -> list[datetime]:
+def list_all_days(start_date: datetime, end_date: datetime) -> list[datetime]:
     """Return a list of datetime.datetime objects for each day between dates.
 
     For each day between start_date and end_date (inclusive).

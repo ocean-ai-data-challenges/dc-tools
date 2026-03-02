@@ -9,6 +9,14 @@ to limit memory footprint.
 """
 
 import os
+
+# Set HDF5/NetCDF env vars BEFORE any imports that use them
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+os.environ["NETCDF4_DEACTIVATE_MPI"] = "1"
+os.environ["NETCDF4_USE_FILE_LOCKING"] = "FALSE"
+os.environ["HDF5_DISABLE_VERSION_CHECK"] = "1"
+os.environ["ARGOPY_NETCDF_LOCKING"] = "FALSE"
+
 import yaml
 import argparse
 from datetime import datetime, timedelta
@@ -19,31 +27,29 @@ from loguru import logger
 import fsspec
 
 from oceanbench.core.distributed import DatasetProcessor
-
+from dctools.utilities.init_dask import configure_dask_workers_env
 
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Download and consolidate Zarr files from S3."
+    parser = argparse.ArgumentParser(description="Download and consolidate Zarr files from S3.")
+    parser.add_argument(
+        "--config", type=str, required=True, help="Path to the YAML config file (dc2.yaml)"
     )
     parser.add_argument(
-        "--config", type=str, required=True,
-        help="Path to the YAML config file (dc2.yaml)"
-    )
-    parser.add_argument(
-        "--dataset", type=str, required=True,
-        help="Nom du dataset à traiter (ex: glonet)"
+        "--dataset", type=str, required=True, help="Nom du dataset à traiter (ex: glonet)"
     )
     parser.add_argument(
         "--output_dir", type=str, required=True, help="Output directory for Zarr files"
     )
     return parser.parse_args()
 
+
 def load_config(config_path):
     """Load configuration from YAML file."""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
 
 def get_s3_params(config, dataset_name):
     """Extract S3 parameters from configuration."""
@@ -59,9 +65,9 @@ def get_s3_params(config, dataset_name):
 
 def create_fs(endpoint_url, s3_bucket, s3_folder):
     """Create filesystem object for S3 access."""
-    client_kwargs = {'endpoint_url': endpoint_url} if endpoint_url else None
+    client_kwargs = {"endpoint_url": endpoint_url} if endpoint_url else None
     fs = fsspec.filesystem(
-        's3',
+        "s3",
         anon=True,
         client_kwargs=client_kwargs,
     )
@@ -75,19 +81,17 @@ def list_zarr_files(endpoint_url, s3_bucket, s3_folder, start_date):
     (e.g: .../20240103.zarr)
     """
     date = datetime.strptime(start_date, "%Y%m%d")
-    #end_dt = datetime.strptime(end_date, "%Y%m%d")
+    # end_dt = datetime.strptime(end_date, "%Y%m%d")
     list_f = []
     while True:
         if date.year < 2025:
             date_str = date.strftime("%Y%m%d")
-            '''list_f.append(
+            """list_f.append(
                 f"{endpoint_url}/{s3_bucket}/{s3_folder}/{date_str}.zarr"
                 #f"https://minio.dive.edito.eu/project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
                 #f"s3://project-glonet/public/glonet_reforecast_2024/{date_str}.zarr"
-            )'''
-            list_f.append(
-                f"s3://{s3_bucket}/{s3_folder}/{date_str}.zarr"
-            )
+            )"""
+            list_f.append(f"s3://{s3_bucket}/{s3_folder}/{date_str}.zarr")
             date = date + timedelta(days=7)
         else:
             break
@@ -95,18 +99,17 @@ def list_zarr_files(endpoint_url, s3_bucket, s3_folder, start_date):
     return list_f
 
 
-
 def download_and_consolidate_zarr(remote_path, fs, output_dir):
     """Download and consolidate remote Zarr file to local directory."""
     file_name = Path(remote_path).name
     local_path = str(Path(output_dir) / file_name)
-    logger.info(f"Downloading and consolidating {remote_path} → {local_path}")
+    logger.info(f"Downloading and consolidating {remote_path} -> {local_path}")
 
     # Open the remote store for reading via fsspec
-    #store = fs.get_mapper(remote_path)
+    # store = fs.get_mapper(remote_path)
     try:
-        #ds = xr.open_zarr(store, consolidated=True)
-        #ds.to_zarr(local_path, mode="w", consolidated=True)
+        # ds = xr.open_zarr(store, consolidated=True)
+        # ds.to_zarr(local_path, mode="w", consolidated=True)
         fs.get(remote_path, local_path, recursive=True)
         logger.info(f"File saved: {local_path}")
 
@@ -114,12 +117,11 @@ def download_and_consolidate_zarr(remote_path, fs, output_dir):
         logger.error(f"Error while processing {remote_path}: {exc}")
 
 
-
-'''def download_and_consolidate_zarr(remote_path, fs, output_dir):
+"""def download_and_consolidate_zarr(remote_path, fs, output_dir):
     # Download and consolidate a remote Zarr file into the local directory
     file_name = Path(remote_path).name
     local_path = str(Path(output_dir) / file_name)
-    logger.info(f"Downloading and consolidating {remote_path} → {local_path}")
+    logger.info(f"Downloading and consolidating {remote_path} -> {local_path}")
 
     # Open the remote store for reading
     #   store = fs.get_mapper(remote_path)
@@ -130,7 +132,8 @@ def download_and_consolidate_zarr(remote_path, fs, output_dir):
         ds.to_zarr(local_path, mode="w", consolidated=True)
         logger.info(f"File saved: {local_path}")
     except Exception as exc:
-        logger.error(f"Error while processing {remote_path}: {exc}")'''
+        logger.error(f"Error while processing {remote_path}: {exc}")"""
+
 
 def main():
     """Main execution function."""
@@ -145,29 +148,31 @@ def main():
 
     zarr_files = list_zarr_files(
         endpoint_url,
-        s3_bucket, s3_folder,
+        s3_bucket,
+        s3_folder,
         start_date,
     )
     # 'https://minio.dive.edito.eu/project-oceanbench/public/glonet_full_2024/20240103.zarr'
     # 'https://minio.dive.edito.eu/project-oceanbench/public/glonet_full_2024/20240103.zarr'
 
-
     # Start the local Dask client
     dataset_processor = DatasetProcessor(
-        distributed=True, n_workers=6,
-        threads_per_worker=1,
-        memory_limit="8GB"
+        distributed=True, n_workers=6, threads_per_worker=1, memory_limit="8GB"
     )
+
+    # Configure workers with HDF5/NetCDF env vars
+    if dataset_processor and dataset_processor.client:
+        configure_dask_workers_env(dataset_processor.client)
     # Submit tasks in parallel
     delayed_tasks = []
     for remote_path in zarr_files:
-        delayed_tasks.append(dask.delayed(download_and_consolidate_zarr)(
-            remote_path, fs, args.output_dir
-        ))
+        delayed_tasks.append(
+            dask.delayed(download_and_consolidate_zarr)(remote_path, fs, args.output_dir)
+        )
     _ = dataset_processor.compute_delayed_tasks(delayed_tasks)
 
-
     logger.info("Processing completed.")
+
 
 if __name__ == "__main__":
     main()

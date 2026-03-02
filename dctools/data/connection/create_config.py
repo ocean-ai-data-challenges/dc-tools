@@ -2,16 +2,23 @@
 
 from typing import Any, Callable, Dict, Optional
 from dctools.data.connection.config import (
-    ARGOConnectionConfig, GlonetConnectionConfig,
-    WasabiS3ConnectionConfig, S3ConnectionConfig,
-    FTPConnectionConfig, CMEMSConnectionConfig,
-    LocalConnectionConfig
+    ARGOConnectionConfig,
+    GlonetConnectionConfig,
+    WasabiS3ConnectionConfig,
+    S3ConnectionConfig,
+    FTPConnectionConfig,
+    CMEMSConnectionConfig,
+    LocalConnectionConfig,
 )
 
 from dctools.data.connection.connection_manager import (
-    ArgoManager, GlonetManager,
-    LocalConnectionManager, S3WasabiManager,
-    S3Manager, FTPManager, CMEMSManager,
+    ArgoManager,
+    GlonetManager,
+    LocalConnectionManager,
+    S3WasabiManager,
+    S3Manager,
+    FTPManager,
+    CMEMSManager,
 )
 
 
@@ -35,20 +42,20 @@ CONNECTION_CONFIG_REGISTRY: Dict[str, Any] = {
     "wasabi": WasabiS3ConnectionConfig,
 }
 
+
 def create_worker_connect_config(
     # pred_source_config: Any,
     config: Any,
-    argo_index: Optional[Any] = None
+    argo_index: Optional[Any] = None,
 ) -> Callable:
     """Create connection configurations for prediction and reference sources."""
     protocol = config.protocol
     # ref_protocol = ref_source_config.protocol
 
-
-    if protocol == 'cmems':
-        if hasattr(config, 'fs') and hasattr(config.fs, '_session'):
+    if protocol == "cmems":
+        if hasattr(config, "fs") and hasattr(config.fs, "_session"):
             try:
-                if hasattr(config.fs._session, 'close'):
+                if hasattr(config.fs._session, "close"):
                     config.fs._session.close()
             except Exception:
                 pass
@@ -63,34 +70,23 @@ def create_worker_connect_config(
     config = config_cls(params=vars(config))
 
     # remove fsspec handler 'fs' from Config, otherwise: serialization error
-    if protocol == 'cmems':
-        if hasattr(
-            config.params, 'fs') and hasattr(config.params.fs, '_session'
-        ):
+    if protocol == "cmems":
+        if hasattr(config.params, "fs") and hasattr(config.params.fs, "_session"):
             try:
-                if hasattr(config.params.fs._session, 'close'):
+                if hasattr(config.params.fs._session, "close"):
                     config.params.fs._session.close()
             except Exception:
                 pass
             config.params.fs = None
 
-
-    if protocol == 'cmems':
+    if protocol == "cmems":
         connection_manager = connection_cls(
             config,
             call_list_files=False,
             do_logging=True,
         )
-    elif protocol == "argo":
-        connection_manager = connection_cls(
-            config,
-            argo_index=argo_index,
-            call_list_files=False,
-        )
     else:
-        connection_manager = connection_cls(
-            config, call_list_files=False
-        )
+        connection_manager = connection_cls(config, call_list_files=False)
     open_func: Callable[..., Any] = connection_manager.open
 
     return open_func
