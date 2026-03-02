@@ -1026,7 +1026,7 @@ class BaseDCEvaluation:
                                 item.get("is_class4", False),
                             )
                             per_bins_list.append({
-                                "ref_alias": alias,
+                                "ref_alias": item.get("ref_alias", alias),
                                 "valid_time": item.get("valid_time"),
                                 "forecast_reference_time": item.get(
                                     "forecast_reference_time"
@@ -1096,6 +1096,15 @@ class BaseDCEvaluation:
         # ------------------------------------------------------------------
         # Leaderboard generation
         # ------------------------------------------------------------------
+        if not models_results:
+            logger.warning(
+                "Leaderboard generation skipped: no evaluation results were produced "
+                "(all candidate datasets were skipped due to missing references or "
+                "incompatible variables/metrics). Check that the reference datasets "
+                "listed in dataset_references are properly loaded."
+            )
+            return
+
         try:
             import shutil as _shutil
 
