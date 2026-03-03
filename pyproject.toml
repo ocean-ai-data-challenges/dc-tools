@@ -75,9 +75,7 @@ optional = false
 oceanbench = { git = "git+https://github.com/aitmohandk/oceanbench", branch = "main" }
 xrpatcher = { git = "git+https://github.com/jejjohnson/xrpatcher.git", branch = "main" }
 xesmf = { git = "git+https://github.com/pangeo-data/xESMF.git" }
-# dcleaderboard = { git = "git+https://github.com/ocean-ai-data-challenges/dc_leaderboard.git", branch = "main" }
-dcleaderboard = { path = "/home/k24aitmo/IMT/software/dc_leaderboard", develop = true }
-
+dcleaderboard = { git = "git+https://github.com/ocean-ai-data-challenges/dc_leaderboard.git", branch = "main" }
 [tool.poetry.group.docs]
 optional = true
 
