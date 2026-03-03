@@ -120,6 +120,12 @@ def run_from_config(
         with performance_report(filename=report_path):
             evaluator_instance.run_eval()
 
+        lb_warnings = getattr(evaluator_instance, "_leaderboard_warnings", [])
+        if lb_warnings:
+            print("Evaluation has finished, but the leaderboard is INCOMPLETE:")
+            for w in lb_warnings:
+                print(f"  [!] {w}")
+            return 0
         print("Evaluation has finished successfully.")
         return 0
 

@@ -1,0 +1,73 @@
+# =============================================================================
+# DC Leaderboard — Configuration file
+# =============================================================================
+# Place this file in your results/ directory (or its parent).
+# It will be auto-detected when building the leaderboard, or you can pass it
+# explicitly with:
+#   python run_local.py --config path/to/leaderboard_config.yaml
+#   dcleaderboard-build --results-dir results/ --output-dir _site/ --config leaderboard_config.yaml
+#
+# All sections are optional. Only the keys you specify are overridden;
+# everything else falls back to the built-in defaults.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# A. Page-level text
+# -----------------------------------------------------------------------------
+texts:
+  # Title shown in the browser tab and hero section
+  page_title: "Data Challenge 2 — Leaderboard"
+
+  # Brand name and subtitle in the top navigation bar
+  brand_name: "Ocean & Climate"
+  brand_sub: "Data Challenge"
+
+  # URL linked from the navbar GitHub icon and the About page
+  github_url: "https://github.com/ppr-ocean-ia/dc-tools"
+
+  # Section-header templates.
+  # Available placeholders are shown between {}.
+  reference_header: "## Reference Dataset: {ref_alias}"
+  metric_header: "### Metric: {metric_name}"
+  variable_group_header: "#### Variable Type: {var_type}"
+
+# -----------------------------------------------------------------------------
+# B. Metric display names
+# Map internal metric key → human-readable label shown in the leaderboard tables.
+# Only metrics listed here are renamed; others keep their original names.
+# -----------------------------------------------------------------------------
+metrics_names:
+  rmse: "Root Mean Squared Error (RMSE)"
+  rmsd: "Root Mean Squared Deviation (RMSD)"
+  bias: "Bias"
+  rmsd_geostrophic_currents: "RMSD — Geostrophic Currents"
+  rmsd_mld: "RMSD — Mixed Layer Depth"
+  lagrangian: "Lagrangian Analysis"
+
+# -----------------------------------------------------------------------------
+# C. Variable display names
+# Map internal variable name → human-readable label shown in the column headers.
+# -----------------------------------------------------------------------------
+variables_names:
+  ssh: "Sea Surface Height (SSH)"
+  Surface ssh: "Sea Surface Height (SSH)"
+  sst: "Sea Surface Temperature (SST)"
+  sss: "Sea Surface Salinity (SSS)"
+  salinity: "Salinity"
+  temperature: "Temperature"
+  u: "Eastward Velocity (U)"
+  v: "Northward Velocity (V)"
+  u_geostrophic: "U Geostrophic"
+  v_geostrophic: "V Geostrophic"
+  eastward_velocity: "Eastward Velocity"
+  northward_velocity: "Northward Velocity"
+  mld: "Mixed Layer Depth (MLD)"
+
+# -----------------------------------------------------------------------------
+# D. Model / dataset display names
+# Map internal model identifier → human-readable name shown in the row labels.
+# -----------------------------------------------------------------------------
+models_names:
+  glonet: "GloNet (reference)"
+  challenger_model_1: "Challenger Model 1"
+  challenger_model_2: "Challenger Model 2"

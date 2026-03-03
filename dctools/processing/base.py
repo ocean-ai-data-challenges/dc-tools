@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import json
 import os
+import time as _time
 import warnings
 from argparse import Namespace
 from datetime import timedelta
 from glob import glob
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import dask
@@ -72,6 +74,9 @@ class BaseDCEvaluation:
         # customise the leaderboard (metric/variable/model names, page texts).
         # It is passed directly to render_site_from_results_dir as custom_config.
         self.leaderboard_custom_config: Optional[Dict[str, Any]] = None
+        # Populated during run_eval(); non-empty means the leaderboard was
+        # generated but incomplete (e.g. maps.html skipped) or failed entirely.
+        self._leaderboard_warnings: List[str] = []
 
         configure_dask_logging()
 
@@ -1006,38 +1011,94 @@ class BaseDCEvaluation:
             except Exception:
                 pass
 
+            # ── Separator: evaluation done -> post-processing ──────────────
+            _sep_post = "─" * 68
+            print("")
+            print(f"┌{_sep_post}┐")
+            print(f"│{'  📦  POST-PROCESSING RESULTS  —  ' + alias.upper():^67}│")
+            print(f"└{_sep_post}┘")
+            print("")
+
             # Aggregate batch results and write final JSON.
             try:
                 batch_files = glob(os.path.join(results_files_dir, "results_*_batch_*.json"))
                 results_dict: Dict[str, Any] = {}
-                per_bins_list: list = []  # per_bins entries across all batches
                 n_errors = 0
-                for batch_file in batch_files:
-                    with open(batch_file, "r") as f:
-                        batch_results = json.load(f)
-                    for item in batch_results:
-                        if isinstance(item, dict) and item.get("error"):
-                            n_errors += 1
-                        # Pop per_bins before serialization: keeps the main
-                        # results file flat and leaderboard-compatible.
-                        if isinstance(item, dict) and "per_bins" in item:
-                            _is_obs = item.get(
-                                "ref_is_observation",
-                                item.get("is_class4", False),
-                            )
-                            per_bins_list.append({
-                                "ref_alias": item.get("ref_alias", alias),
-                                "valid_time": item.get("valid_time"),
-                                "forecast_reference_time": item.get(
-                                    "forecast_reference_time"
-                                ),
-                                "lead_time": item.get("lead_time"),
-                                "ref_type": "observation" if _is_obs else "gridded",
-                                "per_bins": item.pop("per_bins"),
-                            })
-                    transform_in_place(batch_results, make_serializable)
-                    serializable_result = nan_to_none(batch_results)
-                    results_dict.setdefault(alias, []).extend(serializable_result)
+
+                logger.info(
+                    f"  ┌ Consolidating {len(batch_files)} batch file(s) "
+                    f"for '{alias}' ..."
+                )
+
+                # Per-bins are written incrementally as a JSONL file (one
+                # compact JSON object per line) so that the full list is never
+                # held in RAM.  This prevents OOM crashes on large datasets
+                # where an indented JSON dump can reach multiple gigabytes.
+                per_bins_path = os.path.join(
+                    self.results_directory,
+                    f"results_{alias}_per_bins.jsonl",
+                )
+                _pb_count = 0
+                with open(per_bins_path, "w", encoding="utf-8") as pb_file:
+                    for batch_file in batch_files:
+                        with open(batch_file, "r") as f:
+                            batch_results = json.load(f)
+                        for item in batch_results:
+                            if isinstance(item, dict) and item.get("error"):
+                                n_errors += 1
+                            # Pop per_bins before serialization: keeps the main
+                            # results file flat and leaderboard-compatible.
+                            # Write each entry immediately – no in-RAM list.
+                            if isinstance(item, dict) and "per_bins" in item:
+                                _is_obs = item.get(
+                                    "ref_is_observation",
+                                    item.get("is_class4", False),
+                                )
+                                _pb_entry = {
+                                    "ref_alias": item.get("ref_alias", alias),
+                                    "valid_time": item.get("valid_time"),
+                                    "forecast_reference_time": item.get(
+                                        "forecast_reference_time"
+                                    ),
+                                    "lead_time": item.get("lead_time"),
+                                    "ref_type": "observation" if _is_obs else "gridded",
+                                    "per_bins": item.pop("per_bins"),
+                                }
+                                # Compact JSON (no indent) -> ~4× smaller than
+                                # the previous indented format.
+                                pb_file.write(
+                                    json.dumps(
+                                        nan_to_none(make_serializable(_pb_entry)),
+                                        separators=(",", ":"),
+                                        ensure_ascii=False,
+                                    )
+                                    + "\n"
+                                )
+                                _pb_count += 1
+                        transform_in_place(batch_results, make_serializable)
+                        serializable_result = nan_to_none(batch_results)
+                        results_dict.setdefault(alias, []).extend(serializable_result)
+
+                _total_entries = sum(len(v) for v in results_dict.values())
+                logger.info(
+                    f"  │  {_total_entries} result entr{'y' if _total_entries == 1 else 'ies'} "
+                    f"consolidated from {len(batch_files)} batch(es)"
+                )
+
+                if _pb_count == 0:
+                    # Nothing was written – remove the empty placeholder file.
+                    try:
+                        os.remove(per_bins_path)
+                    except OSError:
+                        pass
+                    per_bins_path = None
+                    logger.info("  │  No per-bins spatial data produced for this dataset")
+                else:
+                    logger.info(
+                        f"  │  Per-bins spatial data  ->  {_pb_count} entr"
+                        f"{'y' if _pb_count == 1 else 'ies'} written "
+                        f"(JSONL, compact format)"
+                    )
 
                 if n_errors > 0:
                     raise RuntimeError(
@@ -1047,14 +1108,13 @@ class BaseDCEvaluation:
 
                 with open(dataset_json_path, "w") as json_file:
                     json_file.write("")
-                    logger.debug(f"Cleared contents of {json_file}")
                     json.dump(
                         {
                             "dataset": alias,
                             "results": results_dict,
                             "metadata": {
                                 "evaluation_date": pd.Timestamp.now().isoformat(),
-                                "total_entries": sum(len(v) for v in results_dict.values()),
+                                "total_entries": _total_entries,
                                 "config": {
                                     "start_time": self.args.start_time,
                                     "end_time": self.args.end_time,
@@ -1067,41 +1127,35 @@ class BaseDCEvaluation:
                         indent=2,
                         ensure_ascii=False,
                     )
-
-                # Write per_bins to a dedicated file (keeps the main JSON lean
-                # so the leaderboard reader is not affected).
-                if per_bins_list:
-                    per_bins_path = os.path.join(
-                        self.results_directory,
-                        f"results_{alias}_per_bins.json",
-                    )
-                    with open(per_bins_path, "w") as pb_file:
-                        json.dump(
-                            {
-                                "dataset": alias,
-                                "per_bins_by_time": per_bins_list,
-                            },
-                            pb_file,
-                            indent=2,
-                            ensure_ascii=False,
-                        )
-                    logger.info(f"Per-bins results written to: {per_bins_path}")
+                logger.info(
+                    f"  └  Results saved  ->  {os.path.basename(dataset_json_path)}"
+                )
 
             except Exception as exc:
-                logger.error(f"Failed to write JSON results: {exc}")
+                logger.error(f"  └  [ERROR] Failed to write JSON results: {exc}")
                 raise
 
         dataset_manager.file_cache.clear()
 
-        # ------------------------------------------------------------------
-        # Leaderboard generation
-        # ------------------------------------------------------------------
+        # ══════════════════════════════════════════════════════════════════
+        # LEADERBOARD GENERATION
+        # ══════════════════════════════════════════════════════════════════
+        # waiting 1s for the final log messages to flush before printing the leaderboard header
+        _time.sleep(1)
+        _sep_lb = "═" * 68
+        print("")
+        print(f"╔{_sep_lb}╗")
+        print(f"║{'  🏆  LEADERBOARD GENERATION':^67}║")
+        print(f"╚{_sep_lb}╝")
+        print("")
+
         if not models_results:
             logger.warning(
-                "Leaderboard generation skipped: no evaluation results were produced "
-                "(all candidate datasets were skipped due to missing references or "
-                "incompatible variables/metrics). Check that the reference datasets "
-                "listed in dataset_references are properly loaded."
+                "  Leaderboard generation skipped — no evaluation results were produced.\n"
+                "  (All candidate datasets were skipped: missing references or "
+                "incompatible variables/metrics.)\n"
+                "  Check that the reference datasets listed in dataset_references "
+                "are properly loaded."
             )
             return
 
@@ -1117,19 +1171,43 @@ class BaseDCEvaluation:
             os.makedirs(_leaderboard_dir, exist_ok=True)
             os.makedirs(_leaderboard_input_dir, exist_ok=True)
 
-            # Copy reference model JSONs from dcleaderboard package
-            import dcleaderboard as _dcleaderboard
-
-            _ref_results_src = os.path.join(
-                os.path.dirname(_dcleaderboard.__file__), "results"
-            )
-            for _ref_json in glob(os.path.join(_ref_results_src, "results_*.json")):
+            # Copy reference baseline JSONs.
+            # Primary source: dc/leaderboard_results/ (sibling of evaluate.py).
+            # __file__ = dctools/processing/base.py -> parents[2] = project root -> / "dc"
+            # Fallback: results/ bundled inside the dcleaderboard package.
+            _dc_dir = Path(__file__).resolve().parents[2] / "dc"
+            _local_lb_dir = _dc_dir / "leaderboard_results"
+            if _local_lb_dir.is_dir():
+                _ref_results_src = str(_local_lb_dir)
+                logger.info(f"  ┌ Using dc/leaderboard_results/  ->  {_local_lb_dir}")
+            else:
+                import dcleaderboard as _dcleaderboard
+                _ref_results_src = os.path.join(
+                    os.path.dirname(_dcleaderboard.__file__), "results"
+                )
+                logger.info(f"  ┌ Using dcleaderboard package results/  ->  {_ref_results_src}")
+            _ref_jsons = glob(os.path.join(_ref_results_src, "results_*.json"))
+            for _ref_json in _ref_jsons:
                 _shutil.copy2(
                     _ref_json,
                     os.path.join(_leaderboard_input_dir, os.path.basename(_ref_json)),
                 )
+            logger.info(
+                f"  │  Reference baselines copied  ({len(_ref_jsons)} file(s))"
+            )
+            # Also copy leaderboard_config.yaml from the reference source if present.
+            _lb_config_src = os.path.join(_ref_results_src, "leaderboard_config.yaml")
+            if os.path.isfile(_lb_config_src):
+                _shutil.copy2(
+                    _lb_config_src,
+                    os.path.join(_leaderboard_input_dir, "leaderboard_config.yaml"),
+                )
+                logger.info("  │  leaderboard_config.yaml copied")
 
-            # Copy current evaluation results into leaderboard input dir
+            # Copy current evaluation results into leaderboard input dir.
+            # Use direct file lookup by alias for results JSON, and a robust
+            # glob for per-bins JSONL files so we never miss them.
+            _copied = []
             for _alias in dataset_references:
                 _src = os.path.join(self.results_directory, f"results_{_alias}.json")
                 if os.path.isfile(_src):
@@ -1137,14 +1215,28 @@ class BaseDCEvaluation:
                         _src,
                         os.path.join(_leaderboard_input_dir, f"results_{_alias}.json"),
                     )
-                # Also copy per_bins file if it exists
-                _src_pb = os.path.join(self.results_directory, f"results_{_alias}_per_bins.json")
-                if os.path.isfile(_src_pb):
-                    _shutil.copy2(
-                        _src_pb,
-                        os.path.join(_leaderboard_input_dir, f"results_{_alias}_per_bins.json"),
-                    )
+                    _copied.append(f"results_{_alias}.json")
 
+            # Copy ALL per-bins files (both .jsonl and legacy .json) via glob
+            # to avoid any alias-name mismatch issues.
+            for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.jsonl")):
+                _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
+                _shutil.copy2(_pb_src, _pb_dst)
+                _copied.append(os.path.basename(_pb_src))
+            for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.json")):
+                _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
+                _shutil.copy2(_pb_src, _pb_dst)
+                _copied.append(os.path.basename(_pb_src))
+
+            for _fname in _copied:
+                logger.info(f"  │  Staged for leaderboard  ->  {_fname}")
+            if not any("_per_bins" in f for f in _copied):
+                logger.warning(
+                    "  │  [WARNING] No per-bins file found in results directory "
+                    f"({self.results_directory}) — maps.html will be skipped."
+                )
+
+            logger.info("  │  Rendering leaderboard site ...")
             _render_leaderboard(
                 results_dir=_leaderboard_input_dir,
                 output_site_dir=_leaderboard_dir,
@@ -1152,6 +1244,24 @@ class BaseDCEvaluation:
             )
             # Clean up the temporary input dir
             _shutil.rmtree(_leaderboard_input_dir, ignore_errors=True)
-            logger.info(f"Leaderboard generated in: {_leaderboard_dir}")
+
+            # Verify completeness: maps.html requires per-bins data.
+            _maps_html = os.path.join(_leaderboard_dir, "maps.html")
+            if not os.path.isfile(_maps_html):
+                _msg = (
+                    "maps.html was not generated (no per-bins spatial data found "
+                    "in the results directory — check that per_bins metrics are "
+                    "enabled and that at least one batch produced spatial data)."
+                )
+                self._leaderboard_warnings.append(_msg)
+                logger.warning(f"  └  [LEADERBOARD INCOMPLETE] {_msg}")
+            else:
+                logger.info(f"  └  Leaderboard ready  ->  {_leaderboard_dir}")
+            print("")
         except Exception as _lb_exc:
-            logger.warning(f"Leaderboard generation failed (non-blocking): {_lb_exc!r}")
+            _msg = f"Leaderboard generation failed: {_lb_exc!r}"
+            self._leaderboard_warnings.append(_msg)
+            logger.warning(
+                f"  └  [WARNING] Leaderboard generation failed (non-blocking):\n"
+                f"              {_lb_exc!r}"
+            )

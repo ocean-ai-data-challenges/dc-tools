@@ -493,7 +493,7 @@ def preprocess_one_npoints(
         # compat/join="override" — this is a pure-Python pandas operation
         # that can saturate one CPU for seconds per batch.
         # Replacing with a plain integer range lets concat proceed in
-        # microseconds while all DATA variables (lat, lon, time, ssh …)
+        # microseconds while all DATA variables (lat, lon, time, ssh ...)
         # remain as lazy dask arrays untouched.
         if n_points_dim in ds_interp.indexes:
             idx_obj = ds_interp.indexes[n_points_dim]
@@ -694,9 +694,9 @@ class EvaluationDataloader:
 
                     batch.append(entry)
                     # Adapt batch size according to observation/gridded type:
-                    # - observation datasets (SWOT, saral …): use obs_batch_size
+                    # - observation datasets (SWOT, saral ...): use obs_batch_size
                     #   to limit per-batch S3 download volume.
-                    # - gridded datasets (GLORYS …): use gridded_batch_size
+                    # - gridded datasets (GLORYS ...): use gridded_batch_size
                     #   to limit per-batch 3-D I/O and worker RAM pressure.
                     # - fallback: global batch_size.
                     _effective_bs = self.batch_size
@@ -1330,7 +1330,7 @@ def preprocess_batch_obs_files(
             if not bool(np.all(_tarr[:-1] <= _tarr[1:])):
                 logger.info(
                     f"Shared batch ({alias}): sorting {len(_tarr):,} "
-                    "points by time for fast worker slicing…"
+                    "points by time for fast worker slicing..."
                 )
                 _sort_idx = np.argsort(_tarr, kind="mergesort")
                 combined = combined.isel({n_points_dim: _sort_idx})
