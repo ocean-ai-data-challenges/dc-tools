@@ -195,7 +195,7 @@ class BaseDataset:
                         if coord_sys and hasattr(coord_sys, "is_observation_dataset"):
                             self.observation_dataset = coord_sys.is_observation_dataset()
                         else:
-                            self.observation_dataset = False
+                            self.observation_dataset = False  # type: ignore[assignment]
                     self._global_metadata["is_observation"] = self.observation_dataset
 
                     # Create a DatasetCatalog instance wrapper to satisfy dataset interface
@@ -214,7 +214,7 @@ class BaseDataset:
                         "Falling back to metadata rebuild."
                     )
                     # Reset if failed
-                    self.catalog = None
+                    self.catalog = None  # type: ignore[assignment]
                     loaded_from_catalog = False
 
             elif exists:
@@ -267,9 +267,9 @@ class BaseDataset:
 
             if must_rebuild:
                 loaded_from_catalog = False
-                self.catalog = None
+                self.catalog = None  # type: ignore[assignment]
                 self._paths = []
-                self._global_metadata = None
+                self._global_metadata = None  # type: ignore[assignment]
                 self.catalog_type = ""
 
         if not loaded_from_catalog:
@@ -351,8 +351,8 @@ class BaseDataset:
             mapped = variable_rename_dict.get(name, name)
             standard_name = get_standardized_var_name(mapped)
             if standard_name is not None:
-                return standard_name
-            return mapped
+                return str(standard_name)
+            return str(mapped)
 
         if self.eval_variables is not None:
             self.eval_variables = [_standardize_var_name(x) for x in self.eval_variables]

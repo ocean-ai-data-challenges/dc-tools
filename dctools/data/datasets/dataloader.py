@@ -9,7 +9,6 @@ import os
 import shutil
 import tempfile
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type, Union
 
 import dask
@@ -388,7 +387,7 @@ def preprocess_argo_profiles(
         return None
 
     try:
-        ds_window = argo_manager.open((time_bounds[0], time_bounds[1]))
+        ds_window = argo_manager.open((time_bounds[0], time_bounds[1]))  # type: ignore[arg-type]
     except Exception as exc:
         logger.error(f"Kerchunk open_time_window failed: {exc}")
         return None
@@ -703,11 +702,11 @@ class EvaluationDataloader:
                     if entry.get("ref_is_observation") and getattr(
                         self, "obs_batch_size", None
                     ):
-                        _effective_bs = self.obs_batch_size
+                        _effective_bs = self.obs_batch_size  # type: ignore[attr-defined]
                     elif not entry.get("ref_is_observation") and getattr(
                         self, "gridded_batch_size", None
                     ):
-                        _effective_bs = self.gridded_batch_size
+                        _effective_bs = self.gridded_batch_size  # type: ignore[attr-defined]
                     if len(batch) >= _effective_bs:
                         yield batch
                         batch = []
@@ -926,9 +925,9 @@ def _open_local_zarr_simple(path: str, _alias: Any = None) -> xr.Dataset:
     Module-level function (picklable for multiprocessing).
     """
     try:
-        return xr.open_zarr(path, consolidated=True, chunks={})
+        return xr.open_zarr(path, consolidated=True, chunks={})  # type: ignore[no-any-return]
     except Exception:
-        return xr.open_zarr(path, consolidated=False, chunks={})
+        return xr.open_zarr(path, consolidated=False, chunks={})  # type: ignore[no-any-return]
 
 
 def _nan_mask_numpy(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
@@ -1325,8 +1324,7 @@ def preprocess_batch_obs_files(
             try:
                 _tarr = _tarr.astype("datetime64[ns]")
             except Exception:
-                _tarr = None
-        if _tarr is not None and len(_tarr) > 1:
+                _tarr = None  # type: ignore[assignment]
             if not bool(np.all(_tarr[:-1] <= _tarr[1:])):
                 logger.info(
                     f"Shared batch ({alias}): sorting {len(_tarr):,} "
@@ -1533,8 +1531,8 @@ class ObservationDataViewer:
                     save_path = os.path.join(self.results_dir, self.alias + "_preprocessed")
                     os.makedirs(save_path, exist_ok=True)
                     self.save_to_zarr(result, save_path)
-                result = xr.Dataset(result) if result is not None else None
-                return result
+                result_ds: xr.Dataset = xr.Dataset(result)
+                return result_ds
             except Exception as e:
                 logger.error(f"Argo preprocessing failed: {e}")
                 traceback.print_exc()

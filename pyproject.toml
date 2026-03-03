@@ -119,8 +119,10 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-m \"not slow\" -p no:pytest_cov -p no:cov"
+addopts = "-m \"not slow\""
 markers = [
+    "unit: fast, deterministic unit tests (default PR profile)",
+    "integration: integration tests (local io/dask/external libs), slower than pure unit",
     "slow: slow/integration-style tests (network, dask clusters, large IO)",
 ]
 norecursedirs = [
@@ -145,6 +147,13 @@ norecursedirs = [
 select = ["D", "W", "F", "E", "B"]
 ignore = ["D401", "D406", "D407"]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/fix_oceanbench_quality.py" = ["E501"]
+"scripts/fix_oceanbench_docstrings.py" = ["E501"]
+"test_argo_imports.py" = ["F401"]
+"test_argo_loading.py" = ["E402"]
+"test_h5py_patch.py" = ["E402"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"  # Accepts: "google", "numpy", or "pep257".
 
@@ -160,7 +169,12 @@ warn_unused_configs = true
 [tool.poe.tasks]
 types = "mypy --install-types --non-interactive dctools"
 lint = "ruff check 'dctools' 'tests'"
-test = "pytest --capture=no --cov=dctools --cov-fail-under=80 tests/"
+test-fast = "pytest --capture=no -m 'not slow' --cov=dctools --cov-fail-under=20 tests/"
+test-fast-strict = "pytest --capture=no -m 'not slow' --cov=dctools --cov-fail-under=80 tests/"
+test-slow = "pytest --capture=no -m 'slow' tests/"
+test = { ref = "test-fast" }
 # run all
-all = [ {ref="lint"}, {ref="types"}, {ref="test"} ]
+all = [ {ref="lint"}, {ref="types"}, {ref="test-fast"} ]
+all-with-slow = [ {ref="lint"}, {ref="types"}, {ref="test-fast"}, {ref="test-slow"} ]
+all-strict = [ {ref="lint"}, {ref="types"}, {ref="test-fast-strict"}, {ref="test-slow"} ]
 

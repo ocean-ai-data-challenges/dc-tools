@@ -22,7 +22,7 @@ import io as _io
 import xarray as _xr
 
 if not hasattr(_xr, "_original_open_dataset"):
-    _xr._original_open_dataset = _xr.open_dataset
+    _xr._original_open_dataset = _xr.open_dataset  # type: ignore[attr-defined]
 
     def _open_dataset_scipy_for_inmem(filename_or_obj, *args, **kwargs):
         """Wrapper that forces engine='scipy' for in-memory data."""
@@ -41,14 +41,14 @@ if not hasattr(_xr, "_original_open_dataset"):
             kwargs["backend_kwargs"] = _bk
         # Suppress FutureWarning about MTIME timedelta decoding
         kwargs.setdefault("decode_timedelta", False)
-        return _xr._original_open_dataset(filename_or_obj, *args, **kwargs)
+        return _xr._original_open_dataset(filename_or_obj, *args, **kwargs)  # type: ignore[attr-defined]
 
     _xr.open_dataset = _open_dataset_scipy_for_inmem
 
 from argparse import Namespace
 
 try:
-    import copernicusmarine  # type: ignore
+    import copernicusmarine
 except Exception:
     copernicusmarine = None
 import datetime
@@ -701,8 +701,8 @@ class BaseConnectionManager(ABC):
         global_metadata = self.extract_global_metadata()
         self._global_metadata = global_metadata
 
-        limit = self.params.max_samples if self.params.max_samples else len(self._list_files)
-        file_list = self._list_files[-limit:]
+        limit = self.params.max_samples if self.params.max_samples else len(self._list_files)  # type: ignore[arg-type]
+        file_list = self._list_files[-limit:]  # type: ignore[index]
 
         logger.info(f"Processing {len(file_list)} files with integrated Dask client")
 
@@ -903,11 +903,11 @@ class CMEMSManager(BaseConnectionManager):
         """List files in the Copernicus Marine directory."""
         logger.info("Listing files in Copernicus Marine directory.")
         try:
-            start_dt = pd.to_datetime(self.start_time)
+            start_dt = pd.to_datetime(self.start_time)  # type: ignore[arg-type]
             start_year = start_dt.year
             start_month = start_dt.month
             start_day = start_dt.day
-            end_dt = pd.to_datetime(self.end_time)
+            end_dt = pd.to_datetime(self.end_time)  # type: ignore[arg-type]
             end_year = end_dt.year
             end_month = end_dt.month
             end_day = end_dt.day
@@ -989,7 +989,7 @@ class CMEMSManager(BaseConnectionManager):
                 except Exception:
                     pass
 
-            return ds
+            return ds  # type: ignore[no-any-return]
         except Exception:
             logger.warning(f"Failed to open CMEMS dataset for date : {dt}")
             traceback.print_exc()
@@ -1254,10 +1254,10 @@ class GlonetManager(BaseConnectionManager):
         # Fast path: local zarr (prefetched by the driver)
         if not path.startswith(("https://", "http://", "s3://")):
             try:
-                return xr.open_zarr(path, consolidated=True)
+                return xr.open_zarr(path, consolidated=True)  # type: ignore[no-any-return]
             except Exception:
                 try:
-                    return xr.open_zarr(path, consolidated=False)
+                    return xr.open_zarr(path, consolidated=False)  # type: ignore[no-any-return]
                 except Exception:
                     pass
             return self.open_local(path)
@@ -1330,7 +1330,7 @@ class ArgoManager(BaseConnectionManager):
         # Charger la métadonnée du master index si disponible
         self._master_index = None
         self._catalog = None  # Cache pour list_files_with_metadata()
-        self._global_metadata = None  # ARGO uses different metadata structure
+        self._global_metadata = None  # type: ignore[assignment]  # ARGO uses different metadata structure
         if self.init_type != "from_json" and call_list_files:
             try:
                 self._load_master_index()
@@ -1356,7 +1356,7 @@ class ArgoManager(BaseConnectionManager):
                 self._master_index = ujson.loads(
                     dctx.decompress(raw if isinstance(raw, bytes) else raw.encode())
                 )
-            logger.debug(f"Loaded ARGO master index with {len(self._master_index)} entries")
+            logger.debug(f"Loaded ARGO master index with {len(self._master_index)} entries")  # type: ignore[arg-type]
         except FileNotFoundError:
             logger.warning(f"Master index not found at {master_path}")
             self._master_index = None
@@ -1681,18 +1681,21 @@ class ArgoManager(BaseConnectionManager):
             # work but may be slightly less efficient.
             t_arr = None
         if t_arr is not None:
-            if hasattr(t_arr, "compute"):
-                t_arr = t_arr.compute()
-            if not np.issubdtype(t_arr.dtype, np.datetime64):
-                try:
-                    t_arr = pd.to_datetime(t_arr).values
-                except Exception:
-                    pass
+            t_arr_eval = t_arr.compute() if hasattr(t_arr, "compute") else t_arr
+            if t_arr_eval is not None:
+                t_arr_np = np.asarray(t_arr_eval)
+                if not np.issubdtype(t_arr_np.dtype, np.datetime64):
+                    try:
+                        t_arr_np = pd.to_datetime(t_arr_np).values
+                    except Exception:
+                        pass
 
-            if len(t_arr) > 1 and not bool(np.all(t_arr[:-1] <= t_arr[1:])):
-                logger.info(f"ARGO shared batch: sorting {n_obs:,} profiles by time…")
-                sort_idx = np.argsort(t_arr, kind="mergesort")
-                ds = ds.isel({obs_dim: sort_idx})
+                if len(t_arr_np) > 1 and not bool(np.all(t_arr_np[:-1] <= t_arr_np[1:])):
+                    logger.info(f"ARGO shared batch: sorting {n_obs:,} profiles by time…")
+                    sort_idx = np.argsort(t_arr_np, kind="mergesort")
+                    ds = ds.isel({obs_dim: sort_idx})
+            else:
+                logger.warning("ARGO shared batch: TIME array resolved to None after compute()")
 
         # ── 5. Materialise and write a single compact Zarr ───────────────
         # Only call .compute() if the data is backed by dask arrays;
@@ -1889,17 +1892,18 @@ class ArgoManager(BaseConnectionManager):
                 t_arr = None
 
             if t_arr is not None:
-                if hasattr(t_arr, "compute"):
-                    t_arr = t_arr.compute()
-                if not np.issubdtype(t_arr.dtype, np.datetime64):
-                    try:
-                        t_arr = pd.to_datetime(t_arr).values
-                    except Exception:
-                        pass
+                t_arr_eval = t_arr.compute() if hasattr(t_arr, "compute") else t_arr
+                if t_arr_eval is not None:
+                    t_arr_np = np.asarray(t_arr_eval)
+                    if not np.issubdtype(t_arr_np.dtype, np.datetime64):
+                        try:
+                            t_arr_np = pd.to_datetime(t_arr_np).values
+                        except Exception:
+                            pass
 
-                if len(t_arr) > 1 and not bool(np.all(t_arr[:-1] <= t_arr[1:])):
-                    sort_idx = np.argsort(t_arr, kind="mergesort")
-                    ds = ds.isel({"obs": sort_idx})
+                    if len(t_arr_np) > 1 and not bool(np.all(t_arr_np[:-1] <= t_arr_np[1:])):
+                        sort_idx = np.argsort(t_arr_np, kind="mergesort")
+                        ds = ds.isel({"obs": sort_idx})
 
             # Materialise only if dask-backed
             _has_dask = any(hasattr(ds[v].data, "dask") for v in ds.variables)

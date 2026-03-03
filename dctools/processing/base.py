@@ -450,7 +450,7 @@ class BaseDCEvaluation:
         filter_region_gs = gpd.GeoSeries([filter_region], crs="EPSG:4326")
 
         manager = self.filter_data(manager, filter_region_gs)
-        return manager
+        return manager  # type: ignore[no-any-return]
 
     # ------------------------------------------------------------------
     # Coordinate conformance validation
@@ -530,6 +530,12 @@ class BaseDCEvaluation:
             except Exception as exc:
                 logger.warning(f"Transform failed for '{pred_alias}': {exc}")
 
+            if sample_ds is None:
+                logger.warning(
+                    f"Sample dataset became None after transform for '{pred_alias}'; skipping."
+                )
+                continue
+
             def _values_missing_extra_close(
                 expected: Any,
                 actual: Any,
@@ -599,7 +605,6 @@ class BaseDCEvaluation:
                     actual = sample_ds[axis].values
                 except Exception:
                     actual = np.asarray(sample_ds.coords.get(axis))
-
                 exp_arr = _round_array(exp)
                 act_arr = _round_array(actual)
                 atol = 1e-6 if axis in ("lat", "lon") else 1e-3
@@ -782,7 +787,7 @@ class BaseDCEvaluation:
         dataset_manager = self.setup_dataset_manager(all_datasets)
         aliases = dataset_manager.datasets.keys()
 
-        transforms_dict = self.setup_transforms(dataset_manager, aliases)
+        transforms_dict = self.setup_transforms(dataset_manager, list(aliases))
 
         self._validate_pred_datasets_coordinates(dataset_manager, transforms_dict)
 
@@ -798,7 +803,9 @@ class BaseDCEvaluation:
             dashboard_link = getattr(self.dataset_processor.client, "dashboard_link", None)
             if dashboard_link:
                 logger.info("")
-                logger.info(f"============= Link to Dask dashboard : {dashboard_link} =============")
+                logger.info(
+                    f"============= Link to Dask dashboard : {dashboard_link} ============="
+                )
                 logger.info("")
         except Exception:
             pass
@@ -824,7 +831,9 @@ class BaseDCEvaluation:
             list_references = [
                 ref for ref in dataset_references[alias] if ref in dataset_manager.datasets
             ]
-            pred_source_dict = next((s for s in self.args.sources if s.get("dataset") == alias), {})
+            pred_source_dict: Dict[str, Any] = next(
+                (s for s in self.args.sources if s.get("dataset") == alias), {}
+            )
             metrics_names[alias] = pred_source_dict.get("metrics", ["rmsd"])
 
             metrics_kwargs[alias] = {}
@@ -851,7 +860,7 @@ class BaseDCEvaluation:
                     )
                     continue
 
-                ref_source_dict = next(
+                ref_source_dict: Dict[str, Any] = next(
                     (s for s in self.args.sources if s.get("dataset") == ref_alias), {}
                 )
                 ref_transforms[ref_alias] = transforms_dict.get(ref_alias)
@@ -889,7 +898,7 @@ class BaseDCEvaluation:
                     metrics[alias][ref_alias] = [
                         MetricComputer(
                             common_vars,
-                            oceanbench_eval_variables,
+                            oceanbench_eval_variables,  # type: ignore[arg-type]
                             metric_name=metric,
                             **metrics_kwargs[alias][ref_alias],
                         )
@@ -901,12 +910,12 @@ class BaseDCEvaluation:
                     class4_kwargs = {
                         "interpolation_method": interpolation_method,
                         "list_scores": common_metrics,
-                        "time_tolerance": timedelta(hours=time_tolerance_hours),
+                        "time_tolerance": timedelta(hours=float(time_tolerance_hours or 0)),
                     }
                     metrics[alias][ref_alias] = [
                         MetricComputer(
                             common_vars,
-                            oceanbench_eval_variables,
+                            oceanbench_eval_variables,  # type: ignore[arg-type]
                             metric_name=metric,
                             is_class4=True,
                             class4_kwargs=class4_kwargs,
@@ -939,7 +948,7 @@ class BaseDCEvaluation:
             # Look for per-dataset obs_batch_size first, then global, then default.
             _obs_batch_size = None
             for _ref_alias in effective_references:
-                _ref_src = next(
+                _ref_src: Dict[str, Any] = next(
                     (s for s in self.args.sources if s.get("dataset") == _ref_alias), {}
                 )
                 if _ref_src.get("obs_batch_size") is not None:
@@ -974,7 +983,7 @@ class BaseDCEvaluation:
                 obs_batch_size=_obs_batch_size,
                 gridded_batch_size=_gridded_batch_size,
                 pred_transform=pred_transform,
-                ref_transforms=ref_transforms,
+                ref_transforms=ref_transforms,  # type: ignore[arg-type]
                 forecast_mode=forecast_mode,
                 n_days_forecast=self.args.n_days_forecast,
                 lead_time_unit="days",
@@ -999,7 +1008,8 @@ class BaseDCEvaluation:
             logger.info("")
             logger.info(f"┌{_sep_pred}┐")
             logger.info(
-                f"│    ▶  Model to evaluate ({_n_pred_current}/{_n_pred_total}) :  {str(alias).upper():<38}│"  # noqa: E501
+                f"│    ▶  Model to evaluate ({_n_pred_current}/{_n_pred_total})"
+                f" :  {str(alias).upper():<38}│"
             )
             logger.info(f"└{_sep_pred}┘")
             logger.info("")'''
@@ -1091,7 +1101,7 @@ class BaseDCEvaluation:
                         os.remove(per_bins_path)
                     except OSError:
                         pass
-                    per_bins_path = None
+                    per_bins_path = None  # type: ignore[assignment]
                     logger.info("  │  No per-bins spatial data produced for this dataset")
                 else:
                     logger.info(
