@@ -1,7 +1,7 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'dc-tools'
+project = 'PPR-OC Data Challenges'
 copyright = '2025, Kamel Ait Mohand, Guillermo Cossio'
 author = 'Kamel Ait Mohand, Guillermo Cossio'
 release = '0.0.1'
@@ -37,6 +37,9 @@ autosummary_generate = True
 
 myst_heading_anchors = 2
 myst_links_external_new_tab = True
+myst_enable_extensions = [
+    "dollarmath"
+]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output

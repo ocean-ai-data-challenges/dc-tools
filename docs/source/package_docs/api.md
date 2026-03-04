@@ -1,7 +1,5 @@
 # API
 
-Here you will find the complete documentation of the `dctools` package.
-
 ## Input/Output
 
 ```{eval-rst}
