@@ -9,9 +9,9 @@ import dask.array as da
 import numpy as np
 
 try:
-    from oceanbench.core.distributed import DatasetProcessor  # type: ignore
+    from oceanbench.core.distributed import DatasetProcessor
 except Exception:  # pragma: no cover
-    DatasetProcessor = Any  # type: ignore
+    DatasetProcessor = Any
 import pandas as pd
 from torchvision import transforms
 import xarray as xr

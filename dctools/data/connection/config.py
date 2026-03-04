@@ -489,9 +489,9 @@ class ARGOConnectionConfig(BaseConnectionConfig):
         if self.s3_bucket and self.endpoint_url:
             storage_opts = {"client_kwargs": {"endpoint_url": self.endpoint_url}}
             if self.s3_key and self.s3_secret_key:
-                storage_opts["key"] = self.s3_key
-                storage_opts["secret"] = self.s3_secret_key
+                storage_opts["key"] = self.s3_key  # type: ignore[assignment]
+                storage_opts["secret"] = self.s3_secret_key  # type: ignore[assignment]
             else:
-                storage_opts["anon"] = True
+                storage_opts["anon"] = True  # type: ignore[assignment]
             return storage_opts
         return {}

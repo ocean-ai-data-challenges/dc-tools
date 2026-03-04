@@ -10,11 +10,11 @@ from loguru import logger
 import numpy as np
 
 try:
-    from oceanbench.core.lagrangian_trajectory import ZoneCoordinates  # type: ignore
+    from oceanbench.core.lagrangian_trajectory import ZoneCoordinates
 except Exception:
 
     @dataclass(frozen=True)
-    class ZoneCoordinates:
+    class ZoneCoordinates:  # type: ignore[no-redef]
         """Fallback stub for ZoneCoordinates when oceanbench is unavailable."""
 
         minimum_latitude: float
@@ -24,10 +24,10 @@ except Exception:
 
 
 try:
-    from oceanbench.core.rmsd import Variable  # type: ignore
+    from oceanbench.core.rmsd import Variable
 except Exception:
 
-    class Variable(str, Enum):
+    class Variable(str, Enum):  # type: ignore[no-redef]
         """Fallback stub for Variable when oceanbench is unavailable."""
 
         SEA_SURFACE_HEIGHT_ABOVE_GEOID = "sea_surface_height_above_geoid"

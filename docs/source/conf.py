@@ -1,7 +1,7 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'dc-tools'
+project = 'PPR-OC Data Challenges'
 copyright = '2025, Kamel Ait Mohand, Guillermo Cossio'
 author = 'Kamel Ait Mohand, Guillermo Cossio'
 release = '0.0.1'
@@ -37,6 +37,9 @@ autosummary_generate = True
 
 myst_heading_anchors = 2
 myst_links_external_new_tab = True
+myst_enable_extensions = [
+    "dollarmath"
+]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
@@ -44,3 +47,15 @@ myst_links_external_new_tab = True
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
 #html_logo = "_static/Logo_PPR.jpg" # TODO: draw a logo for the DCs
+
+# Stylesheet for iframe-embedded pages
+html_css_files = [
+    'iframe.css',
+]
+
+# Copy the leaderboard sub-site verbatim into the HTML output.
+# docs/source/_extra/leaderboard/ is either populated by the dev (committed files)
+# or regenerated via scripts/sync_leaderboard_docs.py.
+# html_extra_path copies the *contents* of _extra/ to the HTML root, so
+# leaderboard/ becomes: https://<project>.readthedocs.io/en/latest/leaderboard/
+html_extra_path = ['_extra']

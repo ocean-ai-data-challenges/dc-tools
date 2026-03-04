@@ -59,7 +59,7 @@ def apply_h5py_monkey_patch():
         import xarray as xr
 
         if not hasattr(xr, "_original_open_dataset"):
-            xr._original_open_dataset = xr.open_dataset
+            xr._original_open_dataset = xr.open_dataset  # type: ignore[attr-defined]
 
             def _open_dataset_scipy_for_inmem(filename_or_obj, *args, **kwargs):
                 if isinstance(filename_or_obj, (bytes, io.BytesIO, io.BufferedIOBase)):
@@ -72,7 +72,7 @@ def apply_h5py_monkey_patch():
                         _bk = dict(_bk)
                     _bk.setdefault("mmap", False)
                     kwargs["backend_kwargs"] = _bk
-                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)
+                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)  # type: ignore[attr-defined]
 
             xr.open_dataset = _open_dataset_scipy_for_inmem
         return True
@@ -138,14 +138,14 @@ def configure_dask_workers_env(client):
         # by threadpoolctl.  SWOT files are Blosc-compressed HDF5 chunks;
         # 2 threads gives good throughput without oversubscribing CPUs.
         try:
-            import blosc
+            import blosc  # type: ignore[import-not-found]
 
             blosc.set_nthreads(2)
         except Exception:
             pass
         # numcodecs Blosc (used by zarr)
         try:
-            from numcodecs import blosc as nc_blosc
+            from numcodecs import blosc as nc_blosc  # type: ignore[import-untyped]
 
             nc_blosc.set_nthreads(2)
         except Exception:
@@ -156,7 +156,7 @@ def configure_dask_workers_env(client):
         import xarray as xr
 
         if not hasattr(xr, "_original_open_dataset"):
-            xr._original_open_dataset = xr.open_dataset
+            xr._original_open_dataset = xr.open_dataset  # type: ignore[attr-defined]
 
             def _open_dataset_scipy_for_inmem(filename_or_obj, *args, **kwargs):
                 if isinstance(filename_or_obj, (bytes, io.BytesIO, io.BufferedIOBase)):
@@ -169,7 +169,7 @@ def configure_dask_workers_env(client):
                         _bk = dict(_bk)
                     _bk.setdefault("mmap", False)
                     kwargs["backend_kwargs"] = _bk
-                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)
+                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)  # type: ignore[attr-defined]
 
             xr.open_dataset = _open_dataset_scipy_for_inmem
 
@@ -232,7 +232,7 @@ def setup_dask(args: Optional[Namespace] = None):
         import xarray as xr
 
         if not hasattr(xr, "_original_open_dataset"):
-            xr._original_open_dataset = xr.open_dataset
+            xr._original_open_dataset = xr.open_dataset  # type: ignore[attr-defined]
 
             def _open_dataset_scipy_for_inmem(filename_or_obj, *args, **kwargs):
                 if isinstance(filename_or_obj, (bytes, io.BytesIO, io.BufferedIOBase)):
@@ -245,7 +245,7 @@ def setup_dask(args: Optional[Namespace] = None):
                         _bk = dict(_bk)
                     _bk.setdefault("mmap", False)
                     kwargs["backend_kwargs"] = _bk
-                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)
+                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)  # type: ignore[attr-defined]
 
             xr.open_dataset = _open_dataset_scipy_for_inmem
 

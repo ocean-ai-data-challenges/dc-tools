@@ -7,28 +7,28 @@ from typing import Any, Dict, List, Optional
 
 _OCEANBENCH_IMPORT_ERROR: Exception | None = None
 try:
-    import oceanbench.metrics as oceanbench_metrics  # type: ignore
-    from oceanbench.core.class4_metrics.class4_evaluator import Class4Evaluator  # type: ignore
-    from oceanbench.core.derived_quantities import (  # type: ignore
+    import oceanbench.metrics as oceanbench_metrics
+    from oceanbench.core.class4_metrics.class4_evaluator import Class4Evaluator
+    from oceanbench.core.derived_quantities import (
         add_geostrophic_currents,
         add_mixed_layer_depth,
     )
-    from oceanbench.core.lagrangian_trajectory import (  # type: ignore
+    from oceanbench.core.lagrangian_trajectory import (
         ZoneCoordinates,
         deviation_of_lagrangian_trajectories,
     )
-    from oceanbench.core.rmsd import Variable, rmsd  # type: ignore
+    from oceanbench.core.rmsd import Variable, rmsd
 
     OCEANBENCH_AVAILABLE = True
 except Exception as exc:  # pragma: no cover
-    oceanbench_metrics = None  # type: ignore[assignment]
-    Class4Evaluator = None  # type: ignore[assignment]
-    add_geostrophic_currents = None  # type: ignore[assignment]
-    add_mixed_layer_depth = None  # type: ignore[assignment]
-    ZoneCoordinates = Any  # type: ignore[assignment]
-    deviation_of_lagrangian_trajectories = None  # type: ignore[assignment]
-    Variable = Any  # type: ignore[assignment]
-    rmsd = None  # type: ignore[assignment]
+    oceanbench_metrics = None
+    Class4Evaluator = None
+    add_geostrophic_currents = None
+    add_mixed_layer_depth = None
+    ZoneCoordinates = Any
+    deviation_of_lagrangian_trajectories = None
+    Variable = Any
+    rmsd = None
     OCEANBENCH_AVAILABLE = False
     _OCEANBENCH_IMPORT_ERROR = exc
 import xarray as xr  # noqa: E402
@@ -262,10 +262,10 @@ class OceanbenchMetrics(DCMetric):
                 promote = [
                     c
                     for c in coord_candidates
-                    if c in ref_data.data_vars and c not in ref_data.coords
+                    if c in ref_data.data_vars and c not in ref_data.coords  # type: ignore[union-attr]
                 ]
                 if promote:
-                    ref_data = ref_data.set_coords(promote)
+                    ref_data = ref_data.set_coords(promote)  # type: ignore[union-attr]
                     """logger.debug(
                         f"Promoted {promote} from data_vars to coords on obs dataset"
                     )"""

@@ -9,7 +9,6 @@ import os
 import shutil
 import tempfile
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type, Union
 
 import dask
@@ -388,7 +387,7 @@ def preprocess_argo_profiles(
         return None
 
     try:
-        ds_window = argo_manager.open((time_bounds[0], time_bounds[1]))
+        ds_window = argo_manager.open((time_bounds[0], time_bounds[1]))  # type: ignore[arg-type]
     except Exception as exc:
         logger.error(f"Kerchunk open_time_window failed: {exc}")
         return None
@@ -493,7 +492,7 @@ def preprocess_one_npoints(
         # compat/join="override" — this is a pure-Python pandas operation
         # that can saturate one CPU for seconds per batch.
         # Replacing with a plain integer range lets concat proceed in
-        # microseconds while all DATA variables (lat, lon, time, ssh …)
+        # microseconds while all DATA variables (lat, lon, time, ssh ...)
         # remain as lazy dask arrays untouched.
         if n_points_dim in ds_interp.indexes:
             idx_obj = ds_interp.indexes[n_points_dim]
@@ -694,20 +693,20 @@ class EvaluationDataloader:
 
                     batch.append(entry)
                     # Adapt batch size according to observation/gridded type:
-                    # - observation datasets (SWOT, saral …): use obs_batch_size
+                    # - observation datasets (SWOT, saral ...): use obs_batch_size
                     #   to limit per-batch S3 download volume.
-                    # - gridded datasets (GLORYS …): use gridded_batch_size
+                    # - gridded datasets (GLORYS ...): use gridded_batch_size
                     #   to limit per-batch 3-D I/O and worker RAM pressure.
                     # - fallback: global batch_size.
                     _effective_bs = self.batch_size
                     if entry.get("ref_is_observation") and getattr(
                         self, "obs_batch_size", None
                     ):
-                        _effective_bs = self.obs_batch_size
+                        _effective_bs = self.obs_batch_size  # type: ignore[attr-defined]
                     elif not entry.get("ref_is_observation") and getattr(
                         self, "gridded_batch_size", None
                     ):
-                        _effective_bs = self.gridded_batch_size
+                        _effective_bs = self.gridded_batch_size  # type: ignore[attr-defined]
                     if len(batch) >= _effective_bs:
                         yield batch
                         batch = []
@@ -926,9 +925,9 @@ def _open_local_zarr_simple(path: str, _alias: Any = None) -> xr.Dataset:
     Module-level function (picklable for multiprocessing).
     """
     try:
-        return xr.open_zarr(path, consolidated=True, chunks={})
+        return xr.open_zarr(path, consolidated=True, chunks={})  # type: ignore[no-any-return]
     except Exception:
-        return xr.open_zarr(path, consolidated=False, chunks={})
+        return xr.open_zarr(path, consolidated=False, chunks={})  # type: ignore[no-any-return]
 
 
 def _nan_mask_numpy(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
@@ -1239,11 +1238,15 @@ def preprocess_batch_obs_files(
         with _FilePool(max_workers=_MAX_PREP_WORKERS) as pool:
             from concurrent.futures import as_completed as _proc_ac
             _futs = [pool.submit(_process_file_to_zarr, a) for a in _args_list]
+            _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
             for fut in _proc_ac(_futs):
                 try:
                     zarr_path, n_pts = fut.result()
                 except Exception as _fe:
-                    logger.debug(f"Batch preproc ({alias}): worker failed: {_fe}")
+                    _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
+                    logger.warning(
+                        f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+                    )
                     continue
                 if zarr_path is not None:
                     _mini_zarr_paths.append(zarr_path)
@@ -1262,11 +1265,15 @@ def preprocess_batch_obs_files(
 
         with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
             _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
+            _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
             for fut in _thr_ac(_futs):
                 try:
                     zarr_path, n_pts = fut.result()
                 except Exception as _fe:
-                    logger.debug(f"Batch preproc ({alias}): worker failed: {_fe}")
+                    _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
+                    logger.warning(
+                        f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+                    )
                     continue
                 if zarr_path is not None:
                     _mini_zarr_paths.append(zarr_path)
@@ -1325,12 +1332,11 @@ def preprocess_batch_obs_files(
             try:
                 _tarr = _tarr.astype("datetime64[ns]")
             except Exception:
-                _tarr = None
-        if _tarr is not None and len(_tarr) > 1:
+                _tarr = None  # type: ignore[assignment]
             if not bool(np.all(_tarr[:-1] <= _tarr[1:])):
                 logger.info(
                     f"Shared batch ({alias}): sorting {len(_tarr):,} "
-                    "points by time for fast worker slicing…"
+                    "points by time for fast worker slicing..."
                 )
                 _sort_idx = np.argsort(_tarr, kind="mergesort")
                 combined = combined.isel({n_points_dim: _sort_idx})
@@ -1533,8 +1539,8 @@ class ObservationDataViewer:
                     save_path = os.path.join(self.results_dir, self.alias + "_preprocessed")
                     os.makedirs(save_path, exist_ok=True)
                     self.save_to_zarr(result, save_path)
-                result = xr.Dataset(result) if result is not None else None
-                return result
+                result_ds: xr.Dataset = xr.Dataset(result)
+                return result_ds
             except Exception as e:
                 logger.error(f"Argo preprocessing failed: {e}")
                 traceback.print_exc()

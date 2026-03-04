@@ -11,17 +11,17 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from kerchunk.netCDF3 import NetCDF3ToZarr  # type: ignore
+    from kerchunk.netCDF3 import NetCDF3ToZarr  # type: ignore[import-untyped]
 except Exception:  # pragma: no cover
-    NetCDF3ToZarr = None  # type: ignore[assignment]
+    NetCDF3ToZarr = None
 
 try:
-    from argopy import IndexFetcher  # type: ignore
+    from argopy import IndexFetcher
 except Exception:  # pragma: no cover
-    IndexFetcher = None  # type: ignore[assignment]
+    IndexFetcher = None
 from loguru import logger
 
 # Transient HTTP errors worth retrying (connection drops, rate limits, server errors)
@@ -29,13 +29,13 @@ _TRANSIENT_EXCEPTIONS = (ConnectionError, TimeoutError)
 try:
     import urllib3
 
-    _TRANSIENT_EXCEPTIONS = (*_TRANSIENT_EXCEPTIONS, urllib3.exceptions.HTTPError)
+    _TRANSIENT_EXCEPTIONS = (*_TRANSIENT_EXCEPTIONS, urllib3.exceptions.HTTPError)  # type: ignore[assignment]
 except ImportError:
     pass
 try:
     import requests
 
-    _TRANSIENT_EXCEPTIONS = (
+    _TRANSIENT_EXCEPTIONS = (  # type: ignore[assignment]
         *_TRANSIENT_EXCEPTIONS,
         requests.exceptions.ConnectionError,
         requests.exceptions.Timeout,
@@ -80,11 +80,11 @@ def _interpolate_profiles_to_depth(
         # 2D pressure: (N_PROF, N_LEVELS) — typical for profile_refs data
         for d in pres_da.dims:
             if d != prof_dim:
-                vert_dim = d
+                vert_dim = str(d)
                 break
     elif pres_da.ndim == 1:
         # 1D pressure: simple case
-        vert_dim = pres_da.dims[0]
+        vert_dim = str(pres_da.dims[0])
         if vert_dim == prof_dim:
             # Pressure is only indexed on profiles, nothing to interpolate
             logger.debug("Pressure variable has only profile dim — cannot interpolate")
@@ -169,10 +169,10 @@ def _interpolate_profiles_to_depth(
                     )
 
             new_dims = tuple(d if d != vert_dim else "depth" for d in var.dims)
-            new_data_vars[var_name] = xr.Variable(new_dims, result, attrs=var.attrs)
+            new_data_vars[var_name] = xr.Variable(new_dims, result, attrs=var.attrs)  # type: ignore[index,assignment]
         else:
             # e.g. TIME(N_PROF), LATITUDE(N_PROF) — keep as-is
-            new_data_vars[var_name] = var
+            new_data_vars[var_name] = var  # type: ignore[index,assignment]
 
     # Build new coordinates -----------------------------------------------
     new_coords: Dict[str, xr.Variable] = {
@@ -186,7 +186,7 @@ def _interpolate_profiles_to_depth(
         if cname == pres_var:
             continue  # replaced by "depth"
         if vert_dim not in cvar.dims:
-            new_coords[cname] = cvar
+            new_coords[cname] = cvar  # type: ignore[index]
 
     return xr.Dataset(new_data_vars, coords=new_coords, attrs=ds.attrs)
 
@@ -474,6 +474,7 @@ class ArgoInterface:
         # --- 2. Batch download with requests.Session (connection pooling) -----
         session = requests.Session()
         pool_sz = min(n_download_workers + 2, 30)
+        retry_strategy: Any
         try:
             from urllib3.util.retry import Retry
 
@@ -483,7 +484,7 @@ class ArgoInterface:
                 status_forcelist=[429, 500, 502, 503, 504],
             )
         except ImportError:
-            retry_strategy = self.max_fetch_retries  # type: ignore[assignment]
+            retry_strategy = self.max_fetch_retries
         adapter = HTTPAdapter(
             pool_connections=pool_sz,
             pool_maxsize=pool_sz,
@@ -575,7 +576,7 @@ class ArgoInterface:
         # Open in parallel (local I/O, very fast)
         ordered_local_paths: List[Optional[str]] = []
         for idx in range(len(selected_refs)):
-            url = url_map.get(idx)
+            url = url_map.get(idx)  # type: ignore[assignment]
             if url and url in downloaded:
                 ordered_local_paths.append(downloaded[url])
             else:
@@ -588,11 +589,11 @@ class ArgoInterface:
                 if lp is not None
             }
             results_map: Dict[int, xr.Dataset] = {}
-            for fut in as_completed(futures_open):
-                idx = futures_open[fut]
+            for fut in as_completed(futures_open):  # type: ignore[assignment]
+                idx = futures_open[fut]  # type: ignore[index]
                 ds = fut.result()
                 if ds is not None:
-                    results_map[idx] = ds
+                    results_map[idx] = ds  # type: ignore[assignment]
                 else:
                     open_fail += 1
 
@@ -688,6 +689,7 @@ class ArgoInterface:
         # --- session with connection pooling + automatic retries ----------
         session = requests.Session()
         pool_size = min(n_workers + 2, 20)
+        retry_strategy: Any
         try:
             from urllib3.util.retry import Retry
 
@@ -1039,14 +1041,14 @@ class ArgoInterface:
                     for var in ds_tmp.variables.values():
                         standard_name = str(var.attrs.get("standard_name", "")).lower()
                         if standard_name == "time":
-                            time_var = var
+                            time_var = var  # type: ignore[assignment]
                             break
                 if time_var is None:
                     ds_tmp.close()
                     return (idx, pd.NaT)
 
                 if idx < 3:
-                    standard_name = time_var.attrs.get("standard_name")
+                    standard_name = time_var.attrs.get("standard_name")  # type: ignore[assignment]
                     units = time_var.attrs.get("units")
                     logger.debug(
                         f"ARGO time variable detected: {getattr(time_var, 'name', None)} "
@@ -1343,9 +1345,7 @@ class ArgoInterface:
                         f"(max_profiles={max_profiles})"
                     )
                     right = left + remaining
-                    n_selected = remaining
-
-            # Log diagnostic for large selections or suspicious behavior
+                    n_selected = remaining  # type: ignore[assignment]
             """if n_selected > 0:
                 logger.debug(
                     f"Month {key}: selecting {n_selected}/{n_total} profiles ({pct_selected:.1f}%) "

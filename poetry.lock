@@ -1746,6 +1746,7 @@ develop = false
 ipykernel = ">=6.30.1"
 ipython = ">=8.0.0"
 jupyter = ">=1.0.0"
+loguru = ">=0.7.0"
 matplotlib = ">=3.9.0"
 nbformat = ">=5.10.4"
 numpy = ">=1.25,<2.0.0"
@@ -1756,7 +1757,7 @@ pyyaml = ">=6.0.3"
 type = "git"
 url = "https://github.com/ocean-ai-data-challenges/dc_leaderboard.git"
 reference = "main"
-resolved_reference = "45c0430a14887431c82a34aec0df087ecc601fb0"
+resolved_reference = "98b9d4c5ec9a0128a15975ad19576aef7a7e22ad"
 
 [[package]]
 name = "debugpy"

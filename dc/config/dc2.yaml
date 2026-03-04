@@ -12,6 +12,9 @@ n_days_interval: 7  # number of days in the interval for computing metrics (e.g.
 delta_time: 12   # delta time (hours) when matching observation data
 max_samples: 
 max_cache_files: 1000  # max files to store (older files are deleted)
+# Maximum number of individual task errors tolerated before the run is marked as
+# failed.  Must be 0 in evaluation mode: every observation file must be scored.
+max_task_errors: 0
 
 ############################# LOGGING ###################################
 
@@ -62,7 +65,7 @@ start_time: "2024-01-01"
 #start_time: "2023-12-25"
 #start_time: "2022-12-15"
 ## end time
-end_time: "2024-01-15"
+end_time: "2025-01-01"
 #end_time: "2024-03-15"
 #end_time: "2025-01-15"
 

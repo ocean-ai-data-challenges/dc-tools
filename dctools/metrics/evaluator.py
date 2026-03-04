@@ -16,7 +16,7 @@ import dask
 import numpy as np
 import pandas as pd
 import xarray as xr
-from dask.distributed import as_completed
+from dask.distributed import as_completed, wait
 from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
 from tqdm import tqdm
@@ -99,10 +99,54 @@ def _open_dataset_worker_cached(
             except Exception:
                 pass
     return ds, False
-from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
-from dctools.metrics.metrics import MetricComputer
-from dctools.utilities.format_converter import convert_format1_to_format2
-from dctools.utilities.misc_utils import (
+
+
+def _compute_with_timeout(
+    arr: "xr.Dataset",
+    timeout_s: int = 90,
+    **kwargs: Any,
+) -> "xr.Dataset":
+    """Run ``arr.compute()`` in a daemon thread with a hard Python timeout.
+
+    When the Dask synchronous scheduler is used from inside a Dask worker,
+    the underlying ``aiobotocore`` (asyncio) ``read_timeout`` may never fire:
+    its cancellation coroutine is registered in an event loop that is not
+    progressing while the calling thread is blocked.  This wrapper guarantees
+    the call cannot hang indefinitely regardless of the S3 client's internal
+    timeout settings.
+    """
+    _result: list = [None]
+    _exc: list = [None]
+    _done = threading.Event()
+
+    def _run() -> None:
+        try:
+            _result[0] = arr.compute(**kwargs)
+        except Exception as _e:  # noqa: BLE001
+            _exc[0] = _e
+        finally:
+            _done.set()
+
+    _t = threading.Thread(target=_run, daemon=True)
+    _t.start()
+    if not _done.wait(timeout=timeout_s):
+        # The daemon thread is still blocking on S3 — the OS will kill it at
+        # process exit.  Raise so the task is marked as failed quickly.
+        raise RuntimeError(
+            f"arr.compute() timed out after {timeout_s}s. "
+            "Likely cause: aiobotocore async read_timeout not firing in "
+            "synchronous Dask-scheduler context (stale S3 connection). "
+            "The task will be skipped by the watchdog and retried next run."
+        )
+    if _exc[0] is not None:
+        raise _exc[0]
+    return _result[0]  # type: ignore[no-any-return]
+
+
+from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager  # noqa: E402
+from dctools.metrics.metrics import MetricComputer  # noqa: E402
+from dctools.utilities.format_converter import convert_format1_to_format2  # noqa: E402
+from dctools.utilities.misc_utils import (  # noqa: E402
     deep_copy_object,
     serialize_structure,
     to_float32,
@@ -188,17 +232,32 @@ def _worker_full_cleanup() -> bool:
         threadpoolctl.threadpool_limits(limits=1)
     except Exception:
         pass
-
-    # Blosc: its pool is NOT covered by threadpoolctl; allow 2 threads
-    # for decent decompression speed on Blosc-compressed SWOT HDF5 chunks.
+    # allow 2 threads for decent decompression speed on Blosc-compressed SWOT HDF5 chunks.
     try:
-        import blosc
+        import blosc  # type: ignore[import-not-found]
         blosc.set_nthreads(2)
     except Exception:
         pass
     try:
-        from numcodecs import blosc as _nc_blosc
+        from numcodecs import blosc as _nc_blosc  # type: ignore[import-untyped]
         _nc_blosc.set_nthreads(2)
+    except Exception:
+        pass
+
+    # Clear the per-worker dataset LRU cache so the next batch always opens
+    # fresh S3 connections.  Stale connections (closed by the S3 server after
+    # inactivity) cause aiobotocore's async read_timeout not to fire when
+    # called from a synchronous Dask scheduler context — resulting in 20+ min
+    # hangs.  Clearing here ensures each batch starts with live connections.
+    try:
+        with _WORKER_DATASET_CACHE_LOCK:
+            for _evicted_ds in _WORKER_DATASET_CACHE.values():
+                try:
+                    if hasattr(_evicted_ds, "close"):
+                        _evicted_ds.close()
+                except Exception:
+                    pass
+            _WORKER_DATASET_CACHE.clear()
     except Exception:
         pass
 
@@ -208,7 +267,7 @@ def _worker_full_cleanup() -> bool:
         import io
         import xarray as xr
         if not hasattr(xr, '_original_open_dataset'):
-            xr._original_open_dataset = xr.open_dataset
+            xr._original_open_dataset = xr.open_dataset  # type: ignore[attr-defined]
 
             def _open_dataset_scipy_for_inmem(filename_or_obj, *args, **kwargs):
                 if isinstance(filename_or_obj, (bytes, io.BytesIO, io.BufferedIOBase)):
@@ -221,12 +280,12 @@ def _worker_full_cleanup() -> bool:
                         _bk = dict(_bk)
                     _bk.setdefault('mmap', False)
                     kwargs['backend_kwargs'] = _bk
-                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)
+                return xr._original_open_dataset(filename_or_obj, *args, **kwargs)  # type: ignore[attr-defined]
 
             xr.open_dataset = _open_dataset_scipy_for_inmem
     except Exception:
         pass
-    
+
     _clear_xarray_file_cache()
     worker_memory_cleanup()
     return True
@@ -397,7 +456,7 @@ def compute_metric(
             pred_data = pred_source
 
         # Simple nearest-neighbor time selection (original, fast approach)
-        pred_data_selected = pred_data.sel(time=valid_time, method="nearest")
+        pred_data_selected = pred_data.sel(time=valid_time, method="nearest")  # type: ignore[union-attr]
 
         # Ensure dimension "time" is preserved or restored (needed for concatenation later)
         if "time" not in pred_data_selected.dims:
@@ -825,15 +884,15 @@ def compute_metric(
                         if _td in ref_data.coords or _td in ref_data.dims:
                             _time_dim = _td
                             break
-                    
+
                     if _time_dim:
                         try:
                             # Use nearest neighbor to match valid_time
                             _ref_sel = ref_data.sel({_time_dim: valid_time}, method="nearest")
-                            
+
                             # Preserve time dimension (needed for concatenation)
                             if _time_dim not in _ref_sel.dims:
-                                ref_data = _ref_sel.expand_dims(_time_dim).assign_coords({_time_dim: [valid_time]})
+                                ref_data = _ref_sel.expand_dims(_time_dim).assign_coords({_time_dim: [valid_time]})  # noqa: E501
                             else:
                                 ref_data = _ref_sel.assign_coords({_time_dim: [valid_time]})
                         except Exception as _exc_slice:
@@ -880,9 +939,33 @@ def compute_metric(
 
         if pred_transform is not None:
             pred_data = pred_transform(pred_data)
+        if pred_data is None:
+            logger.debug(
+                f"[{ref_alias}] valid_time={valid_time}: no prediction data "
+                f"for time window {time_bounds[0]}–{time_bounds[1]} "
+                f"— skipping metric computation (result=null)."
+            )
+            return {
+                "ref_alias": ref_alias,
+                "result": None,
+                "n_points": 0,
+                "duration_s": 0.0,
+                "preprocess_s": 0.0,
+                "forecast_reference_time": forecast_reference_time,
+                "lead_time": lead_time,
+                "valid_time": valid_time,
+            }
         # Compute once after transforms (safe & memory-friendlier).
         if hasattr(pred_data, 'chunks') and pred_data.chunks:
-            pred_data = pred_data.compute(scheduler="synchronous")
+            # Use a hard Python-level timeout instead of bare .compute().
+            # With scheduler='synchronous', aiobotocore's asyncio read_timeout
+            # never fires (event loop blocked by the synchronous scheduler).
+            # _compute_with_timeout() runs the compute in a daemon thread and
+            # raises after DCTOOLS_S3_COMPUTE_TIMEOUT seconds (default 90 s).
+            _s3_timeout = int(os.environ.get("DCTOOLS_S3_COMPUTE_TIMEOUT", "90"))
+            pred_data = _compute_with_timeout(
+                pred_data, timeout_s=_s3_timeout, scheduler="synchronous"
+            )
 
         # Grid-to-Track interpolation is now handled internally by Class4 metrics
         # if run_grid_to_track and ref_data is not None:
@@ -892,7 +975,10 @@ def compute_metric(
             ref_data = ref_transform(ref_data)
             # Re-materialize if transform produced new lazy arrays
             if hasattr(ref_data, 'chunks') and ref_data.chunks:
-                ref_data = ref_data.compute(scheduler="synchronous")
+                _s3_timeout = int(os.environ.get("DCTOOLS_S3_COMPUTE_TIMEOUT", "90"))
+                ref_data = _compute_with_timeout(
+                    ref_data, timeout_s=_s3_timeout, scheduler="synchronous"
+                )
 
         if reduce_precision:
             # pred_data is already float32.
@@ -985,7 +1071,7 @@ def compute_metric(
                     )
 
                     # Handle per_bins when rmsd() returns {"results": DataFrame, "per_bins": dict}
-                    if isinstance(return_res, dict) and "results" in return_res and "per_bins" in return_res:
+                    if isinstance(return_res, dict) and "results" in return_res and "per_bins" in return_res:  # noqa: E501
                         _metric_per_bins = return_res.get("per_bins") or {}
                         if _metric_per_bins:
                             if _per_bins_data is None:
@@ -1097,7 +1183,7 @@ def compute_metric(
                     and (pred_data is locals().get("pred_data_base"))
                 )
                 if not _skip_close and hasattr(pred_data, 'close'):
-                    pred_data.close()
+                    pred_data.close()  # type: ignore[union-attr]
                 del pred_data
             except Exception:
                 pass
@@ -1119,7 +1205,7 @@ def compute_metric(
                         and (ref_data is locals().get("ref_data_base"))
                     )
                     if (not _skip_close) and hasattr(ref_data, 'close'):
-                        ref_data.close()  # type: ignore[union-attr]
+                        ref_data.close()
                 del ref_data
             except Exception:
                 pass
@@ -1236,7 +1322,7 @@ class Evaluator:
                 _ws = _info.get("workers", {})
                 _cur_n = len(_ws)
                 # threads & memory from first worker
-                _any_w = next(iter(_ws.values()), {})
+                _any_w: dict = next(iter(_ws.values()), {})
                 _cur_threads = _any_w.get("nthreads", 1)
                 _cur_mem = _any_w.get("memory_limit", 0)
                 # Parse desired memory into bytes for comparison.
@@ -1396,7 +1482,7 @@ class Evaluator:
         from pathlib import Path as _PfPath
         _results_path = _PfPath(self.results_dir) if self.results_dir else _PfPath("/tmp")
         # results_dir == data_directory/results_batches  →  parent == data_directory
-        _data_dir = _results_path.parent if _results_path.name == "results_batches" else _results_path
+        _data_dir = _results_path.parent if _results_path.name == "results_batches" else _results_path  # noqa: E501
         self._argo_zarr_cache_dir = str(_data_dir / "argo_batch_cache")
 
         # ── Purge stale obs batch zarr from any previous run ─────────────
@@ -1421,7 +1507,6 @@ class Evaluator:
             # Batches are lightweight metadata dicts (no actual data),
             # so materialising upfront is cheap and lets us display
             # clear "Batch X/N" progress throughout the run.
-            import threading as _la_threading
             self._lookahead_cache = getattr(self, '_lookahead_cache', {})
 
             _all_batches: List[List[Dict[str, Any]]] = list(self.dataloader)
@@ -1434,7 +1519,7 @@ class Evaluator:
             _prev_ref_alias: Optional[str] = None
             _ref_aliases_ordered: List[str] = list(
                 dict.fromkeys(
-                    b[0].get("ref_alias") for b in _all_batches if b and b[0].get("ref_alias")
+                    b[0].get("ref_alias") for b in _all_batches if b and b[0].get("ref_alias")  # type: ignore[misc]
                 )
             )
 
@@ -1462,18 +1547,18 @@ class Evaluator:
 
                 # ── Reconfigure cluster if this ref dataset needs
                 #    different sizing (workers / threads / memory) ──
-                self._reconfigure_cluster_for_ref(ref_alias)
+                self._reconfigure_cluster_for_ref(ref_alias)  # type: ignore[arg-type]
 
                 # Extract necessary information
                 pred_connection_params = self.dataloader.pred_connection_params
-                ref_connection_params = self.dataloader.ref_connection_params[ref_alias]
+                ref_connection_params = self.dataloader.ref_connection_params[ref_alias]  # type: ignore[index]
                 pred_transform = self.dataloader.pred_transform
                 if self.dataloader.ref_transforms is not None:
-                    ref_transform = self.dataloader.ref_transforms[ref_alias]
+                    ref_transform = self.dataloader.ref_transforms[ref_alias]  # type: ignore[index]
 
                 argo_index = None
-                if hasattr(self.dataloader.ref_managers[ref_alias], 'argo_index'):
-                    argo_index = self.dataloader.ref_managers[ref_alias].get_argo_index()
+                if hasattr(self.dataloader.ref_managers[ref_alias], 'argo_index'):  # type: ignore[index]
+                    argo_index = self.dataloader.ref_managers[ref_alias].get_argo_index()  # type: ignore[index]
 
                 # Build look-ahead context for the NEXT batch (if any).
                 # _evaluate_batch will launch the background download during
@@ -1486,7 +1571,7 @@ class Evaluator:
                     }
 
                 batch_results = self._evaluate_batch(
-                    batch, pred_alias, ref_alias,
+                    batch, pred_alias, ref_alias,  # type: ignore[arg-type]
                     pred_connection_params, ref_connection_params,
                     pred_transform, ref_transform,
                     argo_index=argo_index,
@@ -1596,7 +1681,7 @@ class Evaluator:
             )
             logger.error(err)
             return [{
-                "forecast_reference_time": batch[0].get("forecast_reference_time") if batch else None,
+                "forecast_reference_time": batch[0].get("forecast_reference_time") if batch else None,  # noqa: E501
                 "model": pred_alias,
                 "reference": ref_alias,
                 "result": None,
@@ -1620,7 +1705,7 @@ class Evaluator:
                 reduce_precision=self.reduce_precision,
                 results_dir=self.results_dir,
             )
-            fn.__name__ = "compute_metric"  # prevent full repr in tqdm progress bar
+            fn.__name__ = "compute_metric"  # type: ignore[attr-defined]  # prevent full repr in tqdm progress bar
 
             batch_t0 = time.time()
             num_tasks = len(batch)
@@ -1755,7 +1840,7 @@ class Evaluator:
                                 )
                             except Exception as exc:
                                 logger.warning(
-                                    f"ARGO partitioned shared prefetch failed: {exc!r} — falling back"
+                                    f"ARGO partitioned shared prefetch failed: {exc!r} — falling back"  # noqa: E501
                                 )
 
                         if _partitions:
@@ -1856,7 +1941,7 @@ class Evaluator:
                                     except Exception:
                                         _entry["_obs_cost"] = 0
                                     _paths = _filt["path"].tolist()
-                                    _all_remote_paths.extend(_paths)
+                                    _all_remote_paths.extend(_paths)  # type: ignore[arg-type]
                         # De-duplicate
                         _unique_remote = list(dict.fromkeys(_all_remote_paths))
                         if _unique_remote:
@@ -1876,7 +1961,7 @@ class Evaluator:
                             _obs_path_map = prefetch_obs_files_to_local(
                                 remote_paths=_unique_remote,
                                 cache_dir=_obs_cache_dir,
-                                fs=_ref_mgr.params.fs,
+                                fs=_ref_mgr.params.fs,  # type: ignore[union-attr]
                                 ref_alias=str(ref_alias),
                             )
                             # Inject mapping into every batch entry
@@ -2269,7 +2354,7 @@ class Evaluator:
             logger.debug(
                 f"Prefetch done in {_t_prefetch_total:.1f}s "
                 f"(obs_dl={_t_obs_dl:.1f}s  obs_prep={_t_obs_prep:.1f}s  "
-                f"ref_dl={_t_ref_dl:.1f}s  pred_dl={_t_pred_dl:.1f}s) — dispatching {num_tasks} tasks"
+                f"ref_dl={_t_ref_dl:.1f}s  pred_dl={_t_pred_dl:.1f}s) — dispatching {num_tasks} tasks"  # noqa: E501
             )
 
             # Apply reference path remapping (from current batch prefetch)
@@ -2359,6 +2444,7 @@ class Evaluator:
 
             _active: Dict[Any, int] = {}
             _results: Dict[int, Any] = {}
+            _all_futures: List[Any] = []
             # Driver-observed (submit -> result) wall times help diagnose
             # end-of-batch slowdowns (queueing, pauses, IO waits) vs pure
             # compute time reported by workers.
@@ -2378,6 +2464,7 @@ class Evaluator:
             while _next < _n_seed:
                 _task_i = _task_order[_next]
                 _f = _client.submit(fn, batch[_task_i], retries=1, pure=False)
+                _all_futures.append(_f)
                 _active[_f] = _task_i
                 _submitted_at[_f] = time.monotonic()
                 _ac.add(_f)
@@ -2414,7 +2501,7 @@ class Evaluator:
                             and _la_ref_alias != "argo_profiles"
                         ):
                             _la_mgr = self.dataloader.ref_managers.get(
-                                _la_ref_alias
+                                _la_ref_alias  # type: ignore[arg-type]
                             )
                             _la_has_fs = (
                                 _la_mgr is not None
@@ -2424,7 +2511,7 @@ class Evaluator:
                             )
                             if _la_has_fs:
                                 _la_paths: List[str] = []
-                                for _e in _la_batch:
+                                for _e in _la_batch:  # type: ignore[union-attr]
                                     _rd = _e.get("ref_data")
                                     if (
                                         isinstance(_rd, dict)
@@ -2475,7 +2562,7 @@ class Evaluator:
                                         prefetch_obs_files_to_local(
                                             remote_paths=_la_uniq,
                                             cache_dir=_la_cache,
-                                            fs=_la_mgr.params.fs,
+                                            fs=_la_mgr.params.fs,  # type: ignore[union-attr]
                                             ref_alias=(
                                                 f"LA:{_la_ref_alias}"
                                             ),
@@ -2680,7 +2767,7 @@ class Evaluator:
                         logger.debug(
                             f"{ref_alias}: entering end-of-batch tail: "
                             f"pending={_pending} <= slots={_total_slots}. "
-                            "CPU drop is expected here; remaining time is dominated by the slowest tasks."
+                            "CPU drop is expected here; remaining time is dominated by the slowest tasks."  # noqa: E501
                         )
 
                     _maybe_log_cluster_state(_elapsed, _pending)
@@ -2760,6 +2847,7 @@ class Evaluator:
                         _f_new = _client.submit(
                             fn, batch[_task_i], retries=1, pure=False
                         )
+                        _all_futures.append(_f_new)
                         _active[_f_new] = _task_i
                         _submitted_at[_f_new] = time.monotonic()
                         _ac.add(_f_new)
@@ -2778,6 +2866,18 @@ class Evaluator:
             # ── Wait for look-ahead thread (non-blocking if already done) ──
             if _la_thread is not None:
                 _la_thread.join(timeout=5)
+
+            # ── Explicit batch cleanup on client/workers ───────────────────
+            try:
+                if _all_futures:
+                    _client.cancel(_all_futures, force=True)
+                    wait(_all_futures)
+            except Exception:
+                pass
+            try:
+                _client.run(_worker_full_cleanup)
+            except Exception:
+                pass
 
             # Restore original batch order
             batch_results: List[Any] = [_results[i] for i in range(num_tasks)]
@@ -2845,7 +2945,7 @@ class Evaluator:
                         _lines.append(
                             f"idx={_i} wall={_w:.1f}s{_tail_tag} "
                             f"preproc={_pp!s} metrics={_mt!s} pts={_np!s} "
-                            f"_obs_cost={_cost!s} valid_time={_vt} forecast_ref={_frt} time_bounds={_tb}"
+                            f"_obs_cost={_cost!s} valid_time={_vt} forecast_ref={_frt} time_bounds={_tb}"  # noqa: E501
                         )
 
                     '''logger.debug(
@@ -2877,7 +2977,7 @@ class Evaluator:
             logger.error(f"Error processing batch: {repr(exc)}")
             traceback.print_exc()
             return [{
-                "forecast_reference_time": batch[0].get("forecast_reference_time") if batch else None,
+                "forecast_reference_time": batch[0].get("forecast_reference_time") if batch else None,  # noqa: E501
                 "model": pred_alias,
                 "reference": ref_alias,
                 "result": None,

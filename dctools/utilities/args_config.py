@@ -101,13 +101,12 @@ def configure_logging_from_args(args: Namespace) -> None:
         logger.add(
             sys.stderr,
             level=level,
-            format=fmt,
+            format=fmt,  # type: ignore[arg-type]
             colorize=colorize,
             backtrace=backtrace,
             diagnose=diagnose,
             enqueue=enqueue,
         )
-
     logfile = getattr(args, "logfile", None)
     if logfile:
         try:
@@ -120,7 +119,7 @@ def configure_logging_from_args(args: Namespace) -> None:
             logger.add(
                 _timed_logfile,
                 level=level,
-                format=fmt,
+                format=fmt,  # type: ignore[arg-type]
                 colorize=False,
                 backtrace=backtrace,
                 diagnose=diagnose,

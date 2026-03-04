@@ -46,6 +46,19 @@ build:
       # See https://github.com/readthedocs/readthedocs.org/pull/11152/
       # - VIRTUAL_ENV=$READTHEDOCS_VIRTUALENV_PATH poetry install --with docs
 
+    pre_build:
+      # The leaderboard sub-site is generated directly into docs/source/_extra/leaderboard/
+      # at the end of each evaluation run (see dctools/processing/base.py).
+      # It is committed to the repo and requires NO regeneration on RTD.
+      #
+      # Workflow to update the published leaderboard after a new evaluation:
+      #   1. python dc/evaluate.py  (writes to docs/source/_extra/leaderboard/ automatically)
+      #   2. git add docs/source/_extra/leaderboard/
+      #   3. git commit -m "update leaderboard" && git push
+      #
+      # Uncomment only if switching to dynamic generation on RTD:
+      # - python scripts/sync_leaderboard_docs.py --source <generated-output-dir>
+
 # Build documentation in the "docs/" directory with Sphinx
 sphinx:
   configuration: docs/source/conf.py

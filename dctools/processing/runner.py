@@ -112,14 +112,20 @@ def run_from_config(
         os.makedirs(args.catalog_dir, exist_ok=True)
         os.makedirs(args.result_dir, exist_ok=True)
 
-        evaluator_instance = evaluation_cls(args)
+        evaluator_instance = evaluation_cls(args)  # type: ignore[call-arg]
 
         report_path = os.path.join(args.result_dir, "dask-report.html")
         print(f"Generating Dask performance report at: {report_path}")
 
         with performance_report(filename=report_path):
-            evaluator_instance.run_eval()
+            evaluator_instance.run_eval()  # type: ignore[attr-defined]
 
+        lb_warnings = getattr(evaluator_instance, "_leaderboard_warnings", [])
+        if lb_warnings:
+            print("Evaluation has finished, but the leaderboard is INCOMPLETE:")
+            for w in lb_warnings:
+                print(f"  [!] {w}")
+            return 0
         print("Evaluation has finished successfully.")
         return 0
 

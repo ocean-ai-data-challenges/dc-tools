@@ -22,9 +22,9 @@ except ImportError:
 from loguru import logger
 
 try:
-    from oceanbench.core.distributed import DatasetProcessor  # type: ignore
+    from oceanbench.core.distributed import DatasetProcessor
 except Exception:  # pragma: no cover
-    DatasetProcessor = Any  # type: ignore
+    DatasetProcessor = Any
 from scipy.interpolate import RegularGridInterpolator
 
 from dctools.data.coordinates import GEO_STD_COORDS
@@ -463,8 +463,9 @@ def interpolate_pyinterp(
                     grid_data = data.reshape(len(lon_src), len(lat_src))
 
                 grid = pyinterp.Grid2D(x_axis, y_axis, grid_data)
+                grid_obj: Any = grid
 
-                res = grid.bivariate(x=xt, y=yt, interpolator="bilinear")
+                res = grid_obj.bivariate(x=xt, y=yt, interpolator="bilinear")
 
                 if pw:
                     return res  # 1D array
