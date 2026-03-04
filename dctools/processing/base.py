@@ -1194,7 +1194,24 @@ class BaseDCEvaluation:
                 render_site_from_results_dir as _render_leaderboard,
             )
 
-            _leaderboard_dir = os.path.join(self.results_directory, "leaderboard")
+            # Output the leaderboard site directly into the Sphinx _extra/ tree
+            # so that it is picked up by html_extra_path and published on RTD
+            # without any manual sync step.
+            # __file__ = dctools/processing/base.py → parents[2] = repo root.
+            # Fall back to results_directory/leaderboard when the docs/ tree is
+            # absent (e.g. package installed outside the development repo).
+            _repo_root = Path(__file__).resolve().parents[2]
+            _docs_leaderboard = _repo_root / "docs" / "source" / "_extra" / "leaderboard"
+            if (_repo_root / "docs").is_dir():
+                _leaderboard_dir = str(_docs_leaderboard)
+                logger.info(
+                    f"  ┌ Leaderboard will be written to docs/  ->  {_leaderboard_dir}"
+                )
+            else:
+                _leaderboard_dir = os.path.join(self.results_directory, "leaderboard")
+                logger.info(
+                    f"  ┌ docs/ not found — writing leaderboard to results/  ->  {_leaderboard_dir}"
+                )
             _leaderboard_input_dir = os.path.join(self.results_directory, "leaderboard_input")
             os.makedirs(_leaderboard_dir, exist_ok=True)
             os.makedirs(_leaderboard_input_dir, exist_ok=True)
