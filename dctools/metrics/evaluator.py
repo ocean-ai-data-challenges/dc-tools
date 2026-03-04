@@ -99,6 +99,50 @@ def _open_dataset_worker_cached(
             except Exception:
                 pass
     return ds, False
+
+
+def _compute_with_timeout(
+    arr: "xr.Dataset",
+    timeout_s: int = 90,
+    **kwargs: Any,
+) -> "xr.Dataset":
+    """Run ``arr.compute()`` in a daemon thread with a hard Python timeout.
+
+    When the Dask synchronous scheduler is used from inside a Dask worker,
+    the underlying ``aiobotocore`` (asyncio) ``read_timeout`` may never fire:
+    its cancellation coroutine is registered in an event loop that is not
+    progressing while the calling thread is blocked.  This wrapper guarantees
+    the call cannot hang indefinitely regardless of the S3 client's internal
+    timeout settings.
+    """
+    _result: list = [None]
+    _exc: list = [None]
+    _done = threading.Event()
+
+    def _run() -> None:
+        try:
+            _result[0] = arr.compute(**kwargs)
+        except Exception as _e:  # noqa: BLE001
+            _exc[0] = _e
+        finally:
+            _done.set()
+
+    _t = threading.Thread(target=_run, daemon=True)
+    _t.start()
+    if not _done.wait(timeout=timeout_s):
+        # The daemon thread is still blocking on S3 — the OS will kill it at
+        # process exit.  Raise so the task is marked as failed quickly.
+        raise RuntimeError(
+            f"arr.compute() timed out after {timeout_s}s. "
+            "Likely cause: aiobotocore async read_timeout not firing in "
+            "synchronous Dask-scheduler context (stale S3 connection). "
+            "The task will be skipped by the watchdog and retried next run."
+        )
+    if _exc[0] is not None:
+        raise _exc[0]
+    return _result[0]  # type: ignore[no-any-return]
+
+
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager  # noqa: E402
 from dctools.metrics.metrics import MetricComputer  # noqa: E402
 from dctools.utilities.format_converter import convert_format1_to_format2  # noqa: E402
@@ -197,6 +241,23 @@ def _worker_full_cleanup() -> bool:
     try:
         from numcodecs import blosc as _nc_blosc  # type: ignore[import-untyped]
         _nc_blosc.set_nthreads(2)
+    except Exception:
+        pass
+
+    # Clear the per-worker dataset LRU cache so the next batch always opens
+    # fresh S3 connections.  Stale connections (closed by the S3 server after
+    # inactivity) cause aiobotocore's async read_timeout not to fire when
+    # called from a synchronous Dask scheduler context — resulting in 20+ min
+    # hangs.  Clearing here ensures each batch starts with live connections.
+    try:
+        with _WORKER_DATASET_CACHE_LOCK:
+            for _evicted_ds in _WORKER_DATASET_CACHE.values():
+                try:
+                    if hasattr(_evicted_ds, "close"):
+                        _evicted_ds.close()
+                except Exception:
+                    pass
+            _WORKER_DATASET_CACHE.clear()
     except Exception:
         pass
 
@@ -896,7 +957,15 @@ def compute_metric(
             }
         # Compute once after transforms (safe & memory-friendlier).
         if hasattr(pred_data, 'chunks') and pred_data.chunks:
-            pred_data = pred_data.compute(scheduler="synchronous")
+            # Use a hard Python-level timeout instead of bare .compute().
+            # With scheduler='synchronous', aiobotocore's asyncio read_timeout
+            # never fires (event loop blocked by the synchronous scheduler).
+            # _compute_with_timeout() runs the compute in a daemon thread and
+            # raises after DCTOOLS_S3_COMPUTE_TIMEOUT seconds (default 90 s).
+            _s3_timeout = int(os.environ.get("DCTOOLS_S3_COMPUTE_TIMEOUT", "90"))
+            pred_data = _compute_with_timeout(
+                pred_data, timeout_s=_s3_timeout, scheduler="synchronous"
+            )
 
         # Grid-to-Track interpolation is now handled internally by Class4 metrics
         # if run_grid_to_track and ref_data is not None:
@@ -906,7 +975,10 @@ def compute_metric(
             ref_data = ref_transform(ref_data)
             # Re-materialize if transform produced new lazy arrays
             if hasattr(ref_data, 'chunks') and ref_data.chunks:
-                ref_data = ref_data.compute(scheduler="synchronous")
+                _s3_timeout = int(os.environ.get("DCTOOLS_S3_COMPUTE_TIMEOUT", "90"))
+                ref_data = _compute_with_timeout(
+                    ref_data, timeout_s=_s3_timeout, scheduler="synchronous"
+                )
 
         if reduce_precision:
             # pred_data is already float32.

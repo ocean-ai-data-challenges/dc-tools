@@ -1110,12 +1110,9 @@ class BaseDCEvaluation:
                         f"(JSONL, compact format)"
                     )
 
-                if n_errors > 0:
-                    raise RuntimeError(
-                        f"Evaluation completed with {n_errors} computation error(s) "
-                        f"for dataset '{alias}'."
-                    )
-
+                # ── Write results JSON before checking for errors ──────────
+                # Writing first ensures partial results are never discarded
+                # even when a handful of tasks were cancelled by the watchdog.
                 with open(dataset_json_path, "w") as json_file:
                     json_file.write("")
                     json.dump(
@@ -1125,6 +1122,7 @@ class BaseDCEvaluation:
                             "metadata": {
                                 "evaluation_date": pd.Timestamp.now().isoformat(),
                                 "total_entries": _total_entries,
+                                "n_errors": n_errors,
                                 "config": {
                                     "start_time": self.args.start_time,
                                     "end_time": self.args.end_time,
@@ -1140,6 +1138,26 @@ class BaseDCEvaluation:
                 logger.info(
                     f"  └  Results saved  ->  {os.path.basename(dataset_json_path)}"
                 )
+
+                # ── Error threshold check ──────────────────────────────────
+                # max_task_errors (int, default 0): tolerated number of
+                # individual task failures before the run is considered failed.
+                # Set a non-zero value in the YAML config to tolerate occasional
+                # network timeouts / watchdog cancellations without losing all
+                # consolidated results.
+                _max_errors = int(getattr(self.args, "max_task_errors", 0))
+                if n_errors > _max_errors:
+                    raise RuntimeError(
+                        f"Evaluation completed with {n_errors} computation error(s) "
+                        f"for dataset '{alias}' "
+                        f"(tolerance: max_task_errors={_max_errors}). "
+                        f"Results were saved to {os.path.basename(dataset_json_path)}."
+                    )
+                if n_errors > 0:
+                    logger.warning(
+                        f"  └  {n_errors} task error(s) tolerated "
+                        f"(max_task_errors={_max_errors}) — results saved."
+                    )
 
             except Exception as exc:
                 logger.error(f"  └  [ERROR] Failed to write JSON results: {exc}")

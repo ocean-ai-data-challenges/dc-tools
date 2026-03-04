@@ -1238,11 +1238,15 @@ def preprocess_batch_obs_files(
         with _FilePool(max_workers=_MAX_PREP_WORKERS) as pool:
             from concurrent.futures import as_completed as _proc_ac
             _futs = [pool.submit(_process_file_to_zarr, a) for a in _args_list]
+            _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
             for fut in _proc_ac(_futs):
                 try:
                     zarr_path, n_pts = fut.result()
                 except Exception as _fe:
-                    logger.debug(f"Batch preproc ({alias}): worker failed: {_fe}")
+                    _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
+                    logger.warning(
+                        f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+                    )
                     continue
                 if zarr_path is not None:
                     _mini_zarr_paths.append(zarr_path)
@@ -1261,11 +1265,15 @@ def preprocess_batch_obs_files(
 
         with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
             _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
+            _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
             for fut in _thr_ac(_futs):
                 try:
                     zarr_path, n_pts = fut.result()
                 except Exception as _fe:
-                    logger.debug(f"Batch preproc ({alias}): worker failed: {_fe}")
+                    _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
+                    logger.warning(
+                        f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+                    )
                     continue
                 if zarr_path is not None:
                     _mini_zarr_paths.append(zarr_path)
