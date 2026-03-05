@@ -52,6 +52,7 @@ from dctools.utilities.file_utils import empty_folder
 from dctools.utilities.init_dask import configure_dask_logging, configure_dask_workers_env
 from dctools.utilities.misc_utils import make_serializable, nan_to_none, transform_in_place
 
+import dcleaderboard as _dcleaderboard
 warnings.simplefilter("ignore", UserWarning)
 
 
@@ -802,11 +803,9 @@ class BaseDCEvaluation:
         try:
             dashboard_link = getattr(self.dataset_processor.client, "dashboard_link", None)
             if dashboard_link:
-                logger.info("")
                 logger.info(
-                    f"============= Link to Dask dashboard : {dashboard_link} ============="
+                    f"Link to Dask dashboard : {dashboard_link}"
                 )
-                logger.info("")
         except Exception:
             pass
 
@@ -816,7 +815,7 @@ class BaseDCEvaluation:
 
             if os.path.isdir(results_files_dir):
                 if os.listdir(results_files_dir):
-                    logger.info("Results dir exists. Removing old results files.")
+                    logger.debug("Results dir exists. Removing old results files.")
                     empty_folder(results_files_dir, extension=".json")
             else:
                 os.makedirs(results_files_dir, exist_ok=True)
@@ -1023,11 +1022,11 @@ class BaseDCEvaluation:
 
             # ── Separator: evaluation done -> post-processing ──────────────
             _sep_post = "─" * 68
-            print("")
-            print(f"┌{_sep_post}┐")
-            print(f"│{'  📦  POST-PROCESSING RESULTS  —  ' + alias.upper():^67}│")
-            print(f"└{_sep_post}┘")
-            print("")
+            logger.opt(colors=True).info(
+                f"\n┌{_sep_post}┐\n"
+                f"│<bold>{'  📦  POST-PROCESSING RESULTS  —  ' + alias.upper():^67}</bold>│\n"
+                f"└{_sep_post}┘"
+            )
 
             # Aggregate batch results and write final JSON.
             try:
@@ -1135,7 +1134,7 @@ class BaseDCEvaluation:
                         indent=2,
                         ensure_ascii=False,
                     )
-                logger.info(
+                logger.success(
                     f"  └  Results saved  ->  {os.path.basename(dataset_json_path)}"
                 )
 
@@ -1171,11 +1170,11 @@ class BaseDCEvaluation:
         # waiting 1s for the final log messages to flush before printing the leaderboard header
         _time.sleep(1)
         _sep_lb = "═" * 68
-        print("")
-        print(f"╔{_sep_lb}╗")
-        print(f"║{'  🏆  LEADERBOARD GENERATION':^67}║")
-        print(f"╚{_sep_lb}╝")
-        print("")
+        logger.opt(colors=True).info(
+            f"\n╔{_sep_lb}╗\n"
+            f"║<bold>{'  🏆  LEADERBOARD GENERATION':^67}</bold>║\n"
+            f"╚{_sep_lb}╝"
+        )
 
         if not models_results:
             logger.warning(
@@ -1204,12 +1203,12 @@ class BaseDCEvaluation:
             _docs_leaderboard = _repo_root / "docs" / "source" / "_extra" / "leaderboard"
             if (_repo_root / "docs").is_dir():
                 _leaderboard_dir = str(_docs_leaderboard)
-                logger.info(
+                logger.debug(
                     f"  ┌ Leaderboard will be written to docs/  ->  {_leaderboard_dir}"
                 )
             else:
                 _leaderboard_dir = os.path.join(self.results_directory, "leaderboard")
-                logger.info(
+                logger.debug(
                     f"  ┌ docs/ not found — writing leaderboard to results/  ->  {_leaderboard_dir}"
                 )
             _leaderboard_input_dir = os.path.join(self.results_directory, "leaderboard_input")
@@ -1224,21 +1223,20 @@ class BaseDCEvaluation:
             _local_lb_dir = _dc_dir / "leaderboard_results"
             if _local_lb_dir.is_dir():
                 _ref_results_src = str(_local_lb_dir)
-                logger.info(f"  ┌ Using dc/leaderboard_results/  ->  {_local_lb_dir}")
+                logger.debug(f" Using dc/leaderboard_results/  ->  {_local_lb_dir}")
             else:
-                import dcleaderboard as _dcleaderboard
                 _ref_results_src = os.path.join(
                     os.path.dirname(_dcleaderboard.__file__), "results"
                 )
-                logger.info(f"  ┌ Using dcleaderboard package results/  ->  {_ref_results_src}")
+                logger.debug(f" Using dcleaderboard package results/  ->  {_ref_results_src}")
             _ref_jsons = glob(os.path.join(_ref_results_src, "results_*.json"))
             for _ref_json in _ref_jsons:
                 _shutil.copy2(
                     _ref_json,
                     os.path.join(_leaderboard_input_dir, os.path.basename(_ref_json)),
                 )
-            logger.info(
-                f"  │  Reference baselines copied  ({len(_ref_jsons)} file(s))"
+            logger.debug(
+                f" Reference baselines copied  ({len(_ref_jsons)} file(s))"
             )
             # Also copy leaderboard_config.yaml from the reference source if present.
             _lb_config_src = os.path.join(_ref_results_src, "leaderboard_config.yaml")
@@ -1247,7 +1245,7 @@ class BaseDCEvaluation:
                     _lb_config_src,
                     os.path.join(_leaderboard_input_dir, "leaderboard_config.yaml"),
                 )
-                logger.info("  │  leaderboard_config.yaml copied")
+                logger.debug("  leaderboard_config.yaml copied")
 
             # Copy current evaluation results into leaderboard input dir.
             # Use direct file lookup by alias for results JSON, and a robust
@@ -1274,14 +1272,14 @@ class BaseDCEvaluation:
                 _copied.append(os.path.basename(_pb_src))
 
             for _fname in _copied:
-                logger.info(f"  │  Staged for leaderboard  ->  {_fname}")
+                logger.debug(f" Staged for leaderboard  ->  {_fname}")
             if not any("_per_bins" in f for f in _copied):
                 logger.warning(
-                    "  │  [WARNING] No per-bins file found in results directory "
+                    "  No per-bins file found in results directory "
                     f"({self.results_directory}) — maps.html will be skipped."
                 )
 
-            logger.info("  │  Rendering leaderboard site ...")
+            logger.info(" Rendering leaderboard site ...")
             _render_leaderboard(
                 results_dir=_leaderboard_input_dir,
                 output_site_dir=_leaderboard_dir,
@@ -1299,9 +1297,9 @@ class BaseDCEvaluation:
                     "enabled and that at least one batch produced spatial data)."
                 )
                 self._leaderboard_warnings.append(_msg)
-                logger.warning(f"  └  [LEADERBOARD INCOMPLETE] {_msg}")
+                logger.warning(f"  [LEADERBOARD INCOMPLETE] {_msg}")
             else:
-                logger.info(f"  └  Leaderboard ready  ->  {_leaderboard_dir}")
+                logger.success(f"  Leaderboard ready  ->  {_leaderboard_dir}")
             print("")
         except Exception as _lb_exc:
             _msg = f"Leaderboard generation failed: {_lb_exc!r}"
