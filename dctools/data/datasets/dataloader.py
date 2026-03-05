@@ -1333,13 +1333,13 @@ def preprocess_batch_obs_files(
                 _tarr = _tarr.astype("datetime64[ns]")
             except Exception:
                 _tarr = None  # type: ignore[assignment]
-            if not bool(np.all(_tarr[:-1] <= _tarr[1:])):
-                logger.info(
-                    f"Shared batch ({alias}): sorting {len(_tarr):,} "
-                    "points by time for fast worker slicing..."
-                )
-                _sort_idx = np.argsort(_tarr, kind="mergesort")
-                combined = combined.isel({n_points_dim: _sort_idx})
+        if _tarr is not None and len(_tarr) > 1 and not bool(np.all(_tarr[:-1] <= _tarr[1:])):
+            logger.info(
+                f"Shared batch ({alias}): sorting {len(_tarr):,} "
+                "points by time for fast worker slicing..."
+            )
+            _sort_idx = np.argsort(_tarr, kind="mergesort")
+            combined = combined.isel({n_points_dim: _sort_idx})
 
     # Rechunk to uniform sizes — xr.concat of files with varying n_points
     # produces non-uniform dask chunks which zarr cannot store.
