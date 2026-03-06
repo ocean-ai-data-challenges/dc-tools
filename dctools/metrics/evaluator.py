@@ -2963,7 +2963,7 @@ class Evaluator:
                 total_pts = sum(points)
                 avg_pp = sum(preprocs) / len(preprocs)
                 avg_mt = sum(times) / len(times)
-                logger.success(
+                logger.info(
                     f"Batch done: {len(batch_results)}/{num_tasks} tasks "
                     f"in {batch_duration:.1f}s | "
                     f"Avg preproc={avg_pp:.1f}s  metrics={avg_mt:.1f}s | "
