@@ -1196,10 +1196,12 @@ class BaseDCEvaluation:
             # Output the leaderboard site directly into the Sphinx _extra/ tree
             # so that it is picked up by html_extra_path and published on RTD
             # without any manual sync step.
-            # __file__ = dctools/processing/base.py → parents[2] = repo root.
-            # Fall back to results_directory/leaderboard when the docs/ tree is
-            # absent (e.g. package installed outside the development repo).
-            _repo_root = Path(__file__).resolve().parents[2]
+            # Derive the project root from self.results_directory (e.g.
+            # dc2_output/results/) rather than __file__, because dctools may be
+            # installed as a *separate* package (its own repo) so __file__ would
+            # resolve to the dctools source tree instead of the user's DC project.
+            # results_directory → dc2_output/ → project root (parents[1]).
+            _repo_root = Path(self.results_directory).resolve().parents[1]
             _docs_leaderboard = _repo_root / "docs" / "source" / "_extra" / "leaderboard"
             if (_repo_root / "docs").is_dir():
                 _leaderboard_dir = str(_docs_leaderboard)
@@ -1217,9 +1219,8 @@ class BaseDCEvaluation:
 
             # Copy reference baseline JSONs.
             # Primary source: dc/leaderboard_results/ (sibling of evaluate.py).
-            # __file__ = dctools/processing/base.py -> parents[2] = project root -> / "dc"
-            # Fallback: results/ bundled inside the dcleaderboard package.
-            _dc_dir = Path(__file__).resolve().parents[2] / "dc"
+            # _repo_root was derived from self.results_directory above (not __file__).
+            _dc_dir = _repo_root / "dc"
             _local_lb_dir = _dc_dir / "leaderboard_results"
             if _local_lb_dir.is_dir():
                 _ref_results_src = str(_local_lb_dir)
