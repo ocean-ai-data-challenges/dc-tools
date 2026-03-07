@@ -1474,7 +1474,7 @@ class Evaluator:
         self.baseline_memory = None
 
         # ── ARGO pre-fetch cache dir ──────────────────────────────────────
-        # Zarr files created by prefetch_batch_to_zarr persist across
+        # Zarr files created by prefetch_batch_shared_zarr persist across
         # batches (a window fetched for batch N is reused by batch N+1 if
         # the same time window appears again).  The cache is stored under
         # data_directory (parent of results_dir) so it persists across runs

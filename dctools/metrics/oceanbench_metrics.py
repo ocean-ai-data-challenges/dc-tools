@@ -39,6 +39,7 @@ from dctools.data.coordinates import (  # noqa: E402
     EVAL_VARIABLES_GLONET,
     GLOBAL_ZONE_COORDINATES,
     CoordinateSystem,
+    get_standardized_var_name,
 )
 
 # Dictionary of variables of interest: {generic name -> standard_name(s), common aliases}
@@ -266,14 +267,79 @@ class OceanbenchMetrics(DCMetric):
                 ]
                 if promote:
                     ref_data = ref_data.set_coords(promote)  # type: ignore[union-attr]
-                    """logger.debug(
-                        f"Promoted {promote} from data_vars to coords on obs dataset"
-                    )"""
+
+                # ── Harmonize variable names between datasets ──
+                # Class4Evaluator.run() uses the same variable name to
+                # index into *both* model_ds and obs_ds.  When prediction
+                # and observation datasets use different names for the
+                # same physical quantity (e.g. "zos" vs "ssh", or "TEMP"
+                # vs "thetao"), we must rename one of them so the names
+                # match.  Strategy: pick the eval_variable name as the
+                # canonical target; rename whichever dataset is missing it.
+                variables = list(self.eval_variables) if self.eval_variables else []
+                pred_vars = set(pred_data.data_vars)
+                ref_vars = set(ref_data.data_vars) if ref_data is not None else set()
+
+                pred_rename: dict[str, str] = {}
+                ref_rename: dict[str, str] = {}
+                resolved_variables: list[str] = []
+
+                for var in variables:
+                    in_pred = var in pred_vars
+                    in_ref = var in ref_vars
+
+                    if in_pred and in_ref:
+                        resolved_variables.append(var)
+                        continue
+
+                    # Find the standardized key for this eval variable
+                    std_key = get_standardized_var_name(var)
+
+                    if not in_pred and std_key is not None:
+                        # Look for a pred variable that maps to the same
+                        # standardized key
+                        for dv in pred_vars:
+                            if get_standardized_var_name(str(dv)) == std_key:
+                                pred_rename[str(dv)] = var
+                                in_pred = True
+                                break
+
+                    if not in_ref and std_key is not None:
+                        for dv in ref_vars:
+                            if get_standardized_var_name(str(dv)) == std_key:
+                                ref_rename[str(dv)] = var
+                                in_ref = True
+                                break
+
+                    if in_pred and in_ref:
+                        resolved_variables.append(var)
+                    else:
+                        logger.warning(
+                            f"Variable '{var}' (std={std_key}) not found "
+                            f"in both model ({sorted(str(v) for v in pred_vars)}) and "
+                            f"obs ({sorted(str(v) for v in ref_vars)}) — skipping."
+                        )
+
+                if pred_rename:
+                    logger.debug(f"Renaming model variables: {pred_rename}")
+                    pred_data = pred_data.rename(pred_rename)
+                if ref_rename:
+                    logger.debug(f"Renaming obs variables: {ref_rename}")
+                    ref_data = ref_data.rename(ref_rename)  # type: ignore[union-attr]
+
+                if not resolved_variables:
+                    logger.error(
+                        f"No common variables between model "
+                        f"({sorted(str(v) for v in pred_vars)}) and obs "
+                        f"({sorted(str(v) for v in ref_vars)}) for eval_variables="
+                        f"{variables}. Cannot compute class4 metrics."
+                    )
+                    return None
 
                 res = self.class4_evaluator.run(
                     model_ds=pred_data,
                     obs_ds=ref_data,
-                    variables=self.eval_variables,
+                    variables=resolved_variables,
                     ref_coords=ref_coords,
                 )
 

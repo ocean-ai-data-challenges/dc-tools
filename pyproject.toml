@@ -120,11 +120,10 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-m \"not slow\""
 markers = [
     "unit: fast, deterministic unit tests (default PR profile)",
-    "integration: integration tests (local io/dask/external libs), slower than pure unit",
-    "slow: slow/integration-style tests (network, dask clusters, large IO)",
+    "integration: integration tests (local io/dask/external libs), included in coverage profile",
+    "slow: truly slow tests (network, large downloads, multi-minute runs) — excluded from CI",
 ]
 norecursedirs = [
     ".*",
@@ -158,6 +157,9 @@ ignore = ["D401", "D406", "D407"]
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"  # Accepts: "google", "numpy", or "pep257".
 
+[tool.coverage.run]
+omit = ["dctools/debug/*"]
+
 [tool.mypy]
 python_version = "3.13"
 disable_error_code = ["import-untyped"]
@@ -170,12 +172,16 @@ warn_unused_configs = true
 [tool.poe.tasks]
 types = "mypy --install-types --non-interactive dctools"
 lint = "ruff check 'dctools' 'tests'"
-test-fast = "pytest --capture=no -m 'not slow' --cov=dctools --cov-fail-under=20 tests/"
-test-fast-strict = "pytest --capture=no -m 'not slow' --cov=dctools --cov-fail-under=80 tests/"
+test-fast = "pytest --capture=no -m 'not slow and not integration' tests/"
+test-coverage = "pytest --capture=no -m 'not slow' --cov=dctools --cov=dc --cov-report=term-missing --cov-fail-under=50 tests/"
+test-fast-strict = "pytest --capture=no -m 'not slow' --cov=dctools --cov=dc --cov-report=term-missing --cov-fail-under=80 tests/"
 test-slow = "pytest --capture=no -m 'slow' tests/"
 test = { ref = "test-fast" }
-# run all
-all = [ {ref="lint"}, {ref="types"}, {ref="test-fast"} ]
-all-with-slow = [ {ref="lint"}, {ref="types"}, {ref="test-fast"}, {ref="test-slow"} ]
+# run all — unit + integration (complete coverage, excludes slow/hanging tests)
+all = [ {ref="lint"}, {ref="types"}, {ref="test-coverage"} ]
+# run coverage — unit + integration (Dask cluster tests, ~30s extra)
+coverage = [ {ref="lint"}, {ref="types"}, {ref="test-coverage"} ]
+# run everything including truly slow tests (may take several minutes)
+all-with-slow = [ {ref="lint"}, {ref="types"}, {ref="test-coverage"}, {ref="test-slow"} ]
 all-strict = [ {ref="lint"}, {ref="types"}, {ref="test-fast-strict"}, {ref="test-slow"} ]
 

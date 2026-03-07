@@ -568,14 +568,6 @@ class RemoteDataset(BaseDataset):
                 local_file.write(rf.read())
 
 
-class LocalDataset(BaseDataset):
-    """Dataset for local files (NetCDF or others)."""
-
-    def empty_fct(self):
-        """Empty function."""
-        pass
-
-
 def get_dataset_from_config(
     source: dict,
     root_data_folder: str,
