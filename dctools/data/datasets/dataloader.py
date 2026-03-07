@@ -15,11 +15,9 @@ import dask
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import torch
 import xarray as xr
 from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
-from xrpatcher import XRDAPatcher
 
 from dctools.data.connection.connection_manager import (
     ArgoManager,
@@ -150,6 +148,11 @@ def swath_to_points(
 
     # Stack swath dims into 'n_points'
     ds_flat = ds.stack(n_points=swath_dims)
+    # Reset the MultiIndex immediately so that the stacked dimension levels
+    # (e.g. num_lines, num_pixels) become plain coordinates.  Without this,
+    # dropping a single MultiIndex level triggers a FutureWarning in recent
+    # xarray versions and will become an error in the future.
+    ds_flat = ds_flat.reset_index("n_points")
 
     # Save important Coordinates before removal
     coords_to_reassign: Dict[Any, Any] = {}
@@ -727,75 +730,6 @@ class EvaluationDataloader:
         """Open a reference dataset."""
         ref_data: xr.Dataset = self.ref_managers[ref_alias].open(ref_entry, self.file_cache)
         return ref_data
-
-
-class TorchCompatibleDataloader:
-    """Adapter to make EvaluationDataloader compatible with PyTorch."""
-
-    def __init__(
-        self,
-        dataloader: EvaluationDataloader,
-        patch_size: Tuple[int, int],
-        stride: Tuple[int, int],
-    ):
-        """
-        Initializes a PyTorch compatible dataloader.
-
-        Args:
-            dataloader (EvaluationDataloader): The existing dataloader.
-            patch_size (Tuple[int, int]): Size of the patches (height, width).
-            stride (Tuple[int, int]): Stride step for patches.
-        """
-        self.dataloader = dataloader
-        self.patch_size = patch_size
-        self.stride = stride
-
-    def __len__(self):
-        """Returns the total number of batches in the dataloader."""
-        return len(self.dataloader)
-
-    def __iter__(self) -> Generator[Dict[str, torch.Tensor], None, None]:
-        """
-        Generates PyTorch compatible data batches.
-
-        Yields:
-            Dict[str, torch.Tensor]: A dictionary containing data patches.
-        """
-        for batch in self.dataloader:
-            for entry in batch:
-                pred_data = entry["pred_data"]
-                ref_data = entry["ref_data"]
-
-                # Generate patches for prediction data
-                pred_patches = self._generate_patches(pred_data)
-
-                # Generate patches for reference data (if available)
-                ref_patches = self._generate_patches(ref_data) if ref_data is not None else None
-
-                # Return patches as PyTorch tensors
-                yield {
-                    "date": entry["date"],
-                    "pred_patches": pred_patches,
-                    "ref_patches": ref_patches,  # type: ignore[dict-item]
-                }
-
-    def _generate_patches(self, dataset: xr.Dataset) -> torch.Tensor:
-        """
-        Generates patches from an xarray dataset.
-
-        Args:
-            dataset (xr.Dataset): The xarray dataset.
-
-        Returns:
-            torch.Tensor: Patches as PyTorch tensor.
-        """
-        patcher = XRDAPatcher(
-            data=dataset,
-            patch_size=self.patch_size,
-            stride=self.stride,
-        )
-        patches = patcher.extract_patches()
-        return torch.tensor(patches)
 
 
 def _drop_nan_points(ds: xr.Dataset, n_points_dim: str) -> xr.Dataset:

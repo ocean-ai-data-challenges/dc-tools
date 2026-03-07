@@ -157,8 +157,9 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                 time_vals.dtype, np.integer
             ):
                 num_vals = np.asarray(time_vals.values)
-                num_min = float(np.nanmin(num_vals))
-                num_max = float(np.nanmax(num_vals))
+                with np.errstate(all="ignore"):
+                    num_min = float(np.nanmin(num_vals))
+                    num_max = float(np.nanmax(num_vals))
                 if np.isnan(num_min) or np.isnan(num_max):
                     return (None, None)
                 return (num_min, num_max)
@@ -853,51 +854,6 @@ class CMEMSManager(BaseConnectionManager):
                 copernicusmarine.login(credentials_file=self.params.cmems_credentials_path)
         except Exception as exc:
             logger.error(f"Login to CMEMS failed: {repr(exc)}")
-
-    def remote_file_exists(self, dt: datetime.datetime) -> bool:
-        """
-        Tests if a CMEMS file exists for a given date without opening it.
-
-        Args:
-            dt (datetime.datetime): Date to test
-
-        Returns:
-            bool: True if file exists, False otherwise
-        """
-        if copernicusmarine is None:
-            raise ImportError("copernicusmarine is required for CMEMS access but failed to import.")
-        try:
-            if not isinstance(dt, datetime.datetime):
-                dt = datetime.datetime.strptime(dt, "%Y-%m-%dT%H:%M:%S")
-
-            start_datetime = datetime.datetime.combine(dt.date(), datetime.time.min)  # 00:00:00
-            end_datetime = datetime.datetime.combine(
-                dt.date(), datetime.time.max
-            )  # 23:59:59.999999
-
-            # Use a minimal request to test existence
-            test_ds = copernicusmarine.open_dataset(
-                dataset_id=self.params.dataset_id,
-                start_datetime=start_datetime,
-                end_datetime=end_datetime,
-                # Parameters to minimize load
-                minimum_longitude=0.0,  # minimal zone
-                maximum_longitude=1.0,
-                minimum_latitude=0.0,
-                maximum_latitude=1.0,
-                credentials_file=self.params.cmems_credentials_path,
-            )
-
-            # If we arrive here without exception, the file exists
-            if test_ds is not None and len(test_ds.dims) > 0:
-                test_ds.close()
-                return True
-            else:
-                return False
-
-        except Exception as e:
-            logger.debug(f"File does not exist for date {dt}: {e}")
-            return False
 
     def list_files(self) -> List[str]:
         """List files in the Copernicus Marine directory."""
@@ -1925,121 +1881,6 @@ class ArgoManager(BaseConnectionManager):
             )
 
         return partitions
-
-    # --- Legacy per-window prefetch (kept for backward compatibility) ------
-
-    def prefetch_batch_to_zarr(
-        self,
-        time_bounds_list: List[Tuple[pd.Timestamp, pd.Timestamp]],
-        cache_dir: Path,
-        n_outer_workers: int = 4,
-    ) -> Dict[str, str]:
-        """Pre-download ARGO time windows to local Zarr files before dispatch.
-
-        .. deprecated::
-            Use :meth:`prefetch_batch_shared_zarr` instead — it merges all
-            windows into a single download pass and a single shared Zarr.
-
-        Downloads every distinct time-window needed by a batch on the driver
-        (using ArgoInterface's batch HTTP session pooling), then materialises
-        the data to local Zarr files.  Dask workers subsequently read from
-        local storage instead of blocking on GDAC HTTP requests.
-
-        Args:
-            time_bounds_list: List of (start, end) pd.Timestamp tuples, one
-                per batch entry.  Duplicate windows are downloaded once.
-            cache_dir: Local directory for temporary Zarr files (created if
-                necessary).  Files persist across batches so the same window
-                is never downloaded twice.
-            n_outer_workers: Number of windows fetched in parallel.
-                Default 4 — safe because the batch download uses HTTP session
-                pooling internally (no per-profile connection overhead).
-
-        Returns:
-            Dict mapping canonical window key ``"{t0.value}_{t1.value}"`` to
-            the absolute local Zarr path (str).  Windows that failed to
-            download are absent from the mapping.
-        """
-        import time
-        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
-
-        cache_dir = Path(cache_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Deduplicate while preserving insertion order
-        unique_windows: Dict[str, Tuple[pd.Timestamp, pd.Timestamp]] = {}
-        for t0, t1 in time_bounds_list:
-            ts0, ts1 = pd.Timestamp(t0), pd.Timestamp(t1)
-            key = f"{ts0.value}_{ts1.value}"
-            unique_windows[key] = (ts0, ts1)
-
-        result: Dict[str, str] = {}
-        # Batch statistics counters
-        _stats = {"cache_hit": 0, "downloaded": 0, "empty": 0, "failed": 0}
-        _failure_details: List[str] = []
-
-        def _fetch_one(key: str, t0: pd.Timestamp, t1: pd.Timestamp) -> Tuple[str, str]:
-            zarr_path = str(cache_dir / f"argo_w_{key}.zarr")
-            if Path(zarr_path).exists():
-                _stats["cache_hit"] += 1
-                return key, zarr_path
-            try:
-                ds = self.argo_interface.open_time_window(
-                    start=t0,
-                    end=t1,
-                    depth_levels=self.depth_values,
-                    variables=(self.params.keep_variables or self.argo_interface.variables),
-                    master_index=self._master_index,
-                )
-                if ds is not None:
-                    n_pts = ds.sizes.get("N_POINTS", ds.sizes.get("obs", 0))
-                    if n_pts > 0:
-                        # Materialise lazy arrays before writing
-                        ds = ds.compute(scheduler="synchronous")
-                        ds.to_zarr(zarr_path, mode="w", consolidated=True)
-                        _stats["downloaded"] += 1
-                        return key, zarr_path
-                _stats["empty"] += 1
-            except Exception as exc:
-                _stats["failed"] += 1
-                _failure_details.append(f"[{t0} -> {t1}]: {exc}")
-            return key, ""
-
-        logger.info(f"ARGO batch prefetch: {len(unique_windows)} window(s) -> {cache_dir}")
-        t_start = time.time()
-
-        if len(unique_windows) <= 1 or n_outer_workers == 1:
-            # Sequential: safe, each window already parallelised internally
-            for wkey, (ts0, ts1) in unique_windows.items():
-                _k, _path = _fetch_one(wkey, ts0, ts1)
-                if _path:
-                    result[_k] = _path
-        else:
-            with _TPE(max_workers=n_outer_workers) as ex:
-                futs = {
-                    ex.submit(_fetch_one, wkey, ts0, ts1): wkey
-                    for wkey, (ts0, ts1) in unique_windows.items()
-                }
-                for fut in _ac(futs):
-                    try:
-                        _k, _path = fut.result()
-                        if _path:
-                            result[_k] = _path
-                    except Exception as exc:
-                        logger.warning(f"ARGO prefetch future error: {exc}")
-
-        elapsed = time.time() - t_start
-        logger.info(
-            f"ARGO batch prefetch done in {elapsed:.1f}s — "
-            f"{len(result)}/{len(unique_windows)} windows OK "
-            f"(cache_hit={_stats['cache_hit']}, "
-            f"downloaded={_stats['downloaded']}, "
-            f"empty={_stats['empty']}, "
-            f"failed={_stats['failed']})"
-        )
-        for detail in _failure_details:
-            logger.warning(f"ARGO prefetch failure {detail}")
-        return result
 
     @classmethod
     def supports(cls, path: str) -> bool:

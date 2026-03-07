@@ -192,23 +192,6 @@ def _convert_longitude_to_180(ds: xr.Dataset, lon_name: str) -> xr.Dataset:
     return ds_work
 
 
-class TransformWrapper:
-    """Wraps a transform that operates on only the sample."""
-
-    def __init__(self, transf):
-        self.transf = transf
-
-    def __call__(self, data):
-        """
-        Convert data.
-
-        data: tuple containing both sample and time_axis
-        returns a tuple containing the transformed sample and original time_axis
-        """
-        sample, time_axis = data
-        return self.transf(sample), time_axis
-
-
 # Registry for transforms
 TRANSFORM_REGISTRY = {}
 

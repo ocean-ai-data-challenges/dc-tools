@@ -287,7 +287,7 @@ def apply_over_time_depth(
                 vectorize=True,  # Loop over non-core dims (time, depth) in numpy/dask
                 dask="parallelized",
                 output_dtypes=[da.dtype],
-                output_sizes=output_sizes,
+                dask_gufunc_kwargs={"output_sizes": output_sizes},
             )
 
             # Restore coords

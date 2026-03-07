@@ -21,33 +21,6 @@ os.environ["HDF5_DISABLE_VERSION_CHECK"] = "1"
 os.environ["ARGOPY_NETCDF_LOCKING"] = "FALSE"
 
 
-def configure_xarray_for_dask():
-    """Configure xarray for optimal usage with Dask workers.
-
-    Call once at the beginning of the application.
-    """
-    import dask
-
-    # Dask configuration for xarray
-    dask.config.set(
-        {
-            "array.chunk-size": "128MB",
-            "array.slicing.split_large_chunks": False,
-            "distributed.worker.daemon": False,
-            "distributed.comm.timeouts.tcp": 300,
-            "distributed.comm.timeouts.connect": 180,
-        }
-    )
-
-    # xarray configuration - Minimize file cache to avoid memory accumulation
-    # This prevents file handles from being kept in memory between batches
-    # Note: Some xarray versions don't allow 0, so we use 1 (minimal cache)
-    xr.set_options(
-        file_cache_maxsize=1,  # minimal: 1 file cached (effectively disabled)
-        warn_for_unclosed_files=False,  # Avoid warnings in workers
-    )
-
-
 def choose_chunks_automatically(
     ds: xr.Dataset,
     target_chunk_mb: int = 32,
