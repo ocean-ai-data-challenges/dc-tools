@@ -352,7 +352,7 @@ class TestWorkerTimeFiltering:
 class TestPipelineCoherence:
     """High-level tests ensuring the ARGO shared pipeline is coherent."""
 
-    def test_preprocess_argo_profiles_remains_functional_fallback(self):
+    def test_preprocess_argo_profiles_remains_functional_fallback(self, monkeypatch):
         """preprocess_argo_profiles should still work as a fallback."""
         pytest.importorskip("oceanbench", reason="oceanbench not importable in this env")
         from dctools.data.datasets.dataloader import preprocess_argo_profiles
@@ -371,6 +371,11 @@ class TestPipelineCoherence:
         class FakeArgoManager:
             def open(self, path, *args, **kwargs):
                 return fake_ds
+
+        monkeypatch.setattr(
+            "dctools.data.datasets.preprocessing.ArgoManager",
+            FakeArgoManager,
+        )
 
         mgr = FakeArgoManager()
 

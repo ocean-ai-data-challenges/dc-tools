@@ -73,15 +73,15 @@ from dctools.data.connection.config import (
 )
 
 from dctools.data.datasets.dc_catalog import CatalogEntry
-from dctools.data.coordinates import (
+from dctools.utilities.coordinates import (
     get_dataset_geometry,
     get_dataset_geometry_light,
     CoordinateSystem,
 )
-from dctools.data.coordinates import get_target_depth_values
+from dctools.utilities.coordinates import get_target_depth_values
 
 from dctools.data.datasets.dc_catalog import GLOBAL_METADATA
-from dctools.dcio.loader import FileLoader
+from dctools.data.datasets.loader import FileLoader
 from dctools.utilities.file_utils import empty_folder
 from dctools.utilities.misc_utils import (
     deep_copy_object,
@@ -493,7 +493,7 @@ class BaseConnectionManager(ABC):
             # Associate variables with their dimensions
             variables: Dict[Any, Any] = {}
             for var_name, var in ds.variables.items():
-                if var_name in self.params.keep_variables:
+                if self.params.keep_variables is None or var_name in self.params.keep_variables:
                     variables[var_name] = {
                         "dims": list(var.dims),
                         "std_name": var.attrs.get("standard_name", ""),
@@ -1557,7 +1557,7 @@ class ArgoManager(BaseConnectionManager):
         cache_dir = Path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── 1. Merge all per-entry windows into a single bounding interval ─
+        # -- 1. Merge all per-entry windows into a single bounding interval -
         all_t0 = [pd.Timestamp(t0) for t0, _ in time_bounds_list]
         all_t1 = [pd.Timestamp(t1) for _, t1 in time_bounds_list]
         global_t0 = min(all_t0)
@@ -1567,7 +1567,7 @@ class ArgoManager(BaseConnectionManager):
         cache_key = f"argo_shared_{global_t0.value}_{global_t1.value}"
         zarr_path = str(cache_dir / f"{cache_key}.zarr")
 
-        # ── 2. Cache hit? ─────────────────────────────────────────────────
+        # -- 2. Cache hit? -------------------------------------------------
         if Path(zarr_path).exists():
             try:
                 probe = xr.open_zarr(zarr_path, consolidated=True)
@@ -1583,7 +1583,7 @@ class ArgoManager(BaseConnectionManager):
             except Exception:
                 pass  # stale — rebuild
 
-        # ── 3. Download all profiles in the global window ─────────────────
+        # -- 3. Download all profiles in the global window -----------------
         t_start = _time_mod.time()
         n_unique_windows = len(
             set(f"{t0.value}_{t1.value}" for t0, t1 in zip(all_t0, all_t1, strict=False))
@@ -1616,7 +1616,7 @@ class ArgoManager(BaseConnectionManager):
             logger.warning("ARGO shared batch download returned 0 profiles")
             return None
 
-        # ── 4. Ensure data is sorted by TIME for searchsorted fast path ──
+        # -- 4. Ensure data is sorted by TIME for searchsorted fast path --
         time_name = "TIME"
         for candidate in ("TIME", "time", "JULD"):
             if candidate in ds.coords or candidate in ds.data_vars:
@@ -1653,7 +1653,7 @@ class ArgoManager(BaseConnectionManager):
             else:
                 logger.warning("ARGO shared batch: TIME array resolved to None after compute()")
 
-        # ── 5. Materialise and write a single compact Zarr ───────────────
+        # -- 5. Materialise and write a single compact Zarr ---------------
         # Only call .compute() if the data is backed by dask arrays;
         # the profile_refs path already loaded everything into NumPy via
         # .load(), so .compute() would just add scheduling overhead.
@@ -2092,6 +2092,7 @@ def prefetch_obs_files_to_local(
     fs: Any,
     ref_alias: str = "",
     show_progress_bar: bool = True,
+    max_workers: Optional[int] = None,
 ) -> Dict[str, str]:
     """
     Pre-download observation files to local disk before worker dispatch.
@@ -2107,6 +2108,7 @@ def prefetch_obs_files_to_local(
         cache_dir: Local directory where files will be stored.
         fs: An fsspec-compatible filesystem handle (e.g. ``s3fs.S3FileSystem``).
         ref_alias: Name of the observation dataset (for logging / bar label).
+        max_workers: Max parallel download threads (default: 4).
 
     Returns:
         Dict mapping each remote path to its local path on disk.
@@ -2236,10 +2238,10 @@ def prefetch_obs_files_to_local(
         with _lock:
             _bar.update(1)
 
-    # ── Parallel downloads (4 concurrent connections) ─────────────
+    # -- Parallel downloads (4 concurrent connections) -------------
     from concurrent.futures import ThreadPoolExecutor as _DlPool
 
-    _MAX_DL_WORKERS = min(8, len(unique_paths))
+    _MAX_DL_WORKERS = min(max_workers or 4, len(unique_paths))
     with _DlPool(max_workers=_MAX_DL_WORKERS) as pool:
         list(pool.map(_download_one, unique_paths))
 

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 import xarray as xr
 from loguru import logger
 
-from dctools.data.coordinates import CoordinateSystem
+from dctools.utilities.coordinates import CoordinateSystem
 from dctools.metrics.oceanbench_metrics import OCEANBENCH_VARIABLES, OceanbenchMetrics
 from dctools.utilities.misc_utils import add_noise_with_snr
 

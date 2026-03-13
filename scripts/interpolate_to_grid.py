@@ -19,7 +19,7 @@ from oceanbench.core.distributed import DatasetProcessor
 import yaml
 
 from dctools.data.connection.connection_manager import clean_for_serialization
-from dctools.data.coordinates import get_target_dimensions, get_target_depth_values
+from dctools.utilities.coordinates import get_target_dimensions, get_target_depth_values
 from dctools.data.datasets.dataset import get_dataset_from_config
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager
 from dctools.metrics.evaluator import (

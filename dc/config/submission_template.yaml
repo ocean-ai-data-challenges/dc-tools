@@ -1,0 +1,151 @@
+# =============================================================================
+# DC2 Model Submission — Configuration Template
+# =============================================================================
+#
+# This file is a template for participants who wish to submit their ocean
+# forecasting model to the Data Challenge 2 benchmark.
+#
+# INSTRUCTIONS:
+# 1. Copy this file to your working directory.
+# 2. Fill in the fields below with your model's information.
+# 3. Ensure your prediction dataset is accessible at the specified path.
+# 4. Run the submission:
+#
+#      python -m dc.submit validate /path/to/your_model.zarr \
+#          --model-name "YourModel" --config dc2
+#
+#      python -m dc.submit run /path/to/your_model.zarr \
+#          --model-name "YourModel" --data-directory ./output
+#
+# QUICK START — Generate a sample dataset to test the pipeline:
+#
+#      python scripts/create_sample_submission.py -o /tmp/sample.zarr
+#      dc-submit validate /tmp/sample.zarr --model-name SampleModel
+#
+# PARTIAL SUBMISSION — Submit only a subset of variables (e.g. SSH only):
+#
+#      dc-submit validate /path/to/model.zarr --model-name MyModel \
+#          --variables zos
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# A. Model Metadata
+# -----------------------------------------------------------------------------
+
+model_name: "my_ocean_model"          # Short name (no spaces, used in filenames)
+model_description: >-
+  Global 1/4° ocean forecasting model producing 10-day SSH, temperature,
+  salinity and current velocity predictions. Built using [framework].
+team_name: "My Research Lab"
+contact_email: "researcher@example.com"
+model_url: "https://github.com/mylab/my-ocean-model"
+
+# -----------------------------------------------------------------------------
+# B. Prediction Dataset
+# -----------------------------------------------------------------------------
+# Path to your model output. Accepted layouts:
+#
+#   1. SINGLE ZARR STORE — one .zarr directory covering the full year.
+#      data_path: "/data/my_model_output.zarr"
+#
+#   2. SINGLE NETCDF FILE — one .nc file covering the full year.
+#      data_path: "/data/my_model_output.nc"
+#
+#   3. DIRECTORY OF PER-DATE FILES (recommended for large models)
+#      — one .zarr or .nc file per forecast init date (e.g. 52 files at
+#      7-day intervals, or 365 files for daily forecasts).
+#      data_path: "/data/my_model_output/"
+#      where the directory contains:
+#        20240103.zarr/  20240110.zarr/  20240117.zarr/  …
+#      or:
+#        20240103.nc  20240110.nc  20240117.nc  …
+#      Date extraction is based on YYYYMMDD in the filename.
+#
+#   4. GLOB PATTERN — e.g. "/data/outputs/forecast_*.nc"
+#      data_path: "/data/outputs/forecast_*.nc"
+#
+# Your data MUST conform to the DC2 specification described below.
+data_path: "/path/to/your_model_output/"
+
+# -----------------------------------------------------------------------------
+# C. DC2 Dataset Specification (DO NOT MODIFY)
+# -----------------------------------------------------------------------------
+# Your prediction dataset must satisfy ALL of the following requirements.
+# Use `python -m dc.submit info --config dc2` to display the full specification.
+#
+# TEMPORAL:
+#   - Period:   2024-01-01 to 2025-01-01
+#   - Forecast: 10-day horizon (lead times: 0..9 days)
+#   - Interval: metrics computed every 7 days
+#
+# SPATIAL GRID:
+#   - Latitude:  -78° to  90°, step 0.25° (672 points)
+#   - Longitude: -180° to 180°, step 0.25° (1440 points)
+#   - Depth: 21 standard levels from 0.49m to 5274.78m:
+#       [0.494, 47.374, 92.326, 155.851, 222.475, 318.127, 380.213,
+#        453.938, 541.089, 643.567, 763.333, 902.339, 1245.291,
+#        1684.284, 2225.078, 3220.820, 3597.032, 3992.484,
+#        4405.224, 4833.291, 5274.784]
+#
+# REQUIRED VARIABLES (use one of the accepted names):
+#   - Sea Surface Height:  zos, ssh, ssha
+#   - Temperature:         thetao, temperature
+#   - Salinity:            so, salinity
+#   - Eastward velocity:   uo, u, u_current
+#   - Northward velocity:  vo, v, v_current
+#
+# COORDINATE NAMING:
+#   - Latitude:  lat, latitude
+#   - Longitude: lon, longitude
+#   - Depth:     depth, lev, deptht
+#   - Time:      time, valid_time, forecast_time, lead_time
+#
+# DATA FORMAT:
+#   - Float32 or Float64 (no integer encoding for physical variables)
+#   - NaN fraction must be < 10% per variable
+#   - Zarr format strongly recommended (chunked by time/depth for Dask)
+#
+# EXAMPLE DATA STRUCTURES:
+#
+#   Option A — Single Zarr store:
+#     my_model.zarr/
+#     ├-- .zmetadata
+#     ├-- lat/           # shape: (672,)
+#     ├-- lon/           # shape: (1440,)
+#     ├-- depth/         # shape: (21,)
+#     ├-- time/          # shape: (N,) — datetime64 axis covering the full year
+#     ├-- zos/           # shape: (N, 672, 1440)
+#     ├-- thetao/        # shape: (N, 21, 672, 1440)
+#     ├-- so/            # shape: (N, 21, 672, 1440)
+#     ├-- uo/            # shape: (N, 21, 672, 1440)
+#     └-- vo/            # shape: (N, 21, 672, 1440)
+#
+#   Option B — Directory of per-date Zarr stores (recommended):
+#     my_model_output/
+#     ├-- 20240103.zarr/   # one 10-day forecast (time dim = lead_time [0..9])
+#     ├-- 20240110.zarr/
+#     ├-- 20240117.zarr/
+#     │   ├-- lat/  lon/  depth/  time/
+#     │   ├-- zos/  thetao/  so/  uo/  vo/
+#     │   └-- .zmetadata
+#     └-- …               # 52 stores total (every 7 days over 2024)
+#
+#   Option C — Directory of per-date NetCDF files:
+#     my_model_output/
+#     ├-- 20240103.nc
+#     ├-- 20240110.nc
+#     └-- …
+
+# -----------------------------------------------------------------------------
+# D. Evaluation Settings (optional overrides)
+# -----------------------------------------------------------------------------
+
+# Override the DC config used for evaluation (default: dc2)
+dc_config: "dc2"
+
+# Maximum tolerated NaN fraction per variable (default: 0.10)
+max_nan_fraction: 0.10
+
+# Output directory for evaluation results (default: ./output)
+# data_directory: "./output"

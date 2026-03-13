@@ -11,6 +11,7 @@ from dctools.metrics.evaluator import (
     _parse_memory_limit,
     Evaluator,
 )
+from dctools.utilities.parallelism import ParallelismConfig
 
 
 # =====================================================================
@@ -45,6 +46,7 @@ def _make_evaluator(
     evaluator.metrics = []
     evaluator.dataloader = MagicMock()
     evaluator.dask_cfgs_by_dataset = dask_cfgs or {}
+    evaluator.pcfg = ParallelismConfig()
     evaluator.reduce_precision = False
     evaluator.restart_workers_per_batch = False
     evaluator.restart_frequency = 1

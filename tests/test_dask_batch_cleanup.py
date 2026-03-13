@@ -101,6 +101,10 @@ def test_batch_cleanup_cancels_with_force_and_runs_worker_cleanup(monkeypatch):
     evaluator.results_dir = "/tmp"
     evaluator.dataloader = SimpleNamespace(ref_managers={}, pred_manager=None, pred_alias="pred")
 
+    # ParallelismConfig is required by _evaluate_batch (pcfg.reduce_precision, etc.)
+    from dctools.utilities.parallelism import ParallelismConfig
+    evaluator.pcfg = ParallelismConfig()
+
     # Avoid actually running compute_metric in this unit test.
     monkeypatch.setattr(ev, "compute_metric", lambda *a, **k: {"duration_s": 0.1, "n_points": 1})
 

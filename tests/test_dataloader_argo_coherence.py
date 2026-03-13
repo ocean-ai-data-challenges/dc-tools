@@ -29,7 +29,7 @@ def test_argo_preprocess_skips_first_file_probe(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "dctools.data.datasets.dataloader.preprocess_argo_profiles",
+        "dctools.data.datasets.observation_viewer.preprocess_argo_profiles",
         fake_preprocess_argo_profiles,
     )
 
@@ -91,7 +91,7 @@ def test_monthly_sources_use_kerchunk_window_open(monkeypatch):
     fake_manager = FakeArgoManager()
 
     monkeypatch.setattr(
-        "dctools.data.datasets.dataloader.ArgoManager",
+        "dctools.data.datasets.preprocessing.ArgoManager",
         FakeArgoManager,
     )
 

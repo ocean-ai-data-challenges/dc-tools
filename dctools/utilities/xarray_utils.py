@@ -341,54 +341,6 @@ def reset_time_coordinates(dataset: xr.Dataset) -> xr.Dataset:
     dataset = dataset.assign_coords(time=new_time_values)
     return dataset
 
-def preview_display_dataset(ds, variables=None, max_values=500000):
-    """
-    Display a summary of the dataset handling memory constraints.
-
-    Prints dimensions, coordinates, and variable stats.
-    """
-    print("DATASET SUMMARY")
-    print("=" * 50)
-    print(f"Dimensions: {ds.dims}")
-    print(f"Coordinates: {ds.coords}")
-    print(f"Variables: {ds.data_vars}")
-    print(f"Total size: {ds.nbytes / 1e6:.2f} MB")
-
-    print("\nDIMENSIONS:")
-    for dim, size in ds.dims.items():
-        print(f"  {dim}: {size}")
-
-    print("\nCOORDINATES:")
-    for coord_name, coord in ds.coords.items():
-        print(f"  {coord_name}: {coord.shape} {coord.dtype}")
-        if coord.size <= max_values:
-            if coord.size <= 20:
-                print(f"    Values: {coord.values}")
-            else:
-                print(f"    First values: {coord.values[:5]}...")
-                print(f"    Last values: ...{coord.values[-5:]}")
-
-    print("\nVARIABLES:")
-    if variables is not None:
-        display_variables = variables
-    else:
-        display_variables = list(ds.data_vars)
-    for var_name, var in ds.data_vars.items():
-        if var_name not in display_variables:
-            continue
-        print(f"  {var_name}: {var.dims} {var.shape} {var.dtype}")
-
-        try:
-            # Afficher quelques statistiques
-            if np.issubdtype(var.dtype, np.number):
-                valid_data = var
-                if valid_data.size > 0:
-                    print(f"    Min: {float(valid_data.min()):.3f}")
-                    print(f"    Max: {float(valid_data.max()):.3f}")
-                    print(f"    Mean: {float(valid_data.mean()):.3f}")
-        except Exception as e:
-            print(f"    (Error calculating stats: {e})")
-
 
 def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
     """

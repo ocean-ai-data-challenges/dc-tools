@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover
     DatasetProcessor = Any
 from scipy.interpolate import RegularGridInterpolator
 
-from dctools.data.coordinates import GEO_STD_COORDS
+from dctools.utilities.coordinates import GEO_STD_COORDS
 from dctools.utilities.xarray_utils import rename_coords_and_vars, create_empty_dataset
 
 

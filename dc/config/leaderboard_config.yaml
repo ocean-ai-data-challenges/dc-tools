@@ -33,7 +33,7 @@ texts:
 
 # -----------------------------------------------------------------------------
 # B. Metric display names
-# Map internal metric key → human-readable label shown in the leaderboard tables.
+# Map internal metric key --> human-readable label shown in the leaderboard tables.
 # Only metrics listed here are renamed; others keep their original names.
 # -----------------------------------------------------------------------------
 metrics_names:
@@ -46,7 +46,7 @@ metrics_names:
 
 # -----------------------------------------------------------------------------
 # C. Variable display names
-# Map internal variable name → human-readable label shown in the column headers.
+# Map internal variable name --> human-readable label shown in the column headers.
 # -----------------------------------------------------------------------------
 variables_names:
   ssh: "Sea Surface Height (SSH)"
@@ -65,7 +65,7 @@ variables_names:
 
 # -----------------------------------------------------------------------------
 # D. Model / dataset display names
-# Map internal model identifier → human-readable name shown in the row labels.
+# Map internal model identifier --> human-readable name shown in the row labels.
 # -----------------------------------------------------------------------------
 models_names:
   glonet: "GloNet (reference)"

@@ -34,7 +34,7 @@ except Exception as exc:  # pragma: no cover
 import xarray as xr  # noqa: E402
 from loguru import logger  # noqa: E402
 
-from dctools.data.coordinates import (  # noqa: E402
+from dctools.utilities.coordinates import (  # noqa: E402
     COORD_ALIASES,
     EVAL_VARIABLES_GLONET,
     GLOBAL_ZONE_COORDINATES,
@@ -252,7 +252,7 @@ class OceanbenchMetrics(DCMetric):
 
         if self.is_class4:
             try:
-                # ── Promote lat/lon/time to coordinates for obs datasets ──
+                # -- Promote lat/lon/time to coordinates for obs datasets --
                 # ARGO observation data has lat/lon/time as data_vars, not
                 # as coordinates.  Class4Evaluator accesses individual
                 # DataArrays via obs_ds[var], and only *coordinates* carry
@@ -268,7 +268,7 @@ class OceanbenchMetrics(DCMetric):
                 if promote:
                     ref_data = ref_data.set_coords(promote)  # type: ignore[union-attr]
 
-                # ── Harmonize variable names between datasets ──
+                # -- Harmonize variable names between datasets --
                 # Class4Evaluator.run() uses the same variable name to
                 # index into *both* model_ds and obs_ds.  When prediction
                 # and observation datasets use different names for the

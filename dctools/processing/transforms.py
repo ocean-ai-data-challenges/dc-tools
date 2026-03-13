@@ -27,7 +27,7 @@ from dctools.processing.interpolation import (
     interpolate_dataset,
 )
 
-from dctools.data.coordinates import get_target_dimensions, get_target_depth_values
+from dctools.utilities.coordinates import get_target_dimensions, get_target_depth_values
 
 
 def detect_and_normalize_longitude_system(ds: xr.Dataset, lon_name: str = "lon") -> xr.Dataset:
@@ -39,7 +39,7 @@ def detect_and_normalize_longitude_system(ds: xr.Dataset, lon_name: str = "lon")
     # Check that the longitude coordinate exists
     if lon_name not in ds.dims and lon_name not in ds.coords and lon_name not in ds.data_vars:
         logger.warning(f"Longitude coordinate '{lon_name}' not found in dataset")
-        from dctools.utilities.xarray_utils import preview_display_dataset
+        from dctools.debug.debug_utils import preview_display_dataset
 
         preview_display_dataset(ds)
         return ds

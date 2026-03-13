@@ -377,7 +377,7 @@ class TestEstimateResolution:
 
     def test_geographic(self):
         """Regular geographic grid → lat/lon resolution."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
 
         lat = np.linspace(0, 10, 11)  # 1° spacing
         lon = np.linspace(0, 20, 21)  # 1° spacing
@@ -395,7 +395,7 @@ class TestEstimateResolution:
 
     def test_single_point(self):
         """Single lat/lon value → returns the value itself."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
 
         ds = xr.Dataset(
             {"ssh": (["latitude", "longitude"], np.zeros((1, 1)))},
@@ -408,7 +408,7 @@ class TestEstimateResolution:
 
     def test_temporal_resolution(self):
         """Time coords → temporal resolution in seconds."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
 
         times = pd.date_range("2025-01-01", periods=5, freq="6h")
         lat = np.linspace(0, 10, 3)
@@ -482,7 +482,7 @@ class TestOpenDispatch:
         ds = mgr.open_remote("s3://bucket/file.nc")
         assert ds is None
         # And a .zarr would try FileLoader (mock it)
-        with patch("dctools.dcio.loader.FileLoader.open_dataset_auto", return_value=expected):
+        with patch("dctools.data.datasets.loader.FileLoader.open_dataset_auto", return_value=expected):
             ds = mgr.open_remote("s3://bucket/file.zarr")
             assert ds is not None
 
@@ -735,7 +735,7 @@ class TestLocalConnectionManagerOpenFull:
 
     def test_extract_metadata_with_mock_open(self, tmp_path):
         """extract_metadata returns a CatalogEntry."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
 
         nc_path = _make_nc(tmp_path)
         ds = xr.open_dataset(nc_path, engine="scipy")

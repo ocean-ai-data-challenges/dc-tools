@@ -9,10 +9,10 @@ Coverage targets
 ----------------
 - dctools.metrics.metrics         MetricComputer.__init__, compute()
 - dctools.metrics.oceanbench_metrics  OceanbenchMetrics, compute_metric()
-- dctools.data.transforms         CustomTransforms, get_dataset_transform(),
+- dctools.processing.transforms   CustomTransforms, get_dataset_transform(),
                                   InterpolationTransform (partially),
                                   multiple @register_transform classes
-- dctools.data.coordinates        CoordinateSystem, get_target_dimensions,
+- dctools.utilities.coordinates   CoordinateSystem, get_target_dimensions,
                                   get_target_depth_values, is_observation_dataset
 - dctools.utilities.misc_utils    to_float32, add_noise_with_snr,
                                   deep_copy_object, serialize_*
@@ -32,7 +32,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from dctools.data.coordinates import CoordinateSystem
+from dctools.utilities.coordinates import CoordinateSystem
 
 try:
     from oceanbench.core.rmsd import Variable  # noqa: F401
@@ -438,7 +438,7 @@ class TestTransformPipeline:
 
     def test_standardize_pipeline(self):
         """Build a 'standardize' pipeline and apply it to a dataset."""
-        from dctools.data.transforms import get_dataset_transform
+        from dctools.processing.transforms import get_dataset_transform
 
         processor = _FakeDatasetProcessor()
         metadata = {
@@ -463,7 +463,7 @@ class TestTransformPipeline:
 
     def test_standardize_to_surface_pipeline(self):
         """Build a 'standardize_to_surface' pipeline."""
-        from dctools.data.transforms import get_dataset_transform
+        from dctools.processing.transforms import get_dataset_transform
 
         processor = _FakeDatasetProcessor()
         metadata = {
@@ -486,7 +486,7 @@ class TestTransformPipeline:
 
     def test_standardize_add_coords_pipeline(self):
         """Build a 'standardize_add_coords' pipeline (EPSG 3413)."""
-        from dctools.data.transforms import get_dataset_transform
+        from dctools.processing.transforms import get_dataset_transform
 
         processor = _FakeDatasetProcessor()
         # Need n_points dim for EPSG3413 transform
@@ -509,7 +509,7 @@ class TestTransformPipeline:
 
     def test_unknown_transform_name_warns(self):
         """An unrecognised transform_name should produce a warning but not crash."""
-        from dctools.data.transforms import get_dataset_transform
+        from dctools.processing.transforms import get_dataset_transform
 
         processor = _FakeDatasetProcessor()
         metadata = {"keep_vars": ["ssh"], "coords_rename_dict": {}, "vars_rename_dict": {}}
@@ -524,7 +524,7 @@ class TestTransformPipeline:
 
     def test_custom_transforms_match_dispatch(self):
         """CustomTransforms match-case dispatch for legacy transform names."""
-        from dctools.data.transforms import CustomTransforms
+        from dctools.processing.transforms import CustomTransforms
 
         processor = _FakeDatasetProcessor()
         # "rename_subset_vars" renames *coordinates*, then subsets variables
@@ -543,7 +543,7 @@ class TestTransformPipeline:
 
     def test_custom_transforms_standardize_dataset(self):
         """CustomTransforms standardize_dataset path."""
-        from dctools.data.transforms import CustomTransforms
+        from dctools.processing.transforms import CustomTransforms
 
         processor = _FakeDatasetProcessor()
         ct = CustomTransforms(
@@ -560,7 +560,7 @@ class TestTransformPipeline:
 
     def test_custom_transforms_unknown_name_passthrough(self):
         """Unknown transform_name returns dataset unchanged."""
-        from dctools.data.transforms import CustomTransforms
+        from dctools.processing.transforms import CustomTransforms
 
         processor = _FakeDatasetProcessor()
         ct = CustomTransforms(
@@ -583,7 +583,7 @@ class TestRegisteredTransforms:
 
     def test_to_timestamp_transform(self):
         """ToTimestampTransform converts numeric time to datetime."""
-        from dctools.data.transforms import ToTimestampTransform
+        from dctools.processing.transforms import ToTimestampTransform
 
         times = pd.date_range("2025-01-01", periods=3, freq="1D")
         ds = _make_gridded_ds(times, var_name="ssh", seed=12)
@@ -593,7 +593,7 @@ class TestRegisteredTransforms:
 
     def test_wrap_longitude_transform_grid(self):
         """WrapLongitudeTransform on a gridded dataset with [0, 360] lons."""
-        from dctools.data.transforms import WrapLongitudeTransform
+        from dctools.processing.transforms import WrapLongitudeTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         lon_360 = np.array([0.0, 90.0, 180.0, 270.0, 350.0], dtype=np.float64)
@@ -606,7 +606,7 @@ class TestRegisteredTransforms:
 
     def test_wrap_longitude_transform_obs(self):
         """WrapLongitudeTransform on an observation dataset (non-dimension coord)."""
-        from dctools.data.transforms import WrapLongitudeTransform
+        from dctools.processing.transforms import WrapLongitudeTransform
 
         obs = _make_obs_ds(n_points=10, var_name="ssh", seed=14)
         # Shift some longitudes to [0, 360] range
@@ -617,7 +617,7 @@ class TestRegisteredTransforms:
 
     def test_to_surface_transform(self):
         """ToSurfaceTransform selects first depth level."""
-        from dctools.data.transforms import ToSurfaceTransform
+        from dctools.processing.transforms import ToSurfaceTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         depth = np.array([0.0, 10.0, 50.0], dtype=np.float64)
@@ -628,7 +628,7 @@ class TestRegisteredTransforms:
 
     def test_to_surface_no_depth(self):
         """ToSurfaceTransform with no depth dim returns dataset unchanged."""
-        from dctools.data.transforms import ToSurfaceTransform
+        from dctools.processing.transforms import ToSurfaceTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         ds = _make_gridded_ds(times, var_name="ssh", seed=16)
@@ -638,7 +638,7 @@ class TestRegisteredTransforms:
 
     def test_subset_coord_transform_lat(self):
         """SubsetCoordTransform filters by latitude."""
-        from dctools.data.transforms import SubsetCoordTransform
+        from dctools.processing.transforms import SubsetCoordTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         lat = np.array([0.0, 0.5, 1.0, 1.5, 2.0], dtype=np.float64)
@@ -649,7 +649,7 @@ class TestRegisteredTransforms:
 
     def test_subset_coord_transform_time(self):
         """SubsetCoordTransform filters by time."""
-        from dctools.data.transforms import SubsetCoordTransform
+        from dctools.processing.transforms import SubsetCoordTransform
 
         times = pd.date_range("2025-01-01", periods=5, freq="1D")
         ds = _make_gridded_ds(times, var_name="ssh", seed=18)
@@ -660,7 +660,7 @@ class TestRegisteredTransforms:
 
     def test_subset_coord_transform_depth(self):
         """SubsetCoordTransform filters by depth (approximate matching)."""
-        from dctools.data.transforms import SubsetCoordTransform
+        from dctools.processing.transforms import SubsetCoordTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         depth = np.array([0.0, 10.0, 50.0, 100.0], dtype=np.float64)
@@ -671,7 +671,7 @@ class TestRegisteredTransforms:
 
     def test_subset_coord_unknown_dim(self):
         """SubsetCoordTransform with unknown coord raises AssertionError."""
-        from dctools.data.transforms import SubsetCoordTransform
+        from dctools.processing.transforms import SubsetCoordTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         ds = _make_gridded_ds(times, var_name="ssh", seed=20)
@@ -681,7 +681,7 @@ class TestRegisteredTransforms:
 
     def test_std_percentage_transform(self):
         """StdPercentageTransform converts 0-100 to 0-1."""
-        from dctools.data.transforms import StdPercentageTransform
+        from dctools.processing.transforms import StdPercentageTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         lat = np.array([0.0, 1.0])
@@ -697,7 +697,7 @@ class TestRegisteredTransforms:
 
     def test_std_percentage_already_01(self):
         """StdPercentageTransform warns if already in 0-1 range."""
-        from dctools.data.transforms import StdPercentageTransform
+        from dctools.processing.transforms import StdPercentageTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         lat = np.array([0.0, 1.0])
@@ -714,7 +714,7 @@ class TestRegisteredTransforms:
 
     def test_std_percentage_missing_var(self):
         """StdPercentageTransform with missing variable skips gracefully."""
-        from dctools.data.transforms import StdPercentageTransform
+        from dctools.processing.transforms import StdPercentageTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         ds = _make_gridded_ds(times, var_name="ssh", seed=21)
@@ -725,7 +725,7 @@ class TestRegisteredTransforms:
 
     def test_std_longitude_transform(self):
         """StdLongitudeTransform normalises [0,360] to [-180,180]."""
-        from dctools.data.transforms import StdLongitudeTransform
+        from dctools.processing.transforms import StdLongitudeTransform
 
         times = pd.date_range("2025-01-01", periods=1, freq="1D")
         lon_360 = np.array([0.0, 90.0, 180.0, 270.0, 350.0], dtype=np.float64)
@@ -737,7 +737,7 @@ class TestRegisteredTransforms:
 
     def test_reset_time_coords_transform(self):
         """ResetTimeCoordsTransform resets time values to sequential integers."""
-        from dctools.data.transforms import ResetTimeCoordsTransform
+        from dctools.processing.transforms import ResetTimeCoordsTransform
 
         times = pd.date_range("2025-01-01", periods=3, freq="1D")
         ds = _make_gridded_ds(times, var_name="ssh", seed=23)

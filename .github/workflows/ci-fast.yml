@@ -1,0 +1,53 @@
+name: CI Fast
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - develop
+
+concurrency:
+  group: ci-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-checks:
+    name: Lint + Types + Fast Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Configure Poetry
+        run: |
+          poetry config virtualenvs.in-project true
+
+      - name: Cache virtualenv and Poetry cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.cache/pypoetry
+          key: ${{ runner.os }}-py311-${{ hashFiles('poetry.lock', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py311-
+
+      - name: Install dependencies
+        run: |
+          poetry install --with dev --without docs,custom
+
+      - name: Run fast pipeline
+        run: |
+          poetry run poe all

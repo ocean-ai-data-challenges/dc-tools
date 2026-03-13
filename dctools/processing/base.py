@@ -36,7 +36,7 @@ from loguru import logger
 from oceanbench.core.distributed import DatasetProcessor
 from shapely import geometry
 
-from dctools.data.coordinates import (
+from dctools.utilities.coordinates import (
     get_standardized_var_name,
     get_target_depth_values,
     get_target_dimensions,
@@ -50,7 +50,8 @@ from dctools.metrics.metrics import MetricComputer
 from dctools.metrics.oceanbench_metrics import get_variable_alias
 from dctools.utilities.file_utils import empty_folder
 from dctools.utilities.init_dask import configure_dask_logging, configure_dask_workers_env
-from dctools.utilities.misc_utils import make_serializable, nan_to_none, transform_in_place
+from dctools.utilities.parallelism import ParallelismConfig
+from dctools.utilities.misc_utils import display_width, make_serializable, nan_to_none, transform_in_place
 
 import dcleaderboard as _dcleaderboard
 warnings.simplefilter("ignore", UserWarning)
@@ -64,6 +65,10 @@ class BaseDCEvaluation:
     - create `self.dataset_processor` as needed
     - implement a `run_eval()` method
     """
+
+    #: Human-readable challenge name shown in the evaluation summary banner.
+    #: Override in subclasses, e.g. ``CHALLENGE_NAME = "DC2"``.
+    CHALLENGE_NAME: str = "DC"
 
     def __init__(self, arguments: Namespace) -> None:
         self.args = arguments
@@ -79,18 +84,37 @@ class BaseDCEvaluation:
         # generated but incomplete (e.g. maps.html skipped) or failed entirely.
         self._leaderboard_warnings: List[str] = []
 
+        # Centralised parallelism config (built by load_args_and_config).
+        self.pcfg: ParallelismConfig = ParallelismConfig.from_args(self.args)
+
+        # Adaptive resource detection: detect the machine once, adapt the
+        # parallelism profile, and store both for later use by per-dataset
+        # Dask sizing.
+        self._reference_machine_dict = getattr(self.args, "reference_machine", None)
+        self._machine_resources = None
+        if self.pcfg.auto_adapt:
+            from dctools.utilities.adaptive_resources import MachineResources
+            self._machine_resources = MachineResources.detect()
+            self.pcfg = self.pcfg.adapt_profile(
+                machine=self._machine_resources,
+                reference_machine_dict=self._reference_machine_dict,
+            )
+            logger.info(
+                f"Adaptive mode ON: machine={self._machine_resources.cpu_count}cpu/"
+                f"{self._machine_resources.total_ram_gb:.0f}GB, "
+                f"usable={self._machine_resources.usable_cpus}cpu/"
+                f"{self._machine_resources.usable_ram_gb:.1f}GB, "
+                f"profile scale={self.pcfg.worker_scale}"
+            )
+        else:
+            logger.info(
+                f"Adaptive mode OFF: using static worker_scale={self.pcfg.worker_scale}"
+            )
+
         configure_dask_logging()
 
-        # Safe defaults for large datasets: start spilling earlier to reduce
-        # OOM/pause cascades. Subclasses can override if needed.
-        dask.config.set(
-            {
-                "distributed.worker.memory.target": 0.60,
-                "distributed.worker.memory.spill": 0.70,
-                "distributed.worker.memory.pause": 0.90,
-                "distributed.worker.memory.terminate": 0.95,
-            }
-        )
+        # Apply Dask memory thresholds from centralised config.
+        dask.config.set(self.pcfg.dask_memory_config())
 
     # ---------------------------------------------------------------------
     # Dask sizing helpers (agnostic)
@@ -101,6 +125,10 @@ class BaseDCEvaluation:
         Supports both a nested `dask:` block and flat keys:
         - n_parallel_workers / nthreads_per_worker / memory_limit_per_worker
         - n_workers / threads_per_worker / memory_limit
+
+        When ``auto_adapt`` is enabled in the parallelism config, the YAML
+        values are treated as *indicative* (calibrated for a reference machine)
+        and scaled proportionally to the current machine's resources.
         """
         if not isinstance(source, dict):
             return None
@@ -125,14 +153,21 @@ class BaseDCEvaluation:
         if n_workers is None and threads_per_worker is None and memory_limit is None:
             return None
 
-        cfg: Dict[str, Any] = {}
+        # Build a normalized dict for the adaptive system.
+        normalized: Dict[str, Any] = {}
         if n_workers is not None:
-            cfg["n_workers"] = int(n_workers)
+            normalized["n_workers"] = int(n_workers)
         if threads_per_worker is not None:
-            cfg["threads_per_worker"] = int(threads_per_worker)
+            normalized["threads_per_worker"] = int(threads_per_worker)
         if memory_limit is not None:
-            cfg["memory_limit"] = memory_limit
-        return cfg
+            normalized["memory_limit"] = memory_limit
+
+        # Delegate to the adaptive or legacy scaling logic.
+        return self.pcfg.adapt_dask_cfg_for_dataset(
+            yaml_cfg=normalized,
+            machine=self._machine_resources,
+            reference_machine_dict=self._reference_machine_dict,
+        )
 
     def _build_dask_cfgs_by_dataset(self) -> Dict[str, Dict[str, Any]]:
         cfgs: Dict[str, Dict[str, Any]] = {}
@@ -226,7 +261,7 @@ class BaseDCEvaluation:
         dataset_processor = getattr(self, "dataset_processor", None)
         if not dataset_processor or not getattr(dataset_processor, "client", None):
             return
-        configure_dask_workers_env(dataset_processor.client)
+        configure_dask_workers_env(dataset_processor.client, self.pcfg)
 
     # ---------------------------------------------------------------------
     # Generic reusable evaluation helpers
@@ -306,8 +341,27 @@ class BaseDCEvaluation:
             pass
 
     # ------------------------------------------------------------------
+    # Dataset-references helpers
+    # ------------------------------------------------------------------
+    def _build_all_datasets(self) -> None:
+        """Compute ``self.all_datasets`` from ``self.dataset_references``.
+
+        Call from the subclass ``__init__`` immediately after setting
+        ``self.dataset_references``.  Produces the flat, deduplicated list of
+        every dataset name (model keys + reference values) needed by the
+        evaluation pipeline.
+        """
+        refs: Dict[str, Any] = getattr(self, "dataset_references", {})
+        self.all_datasets: List[str] = list(
+            set(
+                list(refs.keys())
+                + [item for sublist in refs.values() for item in sublist]
+            )
+        )
+
+    # ------------------------------------------------------------------
     # Dask cluster initialisation (call from subclass __init__ after
-    # setting self.dataset_references and self.all_datasets)
+    # calling _build_all_datasets())
     # ------------------------------------------------------------------
     def _init_cluster(self) -> None:
         """Spin up the Dask DatasetProcessor for this evaluation run."""
@@ -317,17 +371,6 @@ class BaseDCEvaluation:
         n_parallel_workers = int(_initial_cfg.get("n_workers", 1))
         nthreads_per_worker = int(_initial_cfg.get("threads_per_worker", 1))
 
-        # Cap worker count to batch_size to avoid idle workers.
-        _batch_size = getattr(self.args, "batch_size", None)
-        if isinstance(_batch_size, int) and _batch_size > 0:
-            if n_parallel_workers > _batch_size:
-                logger.info(
-                    "Capping n_parallel_workers from "
-                    f"{n_parallel_workers} to {_batch_size} "
-                    f"(batch_size={_batch_size}) to avoid idle workers."
-                )
-                n_parallel_workers = _batch_size
-
         logger.info(
             f"Init DatasetProcessor with: Workers={n_parallel_workers}, "
             f"Threads={nthreads_per_worker}, MemLimit={memory_limit_per_worker}"
@@ -335,12 +378,24 @@ class BaseDCEvaluation:
 
         self._configure_thread_caps_env(threads="1")
 
-        self.dataset_processor = DatasetProcessor(
-            distributed=True,
-            n_workers=n_parallel_workers,
-            threads_per_worker=nthreads_per_worker,
-            memory_limit=memory_limit_per_worker,
-        )
+        _proc_kwargs: Dict[str, Any] = {
+            "distributed": True,
+            "n_workers": n_parallel_workers,
+            "threads_per_worker": nthreads_per_worker,
+            "memory_limit": memory_limit_per_worker,
+        }
+        # DatasetProcessor creates its own tempdir via tempfile.mkdtemp().
+        # Override tempfile.tempdir so the scratch dir lands on a fast local
+        # disk instead of a potentially slow NFS-mounted TMPDIR.
+        import tempfile as _tempfile
+        _old_tempdir = _tempfile.tempdir
+        if self.pcfg.dask_tmp_dir:
+            os.makedirs(self.pcfg.dask_tmp_dir, exist_ok=True)
+            _tempfile.tempdir = self.pcfg.dask_tmp_dir
+        try:
+            self.dataset_processor = DatasetProcessor(**_proc_kwargs)
+        finally:
+            _tempfile.tempdir = _old_tempdir
 
         self._configure_dataset_processor_workers()
 
@@ -355,7 +410,7 @@ class BaseDCEvaluation:
         """Configure and return the transform dict for all *aliases*."""
         transforms_dict = {}
         for alias in aliases:
-            kwargs: Dict[str, Any] = {"reduce_precision": self.args.reduce_precision}
+            kwargs: Dict[str, Any] = {"reduce_precision": self.pcfg.reduce_precision}
             # Some datasets need regridder weights (e.g. glorys interpolation).
             regridder_weights = getattr(self.args, "regridder_weights", None)
             if regridder_weights is not None and alias == "glorys_cmems":
@@ -778,10 +833,109 @@ class BaseDCEvaluation:
             )
 
     # ------------------------------------------------------------------
+    # Evaluation summary banner (shared by all challenge subclasses)
+    # ------------------------------------------------------------------
+
+    def _box_line(self, text: str, width: int, center: bool = False) -> str:
+        """Format *text* inside ``║ … ║`` with exact *width* inner display columns."""
+        vis = display_width(text)
+        if center:
+            total_pad = width - vis
+            left = total_pad // 2
+            right = total_pad - left
+            return f"║{' ' * left}{text}{' ' * right}║"
+        pad = width - 2 - vis  # 2 leading spaces
+        return f"║  {text}{' ' * max(pad, 0)}║"
+
+    def _print_eval_summary(self) -> None:
+        """Print a Unicode-box summary of the upcoming evaluation run.
+
+        Called automatically at the start of :meth:`run_eval`.  Override or
+        set ``CHALLENGE_NAME`` on the subclass to customise the banner.
+        """
+        W = 72  # inner width (between box borders)
+        TOP = f"╔{'═' * W}╗"
+        BOT = f"╚{'═' * W}╝"
+        SEP = f"╟{'─' * W}╢"
+        BLANK = f"║{' ' * W}║"
+
+        ln = lambda text="", center=False: self._box_line(text, W, center)  # noqa: E731
+
+        rows: List[str] = [TOP, BLANK]
+        rows.append(ln(f"🌊  {self.CHALLENGE_NAME} — EVALUATION SUMMARY", center=True))
+        rows.append(BLANK)
+        rows.append(SEP)
+
+        # Time window
+        start = getattr(self.args, "start_time", "?")
+        end = getattr(self.args, "end_time", "?")
+        forecast = getattr(self.args, "n_days_forecast", "?")
+        interval = getattr(self.args, "n_days_interval", "?")
+        rows.append(ln(f"📅  Period          {start}  -->  {end}"))
+        rows.append(ln(f"    Forecast        {forecast} days   ·   Interval  {interval} days"))
+        rows.append(SEP)
+
+        # Models to evaluate
+        dataset_references: Dict[str, Any] = getattr(self, "dataset_references", {})
+        models = list(dataset_references.keys())
+        rows.append(ln(f"🔬  Models to evaluate ({len(models)})"))
+        for m in models:
+            refs = dataset_references[m]
+            rows.append(ln(f"    ▸ {m.upper()}"))
+            rows.append(ln(f"      vs {len(refs)} reference(s): {', '.join(refs)}"))
+        rows.append(SEP)
+
+        # All datasets
+        all_ds: List[str] = getattr(self, "all_datasets", [])
+        rows.append(ln(f"📦  Total datasets loaded: {len(all_ds)}"))
+        max_text = W - 6  # 2 leading spaces + "    " prefix
+        ds_str = ", ".join(sorted(all_ds))
+        while ds_str:
+            chunk, ds_str = ds_str[:max_text], ds_str[max_text:]
+            if ds_str and not ds_str.startswith(",") and not chunk.endswith(","):
+                last_comma = chunk.rfind(",")
+                if last_comma > 0:
+                    ds_str = chunk[last_comma + 1:] + ds_str
+                    chunk = chunk[:last_comma + 1]
+            rows.append(ln(f"    {chunk.strip()}"))
+        rows.append(SEP)
+
+        # Parallelisation — batch sizes per dataset type
+        # Global profile defaults (from parallelism: block in YAML)
+        _obs_bs = self.pcfg.obs_batch_size
+        _grid_bs = self.pcfg.gridded_batch_size
+
+        rows.append(ln(f"⚙️   Batch sizes"))
+        rows.append(ln(f"    Observation datasets  :  {_obs_bs} tasks/batch"))
+        rows.append(ln(
+            f"    Gridded datasets      :  {_grid_bs if _grid_bs is not None else '(no limit)'} tasks/batch"
+        ))
+
+        # Per-dataset overrides
+        sources: List[Dict[str, Any]] = getattr(self.args, "sources", [])
+        _overrides: List[str] = []
+        for _src in sources:
+            _ds = _src.get("dataset", "?")
+            _is_obs = _src.get("observation_dataset", False)
+            if _is_obs and _src.get("obs_batch_size") is not None:
+                _overrides.append(f"{_ds}: {_src['obs_batch_size']} (obs)")
+            elif not _is_obs and _src.get("gridded_batch_size") is not None:
+                _overrides.append(f"{_ds}: {_src['gridded_batch_size']} (gridded)")
+        if _overrides:
+            rows.append(ln(f"    Per-dataset overrides :  {', '.join(_overrides)}"))
+
+        rows.append(BLANK)
+        rows.append(BOT)
+
+        banner = "\n".join(rows)
+        logger.opt(colors=True).info(f"\n<bold>{banner}</bold>")
+
+    # ------------------------------------------------------------------
     # Full evaluation loop
     # ------------------------------------------------------------------
     def run_eval(self) -> None:
         """Run the full evaluation pipeline."""
+        self._print_eval_summary()
         all_datasets: List[str] = getattr(self, "all_datasets", [])
         dataset_references: Dict[str, Any] = getattr(self, "dataset_references", {})
 
@@ -943,7 +1097,7 @@ class BaseDCEvaluation:
                 if ref_alias in ref_transforms
             }
 
-            # ── Determine obs_batch_size ───────────────────────────────
+            # -- Determine obs_batch_size -------------------------------
             # Look for per-dataset obs_batch_size first, then global, then default.
             _obs_batch_size = None
             for _ref_alias in effective_references:
@@ -954,11 +1108,9 @@ class BaseDCEvaluation:
                     _obs_batch_size = int(_ref_src["obs_batch_size"])
                     break
             if _obs_batch_size is None:
-                _obs_batch_size = getattr(self.args, "obs_batch_size", None)
-                if _obs_batch_size is not None:
-                    _obs_batch_size = int(_obs_batch_size)
+                _obs_batch_size = self.pcfg.obs_batch_size
 
-            # ── Determine gridded_batch_size ───────────────────────────
+            # -- Determine gridded_batch_size ---------------------------
             # Per-reference gridded_batch_size overrides the global batch_size
             # for non-observation (gridded) reference datasets such as GLORYS.
             # A small value (e.g. 6) limits per-batch I/O + RAM pressure.
@@ -971,14 +1123,17 @@ class BaseDCEvaluation:
                     _gridded_batch_size = int(_ref_src["gridded_batch_size"])
                     break
             if _gridded_batch_size is None:
-                _gridded_batch_size = getattr(self.args, "gridded_batch_size", None)
-                if _gridded_batch_size is not None:
-                    _gridded_batch_size = int(_gridded_batch_size)
+                # Prefer the centralised parallelism profile value, then
+                # fall back to any legacy top-level YAML key on self.args.
+                _gridded_batch_size = self.pcfg.gridded_batch_size
+                if _gridded_batch_size is None:
+                    _gb = getattr(self.args, "gridded_batch_size", None)
+                    if _gb is not None:
+                        _gridded_batch_size = int(_gb)
 
             dataloaders[alias] = dataset_manager.get_dataloader(
                 pred_alias=alias,
                 ref_aliases=effective_references,
-                batch_size=self.args.batch_size,
                 obs_batch_size=_obs_batch_size,
                 gridded_batch_size=_gridded_batch_size,
                 pred_transform=pred_transform,
@@ -996,10 +1151,7 @@ class BaseDCEvaluation:
                 dataset_processor=self.dataset_processor,
                 dask_cfgs_by_dataset=self.dask_cfgs_by_dataset,
                 results_dir=results_files_dir,
-                reduce_precision=getattr(self.args, "reduce_precision", False),
-                restart_workers_per_batch=getattr(self.args, "restart_workers_per_batch", False),
-                restart_frequency=getattr(self.args, "restart_frequency", 1),
-                max_worker_memory_fraction=getattr(self.args, "max_worker_memory_fraction", 0.85),
+                parallelism=self.pcfg,
             )
             _n_pred_total = len(dataset_references)
             _n_pred_current = list(dataset_references.keys()).index(alias) + 1
@@ -1020,8 +1172,8 @@ class BaseDCEvaluation:
             except Exception:
                 pass
 
-            # ── Separator: evaluation done -> post-processing ──────────────
-            _sep_post = "─" * 68
+            # -- Separator: evaluation done -> post-processing --------------
+            _sep_post = "-" * 68
             logger.opt(colors=True).info(
                 f"\n┌{_sep_post}┐\n"
                 f"│<bold>{'  📦  POST-PROCESSING RESULTS  —  ' + alias.upper():^67}</bold>│\n"
@@ -1109,7 +1261,7 @@ class BaseDCEvaluation:
                         f"(JSONL, compact format)"
                     )
 
-                # ── Write results JSON before checking for errors ──────────
+                # -- Write results JSON before checking for errors ----------
                 # Writing first ensures partial results are never discarded
                 # even when a handful of tasks were cancelled by the watchdog.
                 with open(dataset_json_path, "w") as json_file:
@@ -1138,7 +1290,7 @@ class BaseDCEvaluation:
                     f"  └  Results saved  ->  {os.path.basename(dataset_json_path)}"
                 )
 
-                # ── Error threshold check ──────────────────────────────────
+                # -- Error threshold check ----------------------------------
                 # max_task_errors (int, default 0): tolerated number of
                 # individual task failures before the run is considered failed.
                 # Set a non-zero value in the YAML config to tolerate occasional
@@ -1200,7 +1352,7 @@ class BaseDCEvaluation:
             # dc2_output/results/) rather than __file__, because dctools may be
             # installed as a *separate* package (its own repo) so __file__ would
             # resolve to the dctools source tree instead of the user's DC project.
-            # results_directory → dc2_output/ → project root (parents[1]).
+            # results_directory --> dc2_output/ --> project root (parents[1]).
             _repo_root = Path(self.results_directory).resolve().parents[1]
             _docs_leaderboard = _repo_root / "docs" / "source" / "_extra" / "leaderboard"
             if (_repo_root / "docs").is_dir():

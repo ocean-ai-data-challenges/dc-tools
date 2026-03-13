@@ -219,7 +219,7 @@ class TestDaskPipelineGlonet:
         ref_cfg = _source_config("local", keep_variables=["zos"], eval_variables=["zos"])
 
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             fut = client.submit(
@@ -271,7 +271,7 @@ class TestDaskPipelineGlonet:
         ref_cfg = _source_config("local", keep_variables=["zos"], eval_variables=["zos"])
 
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             fut = client.submit(
@@ -331,7 +331,7 @@ class TestDaskPipelineGlorys:
         ref_cfg = _source_config("local", keep_variables=["zos"], eval_variables=["zos"])
 
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             fut = client.submit(
@@ -401,7 +401,7 @@ class TestDaskPipelineGlorys:
         ref_cfg = _source_config("local", keep_variables=keep, eval_variables=keep)
 
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             fut = client.submit(
@@ -430,7 +430,7 @@ class TestDaskPipelineSaral:
 
     def test_obs_class4_pipeline(self, dask_cluster):
         """Observation pipeline: pred (gridded) vs. ref (track observations)."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
         from dctools.metrics.evaluator import compute_metric
         from dctools.metrics.metrics import MetricComputer
 
@@ -508,7 +508,7 @@ class TestDaskPipelineSaral:
         # We need to mock both create_worker_connect_config and
         # ObservationDataViewer since we have inline data
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             # For observation branch, the fallback uses ObservationDataViewer
@@ -548,7 +548,7 @@ class TestDaskPipelineSaral:
 
     def test_obs_empty_window_returns_null(self, dask_cluster):
         """Observation pipeline with no points in time window → null result."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
         from dctools.metrics.evaluator import compute_metric
         from dctools.metrics.metrics import MetricComputer
 
@@ -623,7 +623,7 @@ class TestDaskPipelineSaral:
         ref_cfg = _source_config("local", keep_variables=["sla"], eval_variables=["sla"])
 
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             fut = client.submit(
@@ -653,7 +653,7 @@ class TestDaskPipelineArgo:
 
     def test_argo_shared_zarr_path(self, dask_cluster):
         """ARGO profiles via prefetched shared Zarr → Class4 evaluation."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
         from dctools.metrics.evaluator import compute_metric
         from dctools.metrics.metrics import MetricComputer
 
@@ -743,7 +743,7 @@ class TestDaskPipelineArgo:
         )
 
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             fut = client.submit(
@@ -765,7 +765,7 @@ class TestDaskPipelineArgo:
 
     def test_argo_legacy_zarr_fallback(self, dask_cluster):
         """ARGO legacy per-window Zarr fallback path."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
         from dctools.metrics.evaluator import compute_metric
         from dctools.metrics.metrics import MetricComputer
 
@@ -849,7 +849,7 @@ class TestDaskPipelineArgo:
         )
 
         with patch(
-            "dctools.metrics.evaluator.create_worker_connect_config",
+            "dctools.metrics.compute_task.create_worker_connect_config",
             return_value=_noop_open,
         ):
             fut = client.submit(
@@ -952,7 +952,7 @@ class TestTransformsPipelineDask:
 
     def test_standardize_transform_on_worker(self, dask_cluster):
         """Standardize transform applied on a Dask worker."""
-        from dctools.data.transforms import (
+        from dctools.processing.transforms import (
             RenameCoordsVarsTransform,
             SelectVariablesTransform,
         )
@@ -980,7 +980,7 @@ class TestTransformsPipelineDask:
 
     def test_subset_coord_transform_on_worker(self, dask_cluster):
         """SubsetCoordTransform works on Dask worker."""
-        from dctools.data.transforms import SubsetCoordTransform
+        from dctools.processing.transforms import SubsetCoordTransform
 
         client = dask_cluster
         times = pd.date_range("2025-01-01", periods=1)

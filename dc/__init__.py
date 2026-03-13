@@ -1,1 +1,1 @@
-"""DC evaluation entrypoints and configuration."""
+"""DC evaluation entrypoints, configuration, and model submission."""

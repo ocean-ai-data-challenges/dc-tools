@@ -50,6 +50,9 @@ dependencies = [
     "dill (>=0.4.0,<0.5.0)",
 ]
 
+[project.scripts]
+dc-submit = "dc.submit:main"
+
 [project.urls]
 Repository = "https://github.com/ppr-ocean-ia/dc-tools/tree/main"
 
@@ -75,7 +78,9 @@ optional = false
 oceanbench = { git = "https://github.com/aitmohandk/oceanbench.git", branch = "main" }
 xrpatcher = { git = "https://github.com/jejjohnson/xrpatcher.git", tag = "v0.0.6", python = ">=3.12,<3.14.0" }
 xesmf = { git = "https://github.com/pangeo-data/xESMF.git", tag = "v0.9.2" }
-dcleaderboard = { git = "https://github.com/ocean-ai-data-challenges/dc_leaderboard", branch = "main" }
+# dcleaderboard = { git = "https://github.com/ocean-ai-data-challenges/dc_leaderboard", branch = "main" }
+dcleaderboard = {path = "/home/k24aitmo/IMT/software/dc_leaderboard", develop = true}
+
 
 [tool.poetry.group.docs]
 optional = true

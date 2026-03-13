@@ -13,8 +13,7 @@ import pandas as pd
 import xarray as xr
 import pytest
 
-from dctools.dcio.loader import FileLoader
-from dctools.dcio.saver import DataSaver
+from dctools.data.datasets.loader import FileLoader
 
 # from dctools.processing.gridder import DataGridder
 from dctools.utilities.xarray_utils import (
@@ -98,10 +97,7 @@ def test_save_load_dataset(
 ):
     """Test dataset loading."""
     logger.info("Run Test dataset loading")
-    DataSaver.save_dataset(
-        setup_data,
-        setup_filepath,
-    )
+    setup_data.to_netcdf(setup_filepath, format="NETCDF4", engine="netcdf4")
     loaded_ds = FileLoader.open_dataset_auto(setup_filepath, engine="netcdf4")
     assert isinstance(loaded_ds, xr.Dataset)
     assert "temperature" in loaded_ds.variables

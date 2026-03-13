@@ -407,7 +407,13 @@ class TestConfigureDaskLogging:
             assert logging.getLogger(name).level == logging.ERROR
 
     def test_dask_config_values(self):
-        """Dask config values are set correctly."""
+        """Dask config values set by configure_dask_logging are correct.
+
+        Memory thresholds (target/spill/pause) are intentionally NOT set by
+        configure_dask_logging — they are managed by ParallelismConfig.
+        Only the values explicitly configured by configure_dask_logging are
+        verified here.
+        """
         import dask
 
         from dctools.utilities.init_dask import configure_dask_logging
@@ -415,11 +421,14 @@ class TestConfigureDaskLogging:
         configure_dask_logging()
 
         cfg = dask.config.config
+        # worker.daemon must be False (required by multiprocessing)
         worker_cfg = cfg.get("distributed", {}).get("worker", {})
-        mem_cfg = worker_cfg.get("memory", {})
-        assert float(mem_cfg.get("target", 0)) == pytest.approx(0.8)
-        assert float(mem_cfg.get("spill", 0)) == pytest.approx(0.9)
-        assert float(mem_cfg.get("pause", 0)) == pytest.approx(0.95)
+        assert worker_cfg.get("daemon") is False
+
+        # Communication timeouts must be set to 60 s
+        comm_cfg = cfg.get("distributed", {}).get("comm", {}).get("timeouts", {})
+        assert comm_cfg.get("tcp") == "60s"
+        assert comm_cfg.get("connect") == "60s"
 
 
 # ===================================================================

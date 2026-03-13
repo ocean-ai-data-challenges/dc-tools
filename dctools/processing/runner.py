@@ -58,10 +58,25 @@ def _configure_hdf5_netcdf_env() -> None:
     os.environ.setdefault("ARGOPY_NETCDF_LOCKING", "FALSE")
 
 
-def resolve_config_path(default_config_name: str, cli_args: Any) -> Path:
-    """Resolve the YAML config path from CLI args (if any) or default."""
+def resolve_config_path(
+    default_config_name: str,
+    cli_args: Any,
+    config_dir: Optional[Path] = None,
+) -> Path:
+    """Resolve the YAML config path from CLI args (if any) or default.
+
+    Parameters
+    ----------
+    default_config_name:
+        Config name (without ``.yaml``) used when ``--config_name`` is absent.
+    cli_args:
+        Parsed argument namespace; ``config_name`` attribute is read if present.
+    config_dir:
+        Directory containing the YAML files.  Defaults to ``<repo>/dc/config``
+        when *None* so that existing callers are unaffected.
+    """
     config_name = getattr(cli_args, "config_name", None) or default_config_name
-    return _dc_config_dir() / f"{config_name}.yaml"
+    return (config_dir or _dc_config_dir()) / f"{config_name}.yaml"
 
 
 def run_from_config(
@@ -88,7 +103,7 @@ def run_from_config(
         from dctools.utilities.args_config import load_args_and_config
 
         if evaluation_cls is None:
-            from dc.evaluation.evaluation import DC2Evaluation as _DefaultEval  # noqa: E402
+            from dc.evaluation.dc2 import DC2Evaluation as _DefaultEval  # noqa: E402
 
             evaluation_cls = _DefaultEval
 

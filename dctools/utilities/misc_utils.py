@@ -356,3 +356,41 @@ def list_all_days(start_date: datetime, end_date: datetime) -> list[datetime]:
 
     n_days = (end - start).days + 1
     return [start + timedelta(days=i) for i in range(n_days)]
+
+
+def display_width(text: str) -> int:
+    """Return the monospace terminal display width of *text*.
+
+    Emoji and other wide characters occupy 2 columns but Python's
+    ``len()`` counts them as 1 (or 2 when a variation selector is
+    present).  This helper compensates for that.
+
+    Parameters
+    ----------
+    text : str
+        The string whose display width is to be computed.
+
+    Returns
+    -------
+    int
+        The number of terminal columns the string would occupy.
+    """
+    import unicodedata
+
+    w = 0
+    for ch in text:
+        cat = unicodedata.category(ch)
+        # Zero-width: combining marks, enclosing marks, format chars
+        if cat.startswith("M") or cat == "Cf":
+            continue
+        cp = ord(ch)
+        eaw = unicodedata.east_asian_width(ch)
+        if (
+            eaw in ("W", "F")
+            or 0x1F000 <= cp <= 0x1FFFF  # Supplemental Symbols & Pictographs
+            or 0x1F900 <= cp <= 0x1F9FF  # Supplemental Symbols Extended-A
+        ):
+            w += 2
+        else:
+            w += 1
+    return w

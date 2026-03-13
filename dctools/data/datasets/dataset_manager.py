@@ -16,12 +16,12 @@ else:
     except Exception:
         DatasetProcessor = Any  # type: ignore
 
-from dctools.data.coordinates import (
+from dctools.utilities.coordinates import (
     CoordinateSystem,
 )
 from dctools.data.datasets.dataset import BaseDataset
 from dctools.data.datasets.forecast import build_forecast_index_from_catalog
-from dctools.data.transforms import CustomTransforms, get_dataset_transform
+from dctools.processing.transforms import CustomTransforms, get_dataset_transform
 from dctools.data.datasets.dc_catalog import DatasetCatalog
 from dctools.data.datasets.dataloader import EvaluationDataloader
 from dctools.utilities.file_utils import FileCacheManager
@@ -343,7 +343,6 @@ class MultiSourceDatasetManager:
         self,
         pred_alias: str,
         ref_aliases: Optional[Optional[List[str]]] = None,
-        batch_size: Optional[int] = 8,
         obs_batch_size: Optional[int] = None,
         gridded_batch_size: Optional[int] = None,
         pred_transform: Optional[Optional[CustomTransforms]] = None,
@@ -358,7 +357,6 @@ class MultiSourceDatasetManager:
         Args:
             pred_alias (str): Alias of the prediction dataset.
             ref_aliases (Optional[List[str]]): Aliases of the reference datasets.
-            batch_size (int): Batch size.
             obs_batch_size (int, optional): Batch size for observation references.
                 Smaller batches prevent the driver from downloading thousands
                 of files at once for swath datasets (SWOT, saral, etc.).
@@ -415,7 +413,6 @@ class MultiSourceDatasetManager:
             "ref_managers": ref_managers,
             "pred_alias": pred_alias,
             "ref_aliases": ref_aliases,
-            "batch_size": batch_size,
             "obs_batch_size": obs_batch_size,
             "gridded_batch_size": gridded_batch_size,
             "pred_transform": pred_transform,

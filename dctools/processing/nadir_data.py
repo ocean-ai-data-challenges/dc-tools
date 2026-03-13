@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 import numpy as np
 import xarray as xr
 
-from dctools.data.coordinates import CoordinateSystem
+from dctools.utilities.coordinates import CoordinateSystem
 
 
 class NadirDataProcessor:

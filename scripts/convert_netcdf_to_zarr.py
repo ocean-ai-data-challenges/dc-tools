@@ -33,7 +33,7 @@ from dctools.data.connection.connection_manager import (
     clean_for_serialization,
     create_worker_connect_config,
 )
-from dctools.data.coordinates import get_target_dimensions
+from dctools.utilities.coordinates import get_target_dimensions
 from dctools.data.datasets.dataset import get_dataset_from_config
 from dctools.utilities.misc_utils import deep_copy_object
 from dctools.utilities.init_dask import configure_dask_workers_env

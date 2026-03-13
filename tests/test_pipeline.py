@@ -172,7 +172,6 @@ def _build_manager_and_dataloader(
     start_time: str = "2025-01-01",
     end_time: str = "2025-01-02",
     n_days_forecast: int = 1,
-    batch_size: int = 1,
     ref_aliases: Optional[List[str]] = None,
     ref_datasets: Optional[Dict[str, RemoteDataset]] = None,
 ) -> EvaluationDataloader:
@@ -221,7 +220,6 @@ def _build_manager_and_dataloader(
     dataloader = manager.get_dataloader(
         pred_alias=alias,
         ref_aliases=effective_ref_aliases,
-        batch_size=batch_size,
         pred_transform=transform,
         ref_transforms=ref_transforms,
         forecast_mode=True,
@@ -1353,7 +1351,7 @@ class TestCoordinateSystem:
 
     def test_coordinate_system_basics(self):
         """CoordinateSystem stores attributes correctly."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
 
         cs = CoordinateSystem(
             coord_type="geographic",
@@ -1369,7 +1367,7 @@ class TestCoordinateSystem:
 
     def test_observation_dataset_detection(self):
         """coord_level != 'L4' → is_observation_dataset returns True."""
-        from dctools.data.coordinates import CoordinateSystem
+        from dctools.utilities.coordinates import CoordinateSystem
 
         cs = CoordinateSystem(
             coord_type="geographic",
@@ -1390,7 +1388,7 @@ class TestTransformsStandalone:
 
     def test_detect_normalize_longitude_180(self):
         """Already in [-180,180] range: dataset unchanged."""
-        from dctools.data.transforms import detect_and_normalize_longitude_system
+        from dctools.processing.transforms import detect_and_normalize_longitude_system
 
         ds = xr.Dataset(
             {"x": (("lon",), [1.0, 2.0, 3.0])},
@@ -1401,7 +1399,7 @@ class TestTransformsStandalone:
 
     def test_detect_normalize_longitude_360(self):
         """[0,360] range should be converted to [-180,180]."""
-        from dctools.data.transforms import detect_and_normalize_longitude_system
+        from dctools.processing.transforms import detect_and_normalize_longitude_system
 
         ds = xr.Dataset(
             {"x": (("lon",), [1.0, 2.0, 3.0])},
@@ -1412,7 +1410,7 @@ class TestTransformsStandalone:
 
     def test_detect_longitude_system_classifications(self):
         """_detect_longitude_system returns correct system labels."""
-        from dctools.data.transforms import _detect_longitude_system
+        from dctools.processing.transforms import _detect_longitude_system
 
         assert _detect_longitude_system(0.0, 359.0) == "[0, 360]"
         assert _detect_longitude_system(-180.0, 180.0) == "[-180, 180]"
@@ -1420,7 +1418,7 @@ class TestTransformsStandalone:
 
     def test_custom_transforms_standardize_pipeline(self, tmp_path: Path):
         """CustomTransforms with standardize pipeline is callable."""
-        from dctools.data.transforms import CustomTransforms
+        from dctools.processing.transforms import CustomTransforms
 
         processor = _FakeDatasetProcessor()
         pipeline = [
@@ -1439,7 +1437,7 @@ class TestTransformsStandalone:
 
     def test_convert_longitude_to_180(self):
         """_convert_longitude_to_180 converts [0,360] to [-180,180]."""
-        from dctools.data.transforms import _convert_longitude_to_180
+        from dctools.processing.transforms import _convert_longitude_to_180
 
         ds = xr.Dataset(
             {"x": (("lon",), [1.0, 2.0, 3.0])},

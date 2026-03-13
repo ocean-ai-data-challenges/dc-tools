@@ -26,7 +26,7 @@ lead_time_frequency: "24"
 catalog_path: ""
 
 # Datasets
-batch_size: 8
+
 
 sources:
   - dataset: jason3

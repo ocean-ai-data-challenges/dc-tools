@@ -7,15 +7,23 @@ import dask
 from loguru import logger
 
 
-def configure_dask_workers_env(client):
+def configure_dask_workers_env(client, pcfg=None):
     """Configure Dask workers with HDF5/NetCDF environment and h5py patch.
 
     Args:
         client: Dask distributed client
+        pcfg: ParallelismConfig (optional) — worker-side params are
+            propagated via env vars so existing os.environ reads work.
 
     Returns:
         bool: True if successful, False otherwise
     """
+    # Build the extra env vars from the centralised config.
+    _extra_env: dict = {}
+    if pcfg is not None and hasattr(pcfg, "worker_env_vars"):
+        _extra_env = pcfg.worker_env_vars()
+    # Also derive blosc_threads for the runtime call below.
+    _blosc_threads = int(_extra_env.get("BLOSC_NTHREADS", "2"))
 
     def set_worker_env_and_patch():
         import io
@@ -32,6 +40,10 @@ def configure_dask_workers_env(client):
         for key, value in env_vars.items():
             os.environ[key] = value
 
+        # Propagate centralised parallelism params to workers.
+        for key, value in _extra_env.items():
+            os.environ[key] = value
+
         # Set env vars for libraries that READ them at init time.
         # This is a no-op for libraries already initialised, but ensures
         # any library first loaded AFTER this call uses the cap.
@@ -46,9 +58,9 @@ def configure_dask_workers_env(client):
         ):
             os.environ[tvar] = "1"
         # Blosc gets its own higher cap (see below)
-        os.environ["BLOSC_NTHREADS"] = "2"
+        os.environ["BLOSC_NTHREADS"] = str(_blosc_threads)
 
-        # ── threadpoolctl: resize C-level pools that are ALREADY running ──
+        # -- threadpoolctl: resize C-level pools that are ALREADY running --
         # env vars are only read at library *initialisation*; for libraries
         # that have already started their thread pool (OpenBLAS, libgomp,
         # libiomp5 …) we must resize the pool at the C level directly.
@@ -60,21 +72,21 @@ def configure_dask_workers_env(client):
         except Exception:
             pass
 
-        # ── Blosc: allow 2 threads for decent decompression speed ────
+        # -- Blosc: allow 2 threads for decent decompression speed ----
         # Blosc uses its OWN thread pool (not OpenMP); it is not covered
         # by threadpoolctl.  SWOT files are Blosc-compressed HDF5 chunks;
         # 2 threads gives good throughput without oversubscribing CPUs.
         try:
             import blosc  # type: ignore[import-not-found]
 
-            blosc.set_nthreads(2)
+            blosc.set_nthreads(_blosc_threads)
         except Exception:
             pass
         # numcodecs Blosc (used by zarr)
         try:
             from numcodecs import blosc as nc_blosc  # type: ignore[import-untyped]
 
-            nc_blosc.set_nthreads(2)
+            nc_blosc.set_nthreads(_blosc_threads)
         except Exception:
             pass
 
@@ -141,12 +153,8 @@ def configure_dask_logging():
             "distributed.worker.daemon": False,
             "distributed.comm.timeouts.tcp": "60s",
             "distributed.comm.timeouts.connect": "60s",
-            # Memory management thresholds — keep generous to avoid premature
-            # spill-to-disk which kills swath (SWOT/SARAL) throughput.
-            "distributed.worker.memory.target": 0.8,
-            "distributed.worker.memory.spill": 0.9,
-            "distributed.worker.memory.pause": 0.95,
-            "distributed.worker.memory.terminate": False,
+            # Memory thresholds are set by BaseDCEvaluation from the
+            # centralised ParallelismConfig — do NOT duplicate them here.
             "logging": {
                 "distributed": {
                     "": "error",  # root "distributed" logger

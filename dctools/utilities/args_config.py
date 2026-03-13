@@ -113,8 +113,9 @@ def configure_logging_from_args(args: Namespace) -> None:
             import datetime as _dt
             from pathlib import Path as _LogPath
             _lp = _LogPath(logfile)
+            _lp.parent.mkdir(parents=True, exist_ok=True)
             _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Insert timestamp before the extension: dc2.log → dc2_20260301_032630.log
+            # Insert timestamp before the extension: dc2.log --> dc2_20260301_032630.log
             _timed_logfile = str(_lp.parent / f"{_lp.stem}_{_ts}{_lp.suffix}")
             logger.add(
                 _timed_logfile,
@@ -146,6 +147,17 @@ def configure_logging_from_args(args: Namespace) -> None:
             _py_logging.getLogger("dask").setLevel(py_level_n)
         except Exception:
             pass
+
+
+def _has_arg(argv: List[str], *names: str) -> bool:
+    """Return True if any of *names* appears (or as ``name=value``) in *argv*."""
+    for arg in argv:
+        if arg in names:
+            return True
+        for name in names:
+            if arg.startswith(f"{name}="):
+                return True
+    return False
 
 
 def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:
@@ -245,6 +257,11 @@ def load_args_and_config(
             config = load_configs(config_filepath)
             for key, value in config.items():
                 vars(args)[key] = value
+
+        # Build the centralised ParallelismConfig from the ``parallelism:``
+        # YAML section (or from scattered top-level keys for backward compat).
+        from dctools.utilities.parallelism import ParallelismConfig
+        args.parallelism = ParallelismConfig.from_args(args)
 
         # Configure Loguru once args+config have been merged.
         configure_logging_from_args(args)

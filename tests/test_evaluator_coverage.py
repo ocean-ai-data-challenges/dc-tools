@@ -599,7 +599,7 @@ class TestComputeMetricOnCluster:
             }
 
             with patch(
-                "dctools.metrics.evaluator.create_worker_connect_config",
+                "dctools.metrics.compute_task.create_worker_connect_config",
                 return_value=_passthrough_open,
             ):
                 result = compute_metric(

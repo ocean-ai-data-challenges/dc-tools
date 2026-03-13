@@ -47,7 +47,7 @@ from dctools.data.connection.connection_manager import (
     GlonetManager,
     ArgoManager,
 )
-from dctools.data.coordinates import get_standardized_var_name
+from dctools.utilities.coordinates import get_standardized_var_name
 from dctools.utilities.file_utils import FileCacheManager
 
 
@@ -615,16 +615,46 @@ def get_dataset_from_config(
                 logger.info(f"Using ARGO directory catalog at {path}")
                 catalog_path = path
 
-    if not os.path.exists(data_root):
-        os.mkdir(data_root)
+    # For 'local' configs with an explicit root_path, data_root is never used as
+    # the local storage directory, so don't create an empty placeholder for it.
+    needs_data_root = config_name != "local" or not source.get("root_path")
+    if needs_data_root and not os.path.exists(data_root):
+        os.makedirs(data_root, exist_ok=True)
     if not os.path.exists(root_catalog_folder):
-        os.mkdir(root_catalog_folder)
+        os.makedirs(root_catalog_folder, exist_ok=True)
 
     init_type = "from_data"
     if use_catalog and catalog_path and Path(catalog_path).exists():
         init_type = "from_json"
 
     match config_name:
+        case "local":
+            # Local filesystem dataset (e.g. submitted model prediction).
+            root_path = source.get("root_path", data_root)
+            connect_config_params = {
+                "dataset_processor": dataset_processor,
+                "init_type": init_type,
+                "local_root": root_path,
+                "max_samples": max_samples,
+                "file_pattern": file_pattern,
+                "keep_variables": keep_variables,
+                "file_cache": file_cache,
+                "filter_values": filter_values,
+                "full_day_data": full_day_data,
+                "groups": source.get("groups"),
+            }
+            local_connection_config = LocalConnectionConfig(connect_config_params)
+            local_config = DatasetConfig(
+                alias=dataset_name,
+                connection_config=local_connection_config,
+                catalog_options={"catalog_path": catalog_path},
+                keep_variables=keep_variables,
+                eval_variables=eval_variables,
+                observation_dataset=observation_dataset,
+                use_catalog=use_catalog,
+                ignore_geometry=ignore_geometry,
+            )
+            dataset = RemoteDataset(local_config)
         case "cmems":
             connect_config_params = {
                 "dataset_processor": dataset_processor,

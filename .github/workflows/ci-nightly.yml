@@ -1,0 +1,98 @@
+name: CI Nightly
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: "Run strict profile (includes 80% fast coverage gate)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-with-slow:
+    name: Full + Slow
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Configure Poetry
+        run: |
+          poetry config virtualenvs.in-project true
+
+      - name: Cache virtualenv and Poetry cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.cache/pypoetry
+          key: ${{ runner.os }}-py311-${{ hashFiles('poetry.lock', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py311-
+
+      - name: Install dependencies
+        run: |
+          poetry install --with dev --without docs,custom
+
+      - name: Run full profile with slow tests
+        run: |
+          poetry run poe all-with-slow
+
+  strict-monitor:
+    name: Strict Coverage Monitor
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.strict == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Configure Poetry
+        run: |
+          poetry config virtualenvs.in-project true
+
+      - name: Cache virtualenv and Poetry cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.cache/pypoetry
+          key: ${{ runner.os }}-py311-${{ hashFiles('poetry.lock', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py311-
+
+      - name: Install dependencies
+        run: |
+          poetry install --with dev --without docs,custom
+
+      - name: Run strict profile
+        run: |
+          poetry run poe all-strict

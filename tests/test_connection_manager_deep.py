@@ -19,7 +19,7 @@ from dctools.data.connection.connection_manager import (
     create_worker_connect_config,
     prefetch_obs_files_to_local,
 )
-from dctools.data.coordinates import CoordinateSystem
+from dctools.utilities.coordinates import CoordinateSystem
 
 
 # =====================================================================

@@ -8,11 +8,16 @@ from types import SimpleNamespace
 import pandas as pd
 
 from dctools.processing.base import BaseDCEvaluation
+from dctools.utilities.parallelism import ParallelismConfig
 
 
 def _obj() -> BaseDCEvaluation:
     """Create an uninitialized BaseDCEvaluation instance for helper testing."""
-    return object.__new__(BaseDCEvaluation)
+    ev = object.__new__(BaseDCEvaluation)
+    ev.pcfg = ParallelismConfig(auto_adapt=False)
+    ev._machine_resources = None
+    ev._reference_machine_dict = None
+    return ev
 
 
 def test_extract_dask_cfg_from_source_returns_none_for_non_dict():
@@ -151,7 +156,7 @@ def test_configure_dataset_processor_workers_calls_hook(monkeypatch):
     monkeypatch.setattr(
         base_mod,
         "configure_dask_workers_env",
-        lambda client: called.append(client),
+        lambda client, pcfg=None: called.append(client),
     )
 
     ev.dataset_processor = SimpleNamespace(client="client-1")
@@ -170,7 +175,7 @@ def test_configure_dataset_processor_workers_noop_without_client(monkeypatch):
     monkeypatch.setattr(
         base_mod,
         "configure_dask_workers_env",
-        lambda client: (_ for _ in ()).throw(AssertionError(client)),
+        lambda client, pcfg=None: (_ for _ in ()).throw(AssertionError(client)),
     )
     ev._configure_dataset_processor_workers()
 
@@ -245,6 +250,7 @@ def test_close_calls_dataset_processor_close_and_swallows_errors():
 def test_setup_transforms_injects_precision_and_optional_weights():
     """setup_transforms should pass reduce_precision and optional weights for glorys."""
     ev = _obj()
+    ev.pcfg = ParallelismConfig(auto_adapt=False, reduce_precision=True)
     ev.args = Namespace(reduce_precision=True, regridder_weights="/tmp/w.nc")
 
     calls: list[tuple[str, dict]] = []

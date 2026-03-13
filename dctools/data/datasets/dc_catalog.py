@@ -14,7 +14,7 @@ from shapely import geometry
 from shapely.geometry.base import BaseGeometry
 from shapely.geometry import mapping, shape
 
-from dctools.data.coordinates import CoordinateSystem
+from dctools.utilities.coordinates import CoordinateSystem
 from dctools.utilities.misc_utils import (
     make_timestamps_serializable,
     serialize_structure,
@@ -88,8 +88,13 @@ class CatalogEntry:
         """Convert catalog entry to dictionary."""
         try:
             dct = asdict(self)
-            dct["date_start"] = self.date_start.isoformat()
-            dct["date_end"] = self.date_end.isoformat()
+            # Handle date fields that may be datetime, Timestamp, or numeric
+            for key in ("date_start", "date_end"):
+                val = getattr(self, key)
+                if hasattr(val, "isoformat"):
+                    dct[key] = val.isoformat()
+                else:
+                    dct[key] = str(val)
             normalized_geometry = self._normalize_geometry(self.geometry)
             if normalized_geometry is not None:
                 dct["geometry"] = mapping(normalized_geometry)
