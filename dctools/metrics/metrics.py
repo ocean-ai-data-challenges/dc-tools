@@ -114,7 +114,10 @@ class MetricComputer(OceanbenchMetrics):
                     ref_coords=ref_coords,
                 )
             if self.add_noise and result is not None:
-                result = add_noise_with_snr(result, snr_db=15)
+                if isinstance(result, dict) and "results" in result:
+                    result["results"] = add_noise_with_snr(result["results"], snr_db=15)
+                else:
+                    result = add_noise_with_snr(result, snr_db=15)
             return result
         except Exception as exc:
             logger.error(f"Error while computing metrics: {repr(exc)}")
