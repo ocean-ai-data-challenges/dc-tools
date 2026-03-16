@@ -69,7 +69,10 @@ class BaseDCEvaluation:
         self.args = arguments
         self.results_directory = os.path.join(self.args.data_directory, "results")
         os.makedirs(self.results_directory, exist_ok=True)
-        self.target_dimensions = get_target_dimensions(self.args)
+        self.surface_only: bool = getattr(arguments, "surface_only", False)
+        self.target_dimensions = get_target_dimensions(
+            self.args, surface=self.surface_only,
+        )
         self.target_time_values = get_target_time_values(self.args)
         # Subclasses can set this to a dict before run_eval() is called to
         # customise the leaderboard (metric/variable/model names, page texts).
@@ -352,7 +355,14 @@ class BaseDCEvaluation:
         dataset_manager: MultiSourceDatasetManager,
         aliases: List[str],
     ) -> Dict[str, Any]:
-        """Configure and return the transform dict for all *aliases*."""
+        """Configure and return the transform dict for all *aliases*.
+
+        When ``self.args.surface_only`` is *True*, every non-GLORYS dataset
+        uses the ``standardize_to_surface`` transform (selects the surface
+        depth level only).  This is the standard mode for 2-D challenges
+        such as DC1.
+        """
+        surface_only: bool = self.surface_only
         transforms_dict = {}
         for alias in aliases:
             kwargs: Dict[str, Any] = {"reduce_precision": self.args.reduce_precision}
@@ -360,6 +370,9 @@ class BaseDCEvaluation:
             regridder_weights = getattr(self.args, "regridder_weights", None)
             if regridder_weights is not None and alias == "glorys_cmems":
                 kwargs["regridder_weights"] = regridder_weights
+
+            if surface_only and alias != "glorys_cmems":
+                kwargs["transform_name"] = "standardize_to_surface"
 
             transforms_dict[alias] = dataset_manager.get_transform(
                 dataset_alias=alias,
@@ -886,6 +899,12 @@ class BaseDCEvaluation:
                 common_metrics = [
                     metric for metric in metrics_names[alias] if metric in metrics_names[ref_alias]
                 ]
+                logger.info(
+                    f"[Metrics] {alias} vs {ref_alias}: "
+                    f"pred_metrics={metrics_names[alias]}, "
+                    f"ref_metrics={metrics_names[ref_alias]}, "
+                    f"common={common_metrics}"
+                )
                 metrics_kwargs[alias][ref_alias] = {"add_noise": False}
 
                 # Forward per-bins spatial resolution from YAML config
@@ -1219,13 +1238,14 @@ class BaseDCEvaluation:
             os.makedirs(_leaderboard_input_dir, exist_ok=True)
 
             # Copy reference baseline JSONs.
-            # Primary source: dc/leaderboard_results/ (sibling of evaluate.py).
+            # Primary source: <dc_pkg>/leaderboard_results/ (sibling of evaluate.py).
             # _repo_root was derived from self.results_directory above (not __file__).
-            _dc_dir = _repo_root / "dc"
+            _dc_pkg_name = getattr(self, "CHALLENGE_NAME", "dc").lower()
+            _dc_dir = _repo_root / _dc_pkg_name
             _local_lb_dir = _dc_dir / "leaderboard_results"
             if _local_lb_dir.is_dir():
                 _ref_results_src = str(_local_lb_dir)
-                logger.debug(f" Using dc/leaderboard_results/  ->  {_local_lb_dir}")
+                logger.debug(f" Using {_dc_pkg_name}/leaderboard_results/  ->  {_local_lb_dir}")
             else:
                 _ref_results_src = os.path.join(
                     os.path.dirname(_dcleaderboard.__file__), "results"
@@ -1280,6 +1300,17 @@ class BaseDCEvaluation:
                     "  No per-bins file found in results directory "
                     f"({self.results_directory}) — maps.html will be skipped."
                 )
+
+            # Persist current evaluation results into <dc_pkg>/leaderboard_results/
+            # so they serve as baselines for future runs with other models.
+            os.makedirs(str(_local_lb_dir), exist_ok=True)
+            for _fname in _copied:
+                _src_path = os.path.join(_leaderboard_input_dir, _fname)
+                if os.path.isfile(_src_path):
+                    _shutil.copy2(_src_path, os.path.join(str(_local_lb_dir), _fname))
+            logger.debug(
+                f"  Persisted {len(_copied)} file(s) to {_local_lb_dir} for future leaderboards"
+            )
 
             logger.info(" Rendering leaderboard site ...")
             _render_leaderboard(

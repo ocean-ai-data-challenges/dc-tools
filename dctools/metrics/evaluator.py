@@ -1051,8 +1051,8 @@ def compute_metric(
 
             # Class4Evaluator.run() now returns {"results": DataFrame, "per_bins": {...}}
             # instead of a bare DataFrame.  Unpack before converting to records.
-            if isinstance(results, dict) and "results" in results and "per_bins" in results:
-                _per_bins_data = results["per_bins"]
+            if isinstance(results, dict) and "results" in results:
+                _per_bins_data = results.get("per_bins")
                 results = results["results"]
             if isinstance(results, pd.DataFrame):
                 results = results.to_dict('records')
@@ -1065,13 +1065,21 @@ def compute_metric(
             # Context manager for the loop
             with dask.config.set(scheduler='synchronous'):
                 for metric in list_metrics:
+                    logger.debug(
+                        f"[compute_metric] Computing metric={metric.metric_name} "
+                        f"type(metric)={type(metric).__name__} "
+                        f"is_class4={getattr(metric, 'is_class4', None)} "
+                        f"for ref_alias={ref_alias}"
+                    )
                     return_res = metric.compute(
                         pred_data, ref_data,
                         pred_coords, ref_coords,
                     )
 
-                    # Handle per_bins when rmsd() returns {"results": DataFrame, "per_bins": dict}
-                    if isinstance(return_res, dict) and "results" in return_res and "per_bins" in return_res:  # noqa: E501
+                    # Unwrap {"results": ..., "per_bins": ...} wrapper(s).
+                    # May be nested multiple times (oceanbench_metrics wraps,
+                    # then _compute_spatial_per_bins wraps again).
+                    while isinstance(return_res, dict) and "results" in return_res:
                         _metric_per_bins = return_res.get("per_bins") or {}
                         if _metric_per_bins:
                             if _per_bins_data is None:
@@ -1079,7 +1087,7 @@ def compute_metric(
                             _per_bins_data.update(_metric_per_bins)
                         return_res = return_res["results"]
 
-                    if len(return_res) == 0:
+                    if return_res is None:
                         return {
                             "ref_alias": ref_alias,
                             "result": None,
@@ -1091,7 +1099,7 @@ def compute_metric(
                             "valid_time": valid_time,
                         }
 
-                    # Convert each DataFrame row to dictionary
+                    # Convert return_res to res_dict {var_depth_label: scalar_value}
                     res_dict: Dict[Any, Any] = {}
                     _lead_day_label = None
                     if lead_time is not None:
@@ -1099,21 +1107,53 @@ def compute_metric(
                             _lead_day_label = f"Lead day {int(lead_time) + 1}"
                         except Exception:
                             _lead_day_label = None
-                    for var_depth_label in return_res.index:
-                        # Extract metric values for all lead days
-                        metric_values = return_res.loc[var_depth_label].to_dict()
-                        # Structure : {variable: metric_value}
-                        if _lead_day_label and _lead_day_label in metric_values:
-                            res_dict[var_depth_label] = metric_values[_lead_day_label]
-                        elif 'Lead day 1' in metric_values:
-                            res_dict[var_depth_label] = metric_values['Lead day 1']
-                        else:
-                            # Fallback: take the first value (stable order not guaranteed,
-                            # but avoids KeyError and keeps a signal).
-                            try:
-                                res_dict[var_depth_label] = next(iter(metric_values.values()))
-                            except StopIteration:
-                                res_dict[var_depth_label] = None
+
+                    if isinstance(return_res, dict):
+                        # Plain dict from metric — extract scalar per key
+                        import numpy as _np
+                        for k, v in return_res.items():
+                            if isinstance(v, (int, float)):
+                                res_dict[k] = v
+                            elif isinstance(v, _np.ndarray):
+                                res_dict[k] = float(v.flat[0]) if v.size > 0 else None
+                            elif isinstance(v, (list, tuple)) and len(v) > 0:
+                                # Pick lead-day index if possible
+                                _idx = 0
+                                if lead_time is not None:
+                                    try:
+                                        _idx = int(lead_time)
+                                    except Exception:
+                                        _idx = 0
+                                if _idx < len(v):
+                                    res_dict[k] = float(v[_idx])
+                                else:
+                                    res_dict[k] = float(v[0])
+                            else:
+                                res_dict[k] = v
+                    elif hasattr(return_res, 'index') and len(return_res) > 0:
+                        # DataFrame path (original logic)
+                        for var_depth_label in return_res.index:
+                            metric_values = return_res.loc[var_depth_label].to_dict()
+                            if _lead_day_label and _lead_day_label in metric_values:
+                                res_dict[var_depth_label] = metric_values[_lead_day_label]
+                            elif 'Lead day 1' in metric_values:
+                                res_dict[var_depth_label] = metric_values['Lead day 1']
+                            else:
+                                try:
+                                    res_dict[var_depth_label] = next(iter(metric_values.values()))
+                                except StopIteration:
+                                    res_dict[var_depth_label] = None
+                    elif len(return_res) == 0:
+                        return {
+                            "ref_alias": ref_alias,
+                            "result": None,
+                            "n_points": 0,
+                            "duration_s": 0.0,
+                            "preprocess_s": _preprocess_time,
+                            "forecast_reference_time": forecast_reference_time,
+                            "lead_time": lead_time,
+                            "valid_time": valid_time,
+                        }
 
                     results[metric.get_metric_name()] = res_dict
 

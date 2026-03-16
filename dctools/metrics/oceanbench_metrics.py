@@ -78,6 +78,120 @@ def get_variable_alias(variable: str) -> Variable | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Per-bins spatial RMSD helper
+# ---------------------------------------------------------------------------
+
+def _compute_spatial_per_bins(
+    pred_ds: xr.Dataset,
+    ref_ds: xr.Dataset,
+    eval_variables: List[str],
+    has_depth: bool,
+    depth_levels: Any,
+    bin_resolution: int,
+) -> Dict[str, list]:
+    """Compute spatial-binned RMSE for grid-to-grid datasets.
+
+    Returns a dict ``{variable_name: [{"lat_bin": ..., "lon_bin": ..., "rmse": ...}, ...]}``.
+    """
+    import numpy as np
+
+    per_bins: Dict[str, list] = {}
+
+    # Determine variables to process
+    var_names = [v for v in eval_variables if v in pred_ds.data_vars and v in ref_ds.data_vars]
+    if not var_names:
+        # Fallback: use common data vars
+        var_names = [v for v in pred_ds.data_vars if v in ref_ds.data_vars]
+
+    # Select first time step if present (per_bins is per-timestep already)
+    def _squeeze_time(ds: xr.Dataset) -> xr.Dataset:
+        for t_dim in ("time", "lead_time", "forecast_reference_time"):
+            if t_dim in ds.dims and ds.sizes[t_dim] > 0:
+                ds = ds.isel({t_dim: 0})
+        return ds
+
+    pred_ds = _squeeze_time(pred_ds)
+    ref_ds = _squeeze_time(ref_ds)
+
+    # Remove depth if present (take surface) — for surface_only this is already done,
+    # but guard against residual depth dim.
+    if "depth" in pred_ds.dims and pred_ds.sizes.get("depth", 0) > 0:
+        pred_ds = pred_ds.isel(depth=0)
+    if "depth" in ref_ds.dims and ref_ds.sizes.get("depth", 0) > 0:
+        ref_ds = ref_ds.isel(depth=0)
+
+    # Get lat/lon coordinate arrays
+    lat_coord = pred_ds["lat"].values if "lat" in pred_ds.coords else None
+    lon_coord = pred_ds["lon"].values if "lon" in pred_ds.coords else None
+    if lat_coord is None or lon_coord is None:
+        return {}
+
+    # Build bin edges
+    lat_bins = np.arange(-90, 90 + bin_resolution, bin_resolution)
+    lon_bins = np.arange(-180, 180 + bin_resolution, bin_resolution)
+
+    for var in var_names:
+        try:
+            pred_arr = pred_ds[var].values.astype(np.float64)
+            ref_arr = ref_ds[var].values.astype(np.float64)
+        except Exception:
+            continue
+
+        # Squeeze any remaining singleton dims
+        pred_arr = np.squeeze(pred_arr)
+        ref_arr = np.squeeze(ref_arr)
+        if pred_arr.shape != ref_arr.shape:
+            continue
+
+        # Expect 2D (lat, lon)
+        if pred_arr.ndim != 2:
+            continue
+
+        bins_list = []
+        for i in range(len(lat_bins) - 1):
+            lat_mask = (lat_coord >= lat_bins[i]) & (lat_coord < lat_bins[i + 1])
+            if not lat_mask.any():
+                continue
+            for j in range(len(lon_bins) - 1):
+                lon_mask = (lon_coord >= lon_bins[j]) & (lon_coord < lon_bins[j + 1])
+                if not lon_mask.any():
+                    continue
+
+                # Extract sub-array for this bin
+                sub_pred = pred_arr[np.ix_(lat_mask, lon_mask)]
+                sub_ref = ref_arr[np.ix_(lat_mask, lon_mask)]
+
+                # Flatten and mask NaN
+                sp = sub_pred.ravel()
+                sr = sub_ref.ravel()
+                valid = ~(np.isnan(sp) | np.isnan(sr))
+                n_valid = int(valid.sum())
+                if n_valid == 0:
+                    continue
+
+                diff = sp[valid] - sr[valid]
+                rmse_val = float(np.sqrt(np.mean(diff * diff)))
+
+                bins_list.append({
+                    "lat_bin": {
+                        "left": float(lat_bins[i]),
+                        "right": float(lat_bins[i + 1]),
+                    },
+                    "lon_bin": {
+                        "left": float(lon_bins[j]),
+                        "right": float(lon_bins[j + 1]),
+                    },
+                    "rmse": rmse_val,
+                    "count": n_valid,
+                })
+
+        if bins_list:
+            per_bins[var] = bins_list
+
+    return per_bins
+
+
 class DCMetric(ABC):
     """Abstract Base Class for Data Challenge Metrics."""
 
@@ -405,9 +519,25 @@ class OceanbenchMetrics(DCMetric):
 
                 # Forward per-bins spatial resolution when set
                 if self.bin_resolution is not None:
-                    kwargs["bin_resolution"] = self.bin_resolution
+                    import inspect
+                    _sig = inspect.signature(metric_func)
+                    if "bin_resolution" in _sig.parameters:
+                        kwargs["bin_resolution"] = self.bin_resolution
 
                 result = metric_func(**kwargs)
+
+                # Compute per-bins spatial RMSD when bin_resolution is set and
+                # the metric function does not natively support it.
+                if self.bin_resolution is not None and ref_data is not None:
+                    per_bins = _compute_spatial_per_bins(
+                        pred_data, ref_data,
+                        self.eval_variables or [],
+                        has_depth_dim or has_depth_coord,
+                        kwargs.get("depth_levels"),
+                        self.bin_resolution,
+                    )
+                    if per_bins:
+                        return {"results": result, "per_bins": per_bins}
 
                 return result
             except Exception as exc:
