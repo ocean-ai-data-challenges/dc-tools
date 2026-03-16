@@ -67,8 +67,19 @@ def configure_dask_workers_env(client, pcfg=None):
         # threadpoolctl does exactly this via dlsym/GetProcAddress.
         try:
             import threadpoolctl
+            threadpoolctl.threadpool_limits(limits=1, user_api='all')
+        except Exception:
+            pass
 
-            threadpoolctl.threadpool_limits(limits=1)
+        # -- Cap worker-level C++ thread pools at startup (P3.2) ----------
+        # _cap_worker_threads is also called at the start of each task in
+        # compute_metric, but applying it here at worker initialisation
+        # ensures the cap is active before the first task runs, preventing
+        # any brief window where newly imported C++ libraries (pyinterp,
+        # BLAS) could spin up uncapped threads.
+        try:
+            from dctools.metrics.worker_cleanup import _cap_worker_threads
+            _cap_worker_threads(1)
         except Exception:
             pass
 

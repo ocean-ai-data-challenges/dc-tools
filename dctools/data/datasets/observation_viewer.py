@@ -11,7 +11,6 @@ ready for metric computation.
 import gc
 import os
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import dask
@@ -210,17 +209,23 @@ class ObservationDataViewer:
 
         # Data with n_points/N_POINTS dimension only
         # OR special case: unique "time" dimension (saral tracks, etc)
-        if _probe_has_npoints and not _probe_is_swath:
+        # OR swath data (num_lines, num_pixels) -- unified path.
+        if _probe_has_npoints or _probe_is_swath:
+            _is_swath = _probe_is_swath and not _probe_has_npoints
+            # When _probe_has_npoints and _probe_is_swath are both True,
+            # favour npoints (is_swath=False) to avoid redundant flattening.
+            if _probe_has_npoints:
+                _is_swath = False
+            elif _probe_is_swath:
+                _is_swath = True
+
             try:
                 # Clean and process datasets
-                # Use the processor only if loading into memory (eager loading distributed)
-                # Othewise, local graph construction (lazy) to avoid serialization issues
-                # of lazy datasets between workers and client.
                 if self.dataset_processor is not None and load_to_memory:
                     delayed_tasks: List[Any] = []
                     for idx, dataset_path in enumerate(dataset_paths):
                         delayed_tasks.append(dask.delayed(preprocess_one_npoints)(
-                            dataset_path, False, self.n_points_dim, dataframe, idx,
+                            dataset_path, _is_swath, self.n_points_dim, dataframe, idx,
                             self.alias, self.load_fn,
                             self.keep_vars, self.target_dimensions,
                             self.coordinates,
@@ -231,18 +236,18 @@ class ObservationDataViewer:
                         delayed_tasks, sync=False
                     )
                 else:
-                    # -- R5+R7: Parallel sync preprocessing ---------------------
-                    # Instead of a sequential for loop, use ThreadPoolExecutor
-                    # to overlap I/O-bound decompression across files.
-                    # Each file is still computed eagerly to keep peak RAM bounded.
+                    # Sequential preprocessing — this viewer runs inside a
+                    # Dask worker process which is already a separate OS process.
+                    # Using threads for CPU-bound work (numpy, swath_to_points)
+                    # gives no benefit under the GIL and oversubscribes the core.
                     from dctools.data.datasets.nan_filtering import (
                         _nan_mask_numpy,
                     )
 
-                    def _process_one_file_npts(idx_path):
+                    def _process_one_file(idx_path):
                         idx, dataset_path = idx_path
                         result = preprocess_one_npoints(
-                            dataset_path, False, self.n_points_dim, dataframe, idx,
+                            dataset_path, _is_swath, self.n_points_dim, dataframe, idx,
                             self.alias, self.load_fn,
                             self.keep_vars, self.target_dimensions,
                             self.coordinates,
@@ -275,121 +280,39 @@ class ObservationDataViewer:
                         del result
                         return None
 
+                    # Sequential processing — this code runs INSIDE a Dask
+                    # worker process.  Using threads for CPU-bound work
+                    # (swath_to_points, NaN filtering, pyinterp) only adds
+                    # GIL contention and oversubscribes the core that the
+                    # Dask scheduler already assigned to us.  Process files
+                    # one by one to keep memory predictable and avoid
+                    # thread-level CPU thrashing.
                     batch_results_sync: List[Any] = []
-                    _n_par = min(4, os.cpu_count() or 2, total_files)
-                    with ThreadPoolExecutor(max_workers=_n_par) as _tp:
-                        _futs = {
-                            _tp.submit(_process_one_file_npts, (idx, dp)): idx
-                            for idx, dp in enumerate(dataset_paths)
-                        }
-                        for fut in as_completed(_futs):
-                            try:
-                                r = fut.result()
-                                if r is not None:
-                                    batch_results_sync.append(r)
-                            except Exception:
-                                pass
+
+                    for idx, path in enumerate(dataset_paths):
+                        try:
+                            r = _process_one_file((idx, path))
+                            if r is not None:
+                                batch_results_sync.append(r)
+                        except Exception as exc:
+                            logger.warning(
+                                f"File {path} failed during sequential "
+                                f"preprocessing: {exc}"
+                            )
 
                     batch_results = batch_results_sync
 
                 if not batch_results:
                     return None
 
-                # Combine results
-                combined = concat_with_dim(batch_results, self.n_points_dim)
-
-                # if load_to_memory:
-                #    combined = combined.compute()
-
-                return xr.Dataset(combined) if combined is not None else None
-
-            except Exception as e:
-                logger.error(f"Preprocessing failed for {self.alias}: {e}")
-                traceback.print_exc()
-                return None
-
-        # Swath data (num_lines, num_pixels)
-        elif _probe_is_swath:
-            try:
-                # Clean and process datasets
-                if self.dataset_processor is not None and load_to_memory:
-                    delayed_tasks_swath: List[Any] = []
-                    for idx, dataset_path in enumerate(dataset_paths):
-                        delayed_tasks_swath.append(dask.delayed(preprocess_one_npoints)(
-                            dataset_path, True, self.n_points_dim, dataframe, idx,
-                            self.alias, self.load_fn,
-                            self.keep_vars, self.target_dimensions,
-                            self.coordinates,
-                            self.time_bounds,
-                            load_to_memory,
-                        ))
-                    batch_results = self.dataset_processor.compute_delayed_tasks(
-                        delayed_tasks_swath, sync=False
-                    )
-                else:
-                    # -- R5+R7: Parallel sync preprocessing (swath) -----
-                    from dctools.data.datasets.nan_filtering import (
-                        _nan_mask_numpy,
-                    )
-
-                    def _process_one_file_swath(idx_path):
-                        idx, dataset_path = idx_path
-                        result = preprocess_one_npoints(
-                            dataset_path, True, self.n_points_dim, dataframe, idx,
-                            self.alias, self.load_fn,
-                            self.keep_vars, self.target_dimensions,
-                            self.coordinates,
-                            self.time_bounds,
-                            load_to_memory,
-                        )
-                        if result is None:
-                            return None
-                        if hasattr(result, 'chunks') and result.chunks:
-                            try:
-                                result = result.compute(
-                                    scheduler="synchronous"
-                                )
-                            except Exception:
-                                pass
-                        _nmask = _nan_mask_numpy(
-                            result, self.n_points_dim
-                        )
-                        if _nmask is not None:
-                            if int(_nmask.sum()) == 0:
-                                del result
-                                return None
-                            result = result.isel(
-                                {self.n_points_dim: _nmask}
-                            )
-                        if result.sizes.get(
-                            self.n_points_dim, 0
-                        ) > 0:
-                            return result
-                        del result
-                        return None
-
-                    batch_results_sync2: List[Any] = []
-                    _n_par_sw = min(4, os.cpu_count() or 2, total_files)
-                    with ThreadPoolExecutor(max_workers=_n_par_sw) as _tp_sw:
-                        _futs_sw = {
-                            _tp_sw.submit(_process_one_file_swath, (idx, dp)): idx
-                            for idx, dp in enumerate(dataset_paths)
-                        }
-                        for fut in as_completed(_futs_sw):
-                            try:
-                                r = fut.result()
-                                if r is not None:
-                                    batch_results_sync2.append(r)
-                            except Exception:
-                                pass
-
-                    batch_results = batch_results_sync2
-
-                if not batch_results:
-                    return None
-
-                # Combine results
-                combined = concat_with_dim(batch_results, self.n_points_dim)
+                # Combine results — sort=False because n_points is just an
+                # integer index; sorting by it would interleave unrelated
+                # files and waste CPU + RAM on a full-array reindex copy.
+                # Release individual datasets as they are consumed by concat
+                # to avoid holding 2× peak memory (list + concatenated result).
+                combined = concat_with_dim(batch_results, self.n_points_dim, sort=False)
+                del batch_results
+                gc.collect()
 
                 return xr.Dataset(combined) if combined is not None else None
 

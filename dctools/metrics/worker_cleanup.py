@@ -68,6 +68,13 @@ def _clear_xarray_file_cache() -> bool:
 def _worker_full_cleanup() -> bool:
     """Full cleanup routine to run on workers via client.run()."""
     import os
+
+    def _blosc_thread_count(default: str = "4") -> int:
+        try:
+            return max(1, int(os.environ.get("BLOSC_NTHREADS", default)))
+        except (TypeError, ValueError):
+            return max(1, int(default))
+
     # Ensure HDF5/NetCDF env vars are set in worker
     env_vars = {
         "HDF5_USE_FILE_LOCKING": "FALSE",
@@ -84,7 +91,7 @@ def _worker_full_cleanup() -> bool:
     for tvar in (
         "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS",
-        "PYINTERP_NUM_THREADS", "GOTO_NUM_THREADS", "BLOSC_NTHREADS",
+        "PYINTERP_NUM_THREADS", "GOTO_NUM_THREADS",
         # dc_catalog ThreadPoolExecutor — defaults to 16, caps it here to 1
         "DCTOOLS_CATALOG_THREADS",
         # PyTorch inter-op pool — NOT covered by OMP_NUM_THREADS;
@@ -108,15 +115,17 @@ def _worker_full_cleanup() -> bool:
         threadpoolctl.threadpool_limits(limits=1)
     except Exception:
         pass
-    # allow 4 threads for good decompression speed on Blosc-compressed SWOT HDF5 chunks.
+    _blosc_threads = _blosc_thread_count()
+    os.environ["BLOSC_NTHREADS"] = str(_blosc_threads)
+
     try:
         import blosc  # type: ignore[import-not-found]
-        blosc.set_nthreads(4)
+        blosc.set_nthreads(_blosc_threads)
     except Exception:
         pass
     try:
         from numcodecs import blosc as _nc_blosc  # type: ignore[import-untyped]
-        _nc_blosc.set_nthreads(4)
+        _nc_blosc.set_nthreads(_blosc_threads)
     except Exception:
         pass
 
@@ -168,8 +177,51 @@ def _worker_full_cleanup() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Stale S3 connection clearing (for in-task retry)
+# ---------------------------------------------------------------------------
+def _clear_stale_s3_state() -> None:
+    """Clear all S3-related cached state so the next open gets fresh connections.
+
+    This must be called before re-opening a dataset on retry after an S3
+    timeout, because the stale aiobotocore sessions are baked into the
+    cached filesystem objects.
+    """
+    # 1. Close & clear worker dataset cache
+    with _WORKER_DATASET_CACHE_LOCK:
+        for _ds in _WORKER_DATASET_CACHE.values():
+            try:
+                if hasattr(_ds, "close"):
+                    _ds.close()
+            except Exception:
+                pass
+        _WORKER_DATASET_CACHE.clear()
+
+    # 2. Clear xarray file-handle cache
+    _clear_xarray_file_cache()
+
+    # 3. Clear fsspec/s3fs filesystem instance caches so new opens
+    #    create fresh aiobotocore sessions instead of reusing stale ones.
+    try:
+        import s3fs
+        if hasattr(s3fs.S3FileSystem, "_cache"):
+            s3fs.S3FileSystem._cache.clear()
+    except Exception:
+        pass
+    try:
+        import fsspec
+        fsspec.filesystem.cache.clear()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    gc.collect()
+
+
+# ---------------------------------------------------------------------------
 # Thread-pool capping
 # ---------------------------------------------------------------------------
+_THREADS_CAPPED: bool = False
+
+
 def _cap_worker_threads(max_threads: int = 1) -> None:
     """Limit per-worker thread parallelism for BLAS/OpenMP/pyinterp.
 
@@ -189,7 +241,17 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
     Calling this at the top of each task ensures that only
     *max_threads* additional threads are created per worker task.
     """
+    global _THREADS_CAPPED
+    if _THREADS_CAPPED and max_threads == 1:
+        return
     _t = str(max_threads)
+
+    def _blosc_thread_count() -> int:
+        try:
+            return max(1, int(os.environ.get("BLOSC_NTHREADS", _t)))
+        except (TypeError, ValueError):
+            return max_threads
+
     for var in (
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
@@ -197,7 +259,6 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
         "VECLIB_MAXIMUM_THREADS",
         "NUMEXPR_NUM_THREADS",
         "GOTO_NUM_THREADS",
-        "BLOSC_NTHREADS",
         # Our custom env var read by oceanbench's pyinterp wrappers
         "PYINTERP_NUM_THREADS",
         # Cap Python ThreadPoolExecutor in dc_catalog (default 16 -> saturates all CPUs)
@@ -232,24 +293,18 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
         threadpoolctl.threadpool_limits(limits=max_threads)
     except ImportError:
         pass
-    except Exception:
-        pass
 
-    # -- Blosc: NOT covered by threadpoolctl — cap explicitly ----------
-    # The Blosc compression library uses its own internal thread pool
-    # (independent of OpenMP and BLAS).  SWOT NetCDF/Zarr files are
-    # typically Blosc-compressed; allow more threads (4) for decent
-    # decompression throughput — Blosc is I/O-bound, not CPU-bound,
-    # so extra threads significantly improve read speed without
-    # causing CPU oversubscription.
-    _blosc_threads = max(4, max_threads)
+    _blosc_threads = _blosc_thread_count()
+    os.environ["BLOSC_NTHREADS"] = str(_blosc_threads)
     try:
-        import blosc
+        import blosc  # type: ignore[import-not-found]
         blosc.set_nthreads(_blosc_threads)
     except Exception:
         pass
     try:
-        from numcodecs import blosc as _nc_blosc
+        from numcodecs import blosc as _nc_blosc  # type: ignore[import-untyped]
         _nc_blosc.set_nthreads(_blosc_threads)
     except Exception:
         pass
+    if max_threads == 1:
+        _THREADS_CAPPED = True

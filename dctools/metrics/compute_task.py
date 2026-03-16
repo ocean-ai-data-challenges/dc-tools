@@ -8,10 +8,11 @@ lines).
 
 import gc
 import os
+import shutil
 import time
 import traceback
 from argparse import Namespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import dask
 import numpy as np
@@ -24,6 +25,7 @@ from dctools.data.datasets.dataloader import ObservationDataViewer, filter_by_ti
 from dctools.metrics.metrics import MetricComputer
 from dctools.metrics.worker_cleanup import (
     _cap_worker_threads,
+    _clear_stale_s3_state,
     _clear_xarray_file_cache,
     worker_memory_cleanup,
 )
@@ -38,6 +40,203 @@ try:
     from torchvision import transforms as _output_transforms
 except ImportError:
     _output_transforms = None
+
+
+def _open_prefetched_obs_data(
+    shared_obs_path: str,
+    time_bounds: Tuple[pd.Timestamp, pd.Timestamp],
+    n_points_dim: str,
+    ref_alias: str,
+    valid_time: Any,
+) -> Optional[xr.Dataset]:
+    """Open prefetched shared observation data for one worker time window."""
+    import json as _json_obs_manifest
+    from pathlib import Path as _OPath
+
+    import xarray as _xr_obs
+
+    _shared_path = _OPath(str(shared_obs_path))
+    _manifest_path = (
+        _shared_path / "manifest.json"
+        if _shared_path.is_dir()
+        else _shared_path.parent / "manifest.json"
+    )
+
+    if _manifest_path.is_file():
+        with open(_manifest_path) as _mf:
+            _manifest = _json_obs_manifest.load(_mf)
+
+        _t0 = np.datetime64(pd.Timestamp(time_bounds[0]))
+        _t1 = np.datetime64(pd.Timestamp(time_bounds[1]))
+        _t0_ns = float(np.datetime64(_t0, "ns").view(np.int64))
+        _t1_ns = float(np.datetime64(_t1, "ns").view(np.int64))
+        _manifest_dim = _manifest.get("n_points_dim", n_points_dim)
+
+        _relevant = [
+            _file_meta for _file_meta in _manifest["files"]
+            if _file_meta["t_min_ns"] <= _t1_ns
+            and _file_meta["t_max_ns"] >= _t0_ns
+            and _file_meta["n_points"] > 0
+            and os.path.exists(_file_meta["path"])
+        ]
+
+        if not _relevant:
+            logger.debug(
+                f"[{ref_alias}] valid_time={valid_time}: "
+                f"0 mini-zarrs overlap time window "
+                f"{time_bounds[0]}–{time_bounds[1]}"
+            )
+            return None
+
+        _paths = [f["path"] for f in _relevant]
+        try:
+            if len(_paths) == 1:
+                # Single mini-zarr: open directly (no concat overhead).
+                try:
+                    ref_data = _xr_obs.open_zarr(_paths[0], consolidated=True)
+                except Exception:
+                    ref_data = _xr_obs.open_zarr(_paths[0], consolidated=False)
+            else:
+                # Multiple mini-zarrs: use open_mfdataset for efficient
+                # batch opening instead of N individual open_zarr + concat.
+                # parallel=False avoids nested Dask-in-Dask scheduling.
+                try:
+                    ref_data = _xr_obs.open_mfdataset(
+                        _paths,
+                        engine="zarr",
+                        concat_dim=_manifest_dim,
+                        combine="nested",
+                        consolidated=True,
+                        parallel=False,
+                    )
+                except Exception:
+                    ref_data = _xr_obs.open_mfdataset(
+                        _paths,
+                        engine="zarr",
+                        concat_dim=_manifest_dim,
+                        combine="nested",
+                        consolidated=False,
+                        parallel=False,
+                    )
+
+            if _manifest_dim != n_points_dim and _manifest_dim in ref_data.dims:
+                ref_data = ref_data.rename({_manifest_dim: n_points_dim})
+
+            _time_key = _manifest.get("time_key", "time")
+            if _time_key in ref_data.coords or _time_key in ref_data.data_vars:
+                _tv = ref_data[_time_key]
+                ref_data = ref_data.where(
+                    (_tv >= _t0) & (_tv <= _t1),
+                    drop=True,
+                )
+
+            _obs_compute_timeout = int(
+                os.environ.get("DCTOOLS_OBS_COMPUTE_TIMEOUT", "120")
+            )
+            ref_data = _compute_with_timeout(
+                ref_data,
+                timeout_s=_obs_compute_timeout,
+                scheduler="synchronous",
+            )
+        finally:
+            # open_mfdataset manages its own file handles; explicit close
+            # is a safety measure for the single-file path.
+            try:
+                ref_data.close()  # type: ignore[possibly-undefined]
+            except Exception:
+                pass
+
+        if ref_data.sizes.get(n_points_dim, 0) == 0:
+            logger.debug(
+                f"[{ref_alias}] valid_time={valid_time}: "
+                f"0 points after time filter {time_bounds[0]}–{time_bounds[1]}"
+            )
+            return None
+
+        return ref_data
+
+    _zarr_target = str(shared_obs_path)
+    _batch_store = _shared_path / "batch_shared.zarr"
+    if _shared_path.is_dir() and _batch_store.is_dir():
+        _zarr_target = str(_batch_store)
+
+    try:
+        ref_data = _xr_obs.open_zarr(_zarr_target, consolidated=True)
+    except Exception:
+        ref_data = _xr_obs.open_zarr(_zarr_target, consolidated=False)
+
+    _t0 = np.datetime64(pd.Timestamp(time_bounds[0]))
+    _t1 = np.datetime64(pd.Timestamp(time_bounds[1]))
+    _zarr_parent = _OPath(_zarr_target).parent
+    _time_npy = str(_zarr_parent / "time_index.npy")
+    _time_vals = None
+    if os.path.exists(_time_npy):
+        _time_vals = np.load(_time_npy, mmap_mode="r")
+        if np.issubdtype(_time_vals.dtype, np.integer):
+            _time_vals = np.array(_time_vals).astype("datetime64[ns]")
+
+    if _time_vals is None:
+        _time_var = ref_data.coords.get("time")
+        if _time_var is not None:
+            if hasattr(_time_var, "compute"):
+                _time_vals = _time_var.compute(scheduler="synchronous").values
+            else:
+                _time_vals = _time_var.values
+            _time_vals = np.asarray(_time_vals)
+            if np.issubdtype(_time_vals.dtype, np.integer):
+                _time_vals = _time_vals.astype("datetime64[ns]")
+            elif not np.issubdtype(_time_vals.dtype, np.datetime64):
+                _time_vals = pd.to_datetime(_time_vals).values
+
+    if _time_vals is not None:
+        _obs_time_sorted = True
+        try:
+            _meta_json = str(_zarr_parent / "batch_metadata.json")
+            if os.path.exists(_meta_json):
+                with open(_meta_json) as _mj:
+                    _batch_meta = _json_obs_manifest.load(_mj)
+                _obs_time_sorted = bool(_batch_meta.get("time_sorted", True))
+        except Exception:
+            pass
+
+        if _obs_time_sorted:
+            _obs_time_sorted = (
+                len(_time_vals) <= 1
+                or bool(np.all(_time_vals[:-1] <= _time_vals[1:]))
+            )
+
+        if _obs_time_sorted:
+            _i0 = int(np.searchsorted(_time_vals, _t0, side="left"))
+            _i1 = int(np.searchsorted(_time_vals, _t1, side="right"))
+            ref_data = ref_data.isel({n_points_dim: slice(_i0, _i1)})
+        else:
+            _time_mask = (_time_vals >= _t0) & (_time_vals <= _t1)
+            ref_data = ref_data.isel({n_points_dim: _time_mask})
+
+    _obs_compute_timeout = int(
+        os.environ.get("DCTOOLS_OBS_COMPUTE_TIMEOUT", "120")
+    )
+    ref_data = _compute_with_timeout(
+        ref_data,
+        timeout_s=_obs_compute_timeout,
+        scheduler="synchronous",
+    )
+
+    try:
+        if hasattr(ref_data, "_file_obj") and ref_data._file_obj is not None:
+            ref_data._file_obj.close()
+    except Exception:
+        pass
+
+    if ref_data.sizes.get(n_points_dim, 0) == 0:
+        logger.debug(
+            f"[{ref_alias}] valid_time={valid_time}: "
+            f"0 observation points in the shared zarr for time window "
+            f"{time_bounds[0]}–{time_bounds[1]}"
+        )
+        return None
+
+    return ref_data
 
 def compute_metric(
     entry: Dict[str, Any],
@@ -119,6 +318,11 @@ def compute_metric(
             pred_data = pred_data_base
         else:
             pred_data = pred_source
+
+        if pred_data is None:
+            raise RuntimeError(
+                f"Failed to open prediction dataset: {pred_source!r}"
+            )
 
         # Simple nearest-neighbor time selection (original, fast approach)
         pred_data_selected = pred_data.sel(time=valid_time, method="nearest")  # type: ignore[union-attr]
@@ -331,12 +535,15 @@ def compute_metric(
                             "— falling back to live download"
                         )
 
-                # -- Shared obs zarr fast path (SWOT, saral, …) ------------
+                # -- Shared obs fast path (SWOT, saral, …) -----------------
                 # The driver has already preprocessed ALL unique observation
-                # files into a single shared zarr (see
-                # preprocess_batch_obs_files).  We open it, filter by this
-                # task's time_bounds, and skip per-file preprocessing
-                # entirely.
+                # files into per-file mini-zarrs and written a manifest.json
+                # listing paths + time ranges.  Workers open only the
+                # mini-zarrs that overlap their time window → no serial
+                # merge bottleneck on the driver, all CPUs stay busy.
+                #
+                # Legacy mode: if the path points to a single shared zarr
+                # (no manifest.json), fall back to the slice-based approach.
                 _shared_obs_zarr = (
                     ref_source.get("prefetched_obs_zarr_path")
                     if isinstance(ref_source, dict)
@@ -347,187 +554,20 @@ def compute_metric(
                     and _shared_obs_zarr
                     and os.path.exists(str(_shared_obs_zarr))
                 ):
-                    # Retry up to 3 times — with threaded workers,
-                    # concurrent zarr reads can hit transient I/O
-                    # or metadata-discovery races.
                     _zarr_last_exc = None
                     for _zarr_attempt in range(3):
                         try:
-                            import xarray as _xr_obs
-                            from pathlib import Path as _OPath
-
-                            # Prefer consolidated metadata (single
-                            # JSON read vs hundreds of small files).
-                            try:
-                                ref_data = _xr_obs.open_zarr(
-                                    str(_shared_obs_zarr),
-                                    consolidated=True,
-                                )
-                            except Exception:
-                                ref_data = _xr_obs.open_zarr(
-                                    str(_shared_obs_zarr),
-                                    consolidated=False,
-                                )
-
-                            # Filter by this task's time window.
-                            t0_tb, t1_tb = time_bounds
-                            _t0 = np.datetime64(pd.Timestamp(t0_tb))
-                            _t1 = np.datetime64(pd.Timestamp(t1_tb))
-
-                            # -- Zero-copy time index via sidecar .npy -----
-                            # The driver saves the sorted time array as a
-                            # contiguous .npy file during shared-zarr build.
-                            # Workers memory-map it (mmap_mode='r') so the OS
-                            # shares physical pages across workers.
-                            # The zarr is physically sorted by time, so
-                            # searchsorted gives positions i0..i1 that map
-                            # directly to contiguous zarr rows → slice(i0, i1).
-                            _zarr_parent = _OPath(str(_shared_obs_zarr)).parent
-                            _time_npy = str(_zarr_parent / "time_index.npy")
-                            _time_vals = None
-                            if os.path.exists(_time_npy):
-                                _time_vals = np.load(
-                                    _time_npy, mmap_mode="r"
-                                )
-                                if np.issubdtype(
-                                    _time_vals.dtype, np.integer
-                                ):
-                                    # mmap is read-only — copy for cast.
-                                    _time_vals = np.array(
-                                        _time_vals
-                                    ).astype("datetime64[ns]")
-
-                            if _time_vals is None:
-                                # Fallback: load time from zarr (expensive).
-                                _time_var = ref_data.coords.get("time")
-                                if _time_var is not None:
-                                    if hasattr(_time_var, "compute"):
-                                        _time_vals = _time_var.compute(
-                                            scheduler="synchronous"
-                                        ).values
-                                    else:
-                                        _time_vals = _time_var.values
-                                    _time_vals = np.asarray(_time_vals)
-                                    if np.issubdtype(
-                                        _time_vals.dtype, np.integer
-                                    ):
-                                        _time_vals = _time_vals.astype(
-                                            "datetime64[ns]"
-                                        )
-                                    elif not np.issubdtype(
-                                        _time_vals.dtype, np.datetime64
-                                    ):
-                                        _time_vals = pd.to_datetime(
-                                            _time_vals
-                                        ).values
-
-                            if _time_vals is not None:
-                                # Check if the shared zarr is time-sorted.
-                                # Batch metadata written by the driver
-                                # contains a "time_sorted" flag.  When
-                                # the zarr is unsorted (too many points
-                                # for global sort), use a boolean mask
-                                # instead of searchsorted.
-                                _obs_time_sorted = True
-                                try:
-                                    import json as _json_obs
-                                    _meta_json = str(
-                                        _zarr_parent / "batch_metadata.json"
-                                    )
-                                    if os.path.exists(_meta_json):
-                                        with open(_meta_json) as _mj:
-                                            _bm = _json_obs.load(_mj)
-                                        _obs_time_sorted = bool(
-                                            _bm.get("time_sorted", True)
-                                        )
-                                except Exception:
-                                    pass
-                                # Double-check with data if metadata
-                                # is missing.
-                                if _obs_time_sorted:
-                                    _obs_time_sorted = (
-                                        len(_time_vals) <= 1
-                                        or bool(
-                                            np.all(
-                                                _time_vals[:-1]
-                                                <= _time_vals[1:]
-                                            )
-                                        )
-                                    )
-
-                                if _obs_time_sorted:
-                                    # Sorted: searchsorted → contiguous
-                                    # slice (fast, cache-friendly).
-                                    _i0 = int(
-                                        np.searchsorted(
-                                            _time_vals, _t0, side="left",
-                                        )
-                                    )
-                                    _i1 = int(
-                                        np.searchsorted(
-                                            _time_vals, _t1, side="right",
-                                        )
-                                    )
-                                    ref_data = ref_data.isel(
-                                        {n_points_dim: slice(_i0, _i1)}
-                                    )
-                                else:
-                                    # Unsorted: boolean mask filtering.
-                                    # Slightly slower per-task but avoids
-                                    # the catastrophic driver-side sort
-                                    # that would materialise 60M+ pts.
-                                    _tmask = (
-                                        (_time_vals >= _t0)
-                                        & (_time_vals <= _t1)
-                                    )
-                                    ref_data = ref_data.isel(
-                                        {n_points_dim: _tmask}
-                                    )
-
-                            # Use timeout to prevent indefinite hangs
-                            # on corrupted zarr or filesystem issues.
-                            _obs_compute_timeout = int(
-                                os.environ.get(
-                                    "DCTOOLS_OBS_COMPUTE_TIMEOUT", "120"
-                                )
+                            ref_data = _open_prefetched_obs_data(
+                                str(_shared_obs_zarr),
+                                time_bounds,
+                                n_points_dim,
+                                str(ref_alias or ""),
+                                valid_time,
                             )
-                            ref_data = _compute_with_timeout(
-                                ref_data,
-                                timeout_s=_obs_compute_timeout,
-                                scheduler="synchronous",
-                            )
-
-                            # Close the zarr store immediately after
-                            # compute — we now hold pure numpy arrays.
-                            # This releases file handles and zarr metadata
-                            # buffers, reducing unmanaged memory when
-                            # multiple threads on the same worker each
-                            # open the shared zarr concurrently.
-                            try:
-                                if hasattr(ref_data, '_file_obj') and ref_data._file_obj is not None:
-                                    ref_data._file_obj.close()
-                            except Exception:
-                                pass
-                            # Drop references to time_vals to free the
-                            # mmap or numpy array used for time indexing.
-                            del _time_vals
-
-                            if ref_data.sizes.get(
-                                n_points_dim, 0
-                            ) == 0:
-                                logger.debug(
-                                    f"[{ref_alias}] valid_time={valid_time}: "
-                                    f"0 observation points in the shared zarr "
-                                    f"for time window {time_bounds[0]}–{time_bounds[1]}. "
-                                    f"This may indicate missing source files in the "
-                                    f"catalog for this date (incomplete download or "
-                                    f"data gap from the provider) — result will be null."
-                                )
-                                ref_data = None
-
                             _used_prefetch = True
                             _zarr_last_exc = None
-                            break  # success
+                            break
+
                         except Exception as exc:
                             _zarr_last_exc = exc
                             ref_data = None
@@ -541,22 +581,15 @@ def compute_metric(
                     if _zarr_last_exc is not None:
                         import traceback as _tb_zarr
                         logger.warning(
-                            f"Cannot use shared obs zarr "
+                            f"Cannot use shared obs data "
                             f"'{_shared_obs_zarr}' after 3 "
                             f"attempts: {_zarr_last_exc!r}\n"
                             f"{_tb_zarr.format_exc()}"
                         )
 
                 if not _used_prefetch:
-                    # -- Memory guard: cap files processed per worker ------
-                    # Without the shared Zarr, each worker opens ALL matching
-                    # files independently.  For SWOT, a single time_tolerance
-                    # window (24 h) typically matches ~25 swath files at
-                    # ~15 MB each (≈375 MB), well within the 6 GB budget.
-                    # Cap to 50 files to handle SWOT safely while still
-                    # preventing runaway loads.
                     _MAX_FILES_PER_WORKER = int(
-                        os.environ.get("DCTOOLS_MAX_OBS_FILES_PER_WORKER", "50")
+                        os.environ.get("DCTOOLS_MAX_OBS_FILES_PER_WORKER", "30")
                     )
                     _n_ref_files = len(ref_df)
                     logger.debug(
@@ -564,24 +597,100 @@ def compute_metric(
                         f"{_n_ref_files} obs files for time window "
                         f"{time_bounds[0]}–{time_bounds[1]}"
                     )
-                    if _n_ref_files > _MAX_FILES_PER_WORKER:
-                        logger.warning(
-                            f"Worker fallback ({ref_alias}): {_n_ref_files} files "
-                            f"exceed per-worker limit {_MAX_FILES_PER_WORKER}. "
-                            f"Truncating to avoid OOM.  Set "
-                            f"DCTOOLS_MAX_OBS_FILES_PER_WORKER=0 to disable."
+                    _worker_shared_dir = None
+                    if (
+                        _MAX_FILES_PER_WORKER > 0
+                        and _n_ref_files > _MAX_FILES_PER_WORKER
+                    ):
+                        _unique_local_paths = []
+                        if "path" in ref_df.columns:
+                            _unique_local_paths = list(
+                                dict.fromkeys(str(_path) for _path in ref_df["path"].tolist())
+                            )
+
+                        _all_local_paths_available = bool(_unique_local_paths) and all(
+                            os.path.exists(_path) for _path in _unique_local_paths
                         )
-                        if _MAX_FILES_PER_WORKER > 0:
-                            ref_df = ref_df.head(_MAX_FILES_PER_WORKER)
-                    ref_raw_data = ObservationDataViewer(
-                        ref_df,
-                        open_ref_func, str(ref_alias or ""),
-                        keep_vars, target_dimensions, metadata,
-                        time_bounds,
-                        n_points_dim=n_points_dim,
-                        dataset_processor=None,
-                    )
-                    ref_data = ref_raw_data.preprocess_datasets(ref_df)
+
+                        if _all_local_paths_available:
+                            logger.info(
+                                f"Worker fallback ({ref_alias}): {_n_ref_files} files exceed "
+                                f"limit {_MAX_FILES_PER_WORKER}; building a local shared obs "
+                                "store instead of dropping files"
+                            )
+                            from tempfile import mkdtemp
+
+                            from dctools.data.datasets.batch_preprocessing import (
+                                preprocess_batch_obs_files,
+                            )
+
+                            _coord_system = (
+                                metadata.get("coord_system")
+                                if isinstance(metadata, dict)
+                                else getattr(metadata, "coord_system", None)
+                            )
+                            _coord_map = getattr(_coord_system, "coordinates", None)
+                            if isinstance(_coord_map, dict):
+                                _coord_map = dict(_coord_map)
+                            elif hasattr(_coord_map, "items"):
+                                _coord_map = dict(_coord_map.items())
+                            else:
+                                _coord_map = {"time": "time"}
+
+                            _worker_shared_dir = mkdtemp(
+                                prefix=f"dctools_{ref_alias}_worker_obs_"
+                            )
+                            try:
+                                _worker_shared_path = preprocess_batch_obs_files(
+                                    local_paths=_unique_local_paths,
+                                    alias=str(ref_alias or ""),
+                                    keep_vars=keep_vars,
+                                    coordinates=_coord_map,
+                                    n_points_dim=n_points_dim,
+                                    output_zarr_dir=_worker_shared_dir,
+                                    max_shared_obs_files=len(_unique_local_paths),
+                                    prep_workers=1,
+                                    prep_use_processes=False,
+                                )
+                            except Exception as _shared_exc:
+                                logger.warning(
+                                    f"Worker fallback ({ref_alias}): local shared obs build failed; "
+                                    f"continuing with direct local preprocessing ({_shared_exc!r})"
+                                )
+                                _worker_shared_path = None
+
+                            if _worker_shared_path:
+                                ref_data = _open_prefetched_obs_data(
+                                    _worker_shared_path,
+                                    time_bounds,
+                                    n_points_dim,
+                                    str(ref_alias or ""),
+                                    valid_time,
+                                )
+                                _used_prefetch = True
+                            else:
+                                logger.warning(
+                                    f"Worker fallback ({ref_alias}): local shared obs store unavailable; "
+                                    "continuing with direct local preprocessing."
+                                )
+
+                        if not _used_prefetch and not _all_local_paths_available:
+                            raise RuntimeError(
+                                f"Worker fallback ({ref_alias}) would require processing "
+                                f"{_n_ref_files} files without shared preprocessing; "
+                                "aborting instead of silently dropping files."
+                            )
+
+                    if not _used_prefetch:
+                        ref_raw_data = ObservationDataViewer(
+                            ref_df,
+                            open_ref_func, str(ref_alias or ""),
+                            keep_vars, target_dimensions, metadata,
+                            time_bounds,
+                            n_points_dim=n_points_dim,
+                            dataset_processor=None,
+                        )
+                        ref_data = ref_raw_data.preprocess_datasets(ref_df)
             else:
                 # Non-observation references are passed as a single source
                 # (typically a path string or datetime for CMEMS). Do not pass
@@ -690,22 +799,88 @@ def compute_metric(
             # _compute_with_timeout() runs the compute in a daemon thread and
             # raises after DCTOOLS_S3_COMPUTE_TIMEOUT seconds (default 90 s).
             _s3_timeout = int(os.environ.get("DCTOOLS_S3_COMPUTE_TIMEOUT", "90"))
-            pred_data = _compute_with_timeout(
-                pred_data, timeout_s=_s3_timeout, scheduler="synchronous"
-            )
+            try:
+                pred_data = _compute_with_timeout(
+                    pred_data, timeout_s=_s3_timeout, scheduler="synchronous"
+                )
+            except RuntimeError as _timeout_err:
+                if "timed out" not in str(_timeout_err):
+                    raise
+                # Stale S3 connection — clear caches and retry once with
+                # a fresh filesystem so the new dask graph gets live
+                # aiobotocore sessions.
+                logger.warning(
+                    f"[{ref_alias}] pred_data.compute() timed out — "
+                    f"clearing S3 caches and retrying with fresh connection"
+                )
+                _clear_stale_s3_state()
+                # Restore protocol (deleted by create_worker_connect_config)
+                pred_source_config.protocol = pred_protocol
+                _retry_open = create_worker_connect_config(
+                    pred_source_config, argo_index
+                )
+                if isinstance(pred_source, str):
+                    pred_data = _retry_open(pred_source)
+                else:
+                    pred_data = pred_source
+                if pred_data is None:
+                    raise RuntimeError(
+                        f"Retry failed: cannot re-open prediction "
+                        f"dataset: {pred_source!r}"
+                    ) from _timeout_err
+                # Re-apply time selection
+                pred_data = pred_data.sel(time=valid_time, method="nearest")
+                if "time" not in pred_data.dims:
+                    pred_data = pred_data.expand_dims("time")
+                    pred_data = pred_data.assign_coords(time=[valid_time])
+                else:
+                    pred_data = pred_data.assign_coords(time=[valid_time])
+                if _pred_keep and hasattr(pred_data, "data_vars"):
+                    _pk = [v for v in list(_pred_keep) if v in pred_data.data_vars]
+                    if _pk:
+                        pred_data = pred_data[_pk]
+                if reduce_precision:
+                    pred_data = to_float32(pred_data)
+                if pred_transform is not None:
+                    pred_data = pred_transform(pred_data)
+                if (
+                    pred_data is not None
+                    and hasattr(pred_data, 'chunks')
+                    and pred_data.chunks
+                ):
+                    pred_data = _compute_with_timeout(
+                        pred_data, timeout_s=_s3_timeout,
+                        scheduler="synchronous",
+                    )
 
         # Grid-to-Track interpolation is now handled internally by Class4 metrics
         # if run_grid_to_track and ref_data is not None:
         #    pass
 
         if ref_data is not None and ref_transform is not None:
+            _ref_data_before_transform = ref_data
             ref_data = ref_transform(ref_data)
             # Re-materialize if transform produced new lazy arrays
             if hasattr(ref_data, 'chunks') and ref_data.chunks:
                 _s3_timeout = int(os.environ.get("DCTOOLS_S3_COMPUTE_TIMEOUT", "90"))
-                ref_data = _compute_with_timeout(
-                    ref_data, timeout_s=_s3_timeout, scheduler="synchronous"
-                )
+                try:
+                    ref_data = _compute_with_timeout(
+                        ref_data, timeout_s=_s3_timeout, scheduler="synchronous"
+                    )
+                except RuntimeError as _timeout_err:
+                    if "timed out" not in str(_timeout_err):
+                        raise
+                    logger.warning(
+                        f"[{ref_alias}] ref_data.compute() timed out — "
+                        f"clearing S3 caches and retrying"
+                    )
+                    _clear_stale_s3_state()
+                    ref_data = ref_transform(_ref_data_before_transform)
+                    if hasattr(ref_data, 'chunks') and ref_data.chunks:
+                        ref_data = _compute_with_timeout(
+                            ref_data, timeout_s=_s3_timeout,
+                            scheduler="synchronous",
+                        )
 
         if reduce_precision:
             # pred_data is already float32.
@@ -904,54 +1079,18 @@ def compute_metric(
             "result": None,
             "error": repr(exc),
         }
-
     finally:
-        # NOTE: We intentionally do not restore the dask scheduler
-        # here.  The driver sets scheduler="synchronous" once before
-        # task dispatch.  Restoring "distributed" in the finally
-        # block of one thread created a race condition that undid the
-        # fix for other threads still running -> deadlock.
-
-        # Aggressive memory release at end of task
-        if 'pred_data' in locals():
-            try:
-                _skip_close = (
-                    bool(locals().get("pred_data_from_cache"))
-                    and ("pred_data_base" in locals())
-                    and (pred_data is locals().get("pred_data_base"))
-                )
-                if not _skip_close and hasattr(pred_data, 'close'):
-                    pred_data.close()  # type: ignore[union-attr]
-                del pred_data
-            except Exception:
-                pass
-
-        if 'ref_data' in locals():
-            try:
-                # Handle list of datasets (e.g. from observation data viewer)
-                if isinstance(ref_data, list):
-                    for ds in ref_data:
-                        try:
-                            if hasattr(ds, 'close'):
-                                ds.close()
-                        except Exception:
-                            pass
-                else:
-                    _skip_close = (
-                        bool(locals().get("ref_data_from_cache"))
-                        and ("ref_data_base" in locals())
-                        and (ref_data is locals().get("ref_data_base"))
-                    )
-                    if (not _skip_close) and hasattr(ref_data, 'close'):
-                        ref_data.close()
-                del ref_data
-            except Exception:
-                pass
-        # pred_data_selected variable does not exist in the scope, removing it
-        # if 'pred_data_selected' in locals():
-        #     try:
-        #         del pred_data_selected
-        #     except Exception: pass
-
+        # R9: Aggressive memory cleanup at the end of each task.
+        # This is critical to prevent memory leaks from accumulating across
+        # a batch, especially with large observation datasets.
+        # Explicitly delete large objects and trigger garbage collection.
+        for var_name in ['pred_data', 'ref_data', 'pred_data_selected', 'pred_data_base', 'ref_data_base']:
+            if var_name in locals():
+                try:
+                    del locals()[var_name]
+                except Exception:
+                    pass
+        
+        # Call the dedicated cleanup utility.
         worker_memory_cleanup()
 

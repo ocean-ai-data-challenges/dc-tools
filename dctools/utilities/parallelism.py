@@ -54,6 +54,8 @@ _ENV_OVERRIDES: Dict[str, tuple[str, type]] = {
     "stall_timeout": ("DCTOOLS_EVAL_STALL_TIMEOUT", int),
     "prep_workers": ("DCTOOLS_PREP_WORKERS", int),
     "max_shared_obs_files": ("DCTOOLS_SHARED_OBS_MAX_FILES", int),
+    "max_obs_files_per_batch": ("DCTOOLS_MAX_OBS_FILES_PER_BATCH", int),
+    "obs_viewer_threads": ("DCTOOLS_OBS_VIEWER_THREADS", int),
     "worker_cache_size": ("DCTOOLS_WORKER_DATASET_CACHE_SIZE", int),
     "worker_scale": ("DCTOOLS_WORKER_SCALE", float),
 }
@@ -84,8 +86,9 @@ class ParallelismConfig:
     prep_workers: int = 0               # 0 = auto
     prep_use_processes: bool = True     # ProcessPool (True) vs ThreadPool
     max_shared_obs_files: int = 5000    # skip shared zarr above this count
-    use_distributed_prep: bool = False  # R5: use Dask cluster for preprocessing
-    obs_viewer_threads: int = 4         # R7: parallel threads in ObservationDataViewer
+    max_obs_files_per_batch: int = 150  # volume-aware batch split threshold
+    use_distributed_prep: bool = True   # R5: use Dask cluster for preprocessing (avoids ProcessPool/Dask RAM competition)
+    obs_viewer_threads: int = 2         # R7: parallel threads in ObservationDataViewer (reduced to avoid contention)
 
     # -- Data prefetch (S3 --> local) -----------------------------------
     enable_ref_prefetch: bool = True
@@ -235,6 +238,7 @@ class ParallelismConfig:
         return {
             "DCTOOLS_S3_COMPUTE_TIMEOUT": str(self.compute_timeout),
             "DCTOOLS_OBS_COMPUTE_TIMEOUT": str(self.obs_compute_timeout),
+            "DCTOOLS_OBS_VIEWER_THREADS": str(self.obs_viewer_threads),
             "DCTOOLS_WORKER_DATASET_CACHE_SIZE": str(self.worker_cache_size),
             "BLOSC_NTHREADS": str(self.blosc_threads),
         }
@@ -346,3 +350,31 @@ class ParallelismConfig:
         adapted = adapt_parallelism_profile(current, machine, ref)
         # Preserve frozen semantics.
         return ParallelismConfig(**adapted)
+
+    def _adapt_obs_dask_cfg(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Specially adapt Dask config for observation datasets.
+
+        Forces threads_per_worker=1 to prevent CPU oversubscription from
+        C-level libraries (pyinterp, BLAS) and compensates by increasing
+        n_workers to leverage all available cores.
+        """
+        adapted_cfg = cfg.copy()
+
+        # Force single-threaded workers for obs tasks
+        adapted_cfg["threads_per_worker"] = 1
+
+        # Compensate by increasing worker count if machine info is available
+        machine = self.get_machine_resources()
+        if machine and machine.cpu_count > 0:
+            # Use all available cores as workers
+            adapted_cfg["n_workers"] = machine.cpu_count
+
+        return adapted_cfg
+
+    # R9: Force threads_per_worker=1 for observation datasets
+    # This is a critical fix to prevent CPU oversubscription.
+    from dctools.data.datasets.dataset import is_observation_alias
+
+    def is_observation_alias(self, alias: str) -> bool:
+        """Check if the dataset alias is an observation dataset."""
+        return is_observation_alias(alias)

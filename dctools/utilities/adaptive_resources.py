@@ -395,9 +395,12 @@ def adapt_dask_cfg(
     ideal_threads = yaml_threads * worker_scale
     threads_per_worker = max(1, min(4, round(ideal_threads)))
 
-    # ---- Cap total CPU slots (allow mild ~1.5× oversubscription) ----
+    # ---- Cap total CPU slots (no oversubscription for CPU-bound workloads) ----
+    # pyinterp and similar C++ kernels release the GIL but still consume
+    # physical CPU time; 1.5× oversubscription caused thrashing.  Keep
+    # total slots ≤ physical cores.
     total_cpu_slots = n_workers * threads_per_worker
-    max_slots = max(2, int(machine.cpu_count * 1.5))
+    max_slots = max(2, int(machine.cpu_count * 1.0))
     if total_cpu_slots > max_slots:
         if threads_per_worker > 1:
             threads_per_worker = max(1, machine.cpu_count // n_workers)
@@ -405,17 +408,16 @@ def adapt_dask_cfg(
         if total_cpu_slots > max_slots:
             n_workers = max(1, max_slots // threads_per_worker)
 
-    # ---- Last-resort RAM guard ----
-    # Only kick in when the machine has dramatically less total RAM than
-    # the reference (ratio < 0.5).  In that case, reduce workers so the
-    # total *theoretical* memory footprint doesn't exceed total RAM × 2.
-    # (Factor 2 because memory_limit is a spill threshold, not a hard
-    # reservation: Dask workers spill to disk before hitting the limit.)
-    total_ram = machine.total_ram_gb
-    ram_ratio = total_ram / max(1.0, ref.total_ram_gb)
-    if ram_ratio < 0.5:
-        max_workers_by_ram = max(1, int(total_ram * 2 / yaml_mem_gb))
-        n_workers = min(n_workers, max_workers_by_ram)
+    # ---- RAM guard: unconditional, based on usable RAM ----
+    # Apply always (not only when ratio < 0.5): n_workers × memory_limit
+    # must not exceed usable_ram_gb × 1.5.  Factor 1.5 accounts for
+    # memory_limit being a spill threshold (not a hard reservation);
+    # actual peak RSS per worker is typically 0.6–0.8× memory_limit.
+    # Using usable_ram_gb (not total_ram_gb) to account for OS and driver
+    # overhead already subtracted via usable_fraction.
+    usable_ram = machine.usable_ram_gb
+    max_workers_by_ram = max(1, int(usable_ram * 1.5 / max(yaml_mem_gb, 0.5)))
+    n_workers = min(n_workers, max_workers_by_ram)
 
     # ---- Memory limit: always use the YAML value ----
     # This is the dataset's intrinsic decompression/processing need.
@@ -450,6 +452,7 @@ def adapt_parallelism_profile(
     - ``prep_workers`` (0=auto stays 0)
     - ``prefetch_workers``
     - ``prefetch_obs_workers``
+    - ``obs_viewer_threads``
     - ``obs_batch_size``
     - ``gridded_batch_size``
 
@@ -476,6 +479,12 @@ def adapt_parallelism_profile(
     for key in ("prefetch_workers", "prefetch_obs_workers"):
         if key in result:
             result[key] = max(1, round(int(result[key]) * cpu_ratio))
+
+    if "obs_viewer_threads" in result:
+        result["obs_viewer_threads"] = max(
+            1,
+            min(8, round(int(result["obs_viewer_threads"]) * cpu_ratio)),
+        )
 
     # prep_workers: 0 means auto, keep it
     if result.get("prep_workers", 0) > 0:

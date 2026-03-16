@@ -70,8 +70,13 @@ def concat_with_dim(
     join_mode = "outer"
     compat_mode = "no_conflicts"
 
-    # If we concatenate on time or n_points for massive data, override is much faster
-    if len(datasets) > 10:
+    # If we concatenate many datasets, override is much faster but skips
+    # coordinate compatibility checks.  Threshold is configurable.
+    import os as _os
+    _override_threshold = int(
+        _os.environ.get("DCTOOLS_CONCAT_OVERRIDE_THRESHOLD", "10")
+    )
+    if len(datasets) > _override_threshold:
         join_mode = "override"
         compat_mode = "override"
 

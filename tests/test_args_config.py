@@ -145,9 +145,14 @@ class TestParallelismConfig:
         assert cfg is original
 
     def test_worker_env_vars(self):
-        cfg = ParallelismConfig(compute_timeout=120, blosc_threads=4)
+        cfg = ParallelismConfig(
+            compute_timeout=120,
+            blosc_threads=4,
+            obs_viewer_threads=6,
+        )
         env = cfg.worker_env_vars()
         assert env["DCTOOLS_S3_COMPUTE_TIMEOUT"] == "120"
+        assert env["DCTOOLS_OBS_VIEWER_THREADS"] == "6"
         assert env["BLOSC_NTHREADS"] == "4"
 
     def test_dask_memory_config(self):

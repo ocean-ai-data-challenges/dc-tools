@@ -140,6 +140,18 @@ class EvaluationDataloader:
 
     def _generate_batches(self) -> Generator[List[Dict[str, Any]], None, None]:
         batch: List[Any] = []
+        # -- Volume-aware batch splitting for observation datasets ---------
+        # Instead of splitting purely by entry count (obs_batch_size), also
+        # track the cumulative number of unique observation files across the
+        # batch.  When the file count exceeds the threshold the batch is
+        # yielded early, preventing a single batch from accumulating far
+        # more data than the driver can preprocess in RAM.
+        # Configurable via the dataloader param or DCTOOLS_MAX_OBS_FILES_PER_BATCH.
+        import os as _os_gen
+        _MAX_OBS_FILES: int = int(getattr(
+            self, "max_obs_files_per_batch", 0,
+        ) or _os_gen.environ.get("DCTOOLS_MAX_OBS_FILES_PER_BATCH", "150"))
+        _batch_obs_paths: set = set()
         try:
             # Check maximum available date in reference data
             if self.forecast_index is None:
@@ -147,6 +159,7 @@ class EvaluationDataloader:
                 return
 
             for ref_alias in self.ref_aliases:
+                _batch_obs_paths = set()  # reset per ref_alias
                 for _, row in self.forecast_index.iterrows():
                     # Check if enough data for this forecast
                     forecast_reference_time = row["forecast_reference_time"]
@@ -194,6 +207,7 @@ class EvaluationDataloader:
                             if batch:
                                 yield batch
                                 batch = []
+                                _batch_obs_paths = set()
                             break
 
                         # ref_catalog = self.ref_catalogs[ref_alias]
@@ -219,6 +233,29 @@ class EvaluationDataloader:
                             t0 = t0 - self.time_tolerance
                             t1 = t1 + self.time_tolerance
                             time_bounds = (t0, t1)
+
+                            # -- Volume estimation for this entry ------
+                            # Count how many unique observation files this
+                            # entry would add to the current batch.  If the
+                            # projected total exceeds the threshold, yield
+                            # the current batch first to cap driver-side
+                            # memory usage during shared zarr construction.
+                            _entry_paths = set(
+                                filter_by_time(ref_df, t0, t1)["path"].tolist()
+                            )
+                            _projected = len(_batch_obs_paths | _entry_paths)
+                            if batch and _projected > _MAX_OBS_FILES:
+                                logger.debug(
+                                    f"Volume split ({ref_alias}): {_projected} "
+                                    f"unique files would exceed limit "
+                                    f"{_MAX_OBS_FILES} — yielding batch "
+                                    f"({len(batch)} entries, "
+                                    f"{len(_batch_obs_paths)} files)"
+                                )
+                                yield batch
+                                batch = []
+                                _batch_obs_paths = set()
+                            _batch_obs_paths |= _entry_paths
 
                             entry["ref_data"] = {
                                 "source": ref_catalog,
@@ -257,9 +294,11 @@ class EvaluationDataloader:
                     if len(batch) >= _effective_bs:
                         yield batch
                         batch = []
+                        _batch_obs_paths = set()
                 if batch:  # last batch of ref_alias
                     yield batch
                     batch = []
+                    _batch_obs_paths = set()
         except Exception as e:
             logger.error(f"Error generating batches: {e}")
             traceback.print_exc()

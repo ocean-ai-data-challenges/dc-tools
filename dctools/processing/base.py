@@ -179,6 +179,11 @@ class BaseDCEvaluation:
                 continue
             cfg = self._extract_dask_cfg_from_source(source)
             if cfg:
+                # Force threads_per_worker=1 for observation datasets to
+                # prevent CPU oversubscription from C-level libraries
+                # (pyinterp, BLAS, OpenMP) that release the GIL.
+                if source.get("observation_dataset", False):
+                    cfg = self.pcfg._adapt_obs_dask_cfg(cfg)
                 cfgs[str(dataset)] = cfg
         return cfgs
 
@@ -1136,6 +1141,7 @@ class BaseDCEvaluation:
                 ref_aliases=effective_references,
                 obs_batch_size=_obs_batch_size,
                 gridded_batch_size=_gridded_batch_size,
+                max_obs_files_per_batch=self.pcfg.max_obs_files_per_batch,
                 pred_transform=pred_transform,
                 ref_transforms=ref_transforms,  # type: ignore[arg-type]
                 forecast_mode=forecast_mode,

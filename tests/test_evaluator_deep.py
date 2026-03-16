@@ -107,7 +107,7 @@ class TestReconfigureClusterForRef:
             new_dp = MagicMock()
             new_dp.client = MagicMock()
             MockDP.return_value = new_dp
-            with patch("dctools.utilities.init_dask.configure_dask_workers_env"):
+            with patch("dctools.utilities.init_dask.configure_dask_workers_env") as configure_env:
                 ev._reconfigure_cluster_for_ref("obs2")
 
         old_dp.close.assert_called_once()
@@ -117,6 +117,7 @@ class TestReconfigureClusterForRef:
             threads_per_worker=2,
             memory_limit="8GB",
         )
+        configure_env.assert_called_once_with(new_dp.client, ev.pcfg)
         assert ev._current_cluster_ref == "obs2"
         assert ev.baseline_memory is None
 

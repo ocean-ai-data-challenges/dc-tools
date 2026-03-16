@@ -16,14 +16,30 @@ import numpy as np
 import xarray as xr
 
 
-def _drop_nan_points(ds: xr.Dataset, n_points_dim: str) -> xr.Dataset:
-    """Drop points where ALL data variables are NaN along n_points_dim.
+# Variable names that are positional metadata, not scientific measurements.
+# NaN filtering should only consider actual measurement variables.
+_COORD_LIKE_VARS = frozenset({
+    "latitude", "longitude", "lat", "lon", "LATITUDE", "LONGITUDE",
+    "time", "TIME", "JULD", "depth", "DEPTH", "PRES",
+})
+
+
+def _drop_nan_points(
+    ds: xr.Dataset,
+    n_points_dim: str,
+    exclude_vars: Optional[frozenset] = None,
+) -> xr.Dataset:
+    """Drop points where ALL *measurement* variables are NaN along n_points_dim.
 
     SWOT swath grids stack every (num_lines, num_pixels) cell, including
     land, ice, and orbital-gap areas that are entirely fill-value.  These
     NaN-only points can represent 60-90 % of each file's size and have
     zero scientific value.  Removing them immediately after per-file
     compute() keeps the accumulator list lean before the final concat.
+
+    Coordinate-like variables (lat, lon, time, depth) are excluded from
+    the mask computation by default — a point with valid lat/lon but
+    all-NaN measurements is not scientifically useful.
     """
     if n_points_dim not in ds.dims:
         return ds
@@ -32,8 +48,12 @@ def _drop_nan_points(ds: xr.Dataset, n_points_dim: str) -> xr.Dataset:
     if n_pts == 0:
         return ds
 
+    _exclude = exclude_vars if exclude_vars is not None else _COORD_LIKE_VARS
+
     valid_mask: Optional[np.ndarray] = None
     for vname in ds.data_vars:
+        if vname in _exclude:
+            continue
         v = ds[vname]
         if n_points_dim not in v.dims:
             continue
@@ -61,7 +81,11 @@ def _drop_nan_points(ds: xr.Dataset, n_points_dim: str) -> xr.Dataset:
     return ds.isel({n_points_dim: valid_mask})
 
 
-def _build_nan_mask(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
+def _build_nan_mask(
+    ds: xr.Dataset,
+    n_points_dim: str,
+    exclude_vars: Optional[frozenset] = None,
+) -> Optional[np.ndarray]:
     """Return a pre-computed 1-D boolean mask of *valid* (non-all-NaN) points.
 
     Unlike :func:`_drop_nan_points` (which works on already-computed numpy
@@ -69,6 +93,9 @@ def _build_nan_mask(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
     that xarray never needs to materialise the full dataset in RAM.  Dask
     evaluates the mask chunk-by-chunk (peak ≈ one chunk); the returned numpy
     array is only *n_pts* booleans (≪ full data).
+
+    Coordinate-like variables are excluded by default (same as
+    :func:`_drop_nan_points`).
 
     Returns
     -------
@@ -81,8 +108,12 @@ def _build_nan_mask(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
 
     import dask.array as da  # local import to keep module-level deps clean
 
+    _exclude = exclude_vars if exclude_vars is not None else _COORD_LIKE_VARS
+
     combined_mask = None
     for vname in ds.data_vars:
+        if vname in _exclude:
+            continue
         v = ds[vname]
         if n_points_dim not in v.dims:
             continue
@@ -115,17 +146,27 @@ def _build_nan_mask(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
     return mask_np
 
 
-def _nan_mask_numpy(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
+def _nan_mask_numpy(
+    ds: xr.Dataset,
+    n_points_dim: str,
+    exclude_vars: Optional[frozenset] = None,
+) -> Optional[np.ndarray]:
     """Build NaN mask from an already-computed (in-memory) dataset.
 
     Unlike :func:`_build_nan_mask` (which creates a dask graph and reads data
     lazily), this operates on numpy arrays directly.  Use it **after**
     ``.compute()`` to avoid the double-read penalty.
+
+    Coordinate-like variables are excluded by default (same as
+    :func:`_drop_nan_points`).
     """
     if n_points_dim not in ds.dims or ds.sizes.get(n_points_dim, 0) == 0:
         return None
+    _exclude = exclude_vars if exclude_vars is not None else _COORD_LIKE_VARS
     combined: Optional[np.ndarray] = None
     for vname in ds.data_vars:
+        if vname in _exclude:
+            continue
         v = ds[vname]
         if n_points_dim not in v.dims:
             continue

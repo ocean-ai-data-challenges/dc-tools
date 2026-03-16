@@ -132,43 +132,142 @@ def swath_to_points(
         # Already flat
         return ds
 
-    swath_dims = [d for d in ds.dims if d not in ("time", n_points_dim)]
+    # Identify swath dimensions: use drop_coords (known swath dim names)
+    # intersected with actual dataset dims.  Fall back to "all non-time,
+    # non-n_points dims" only when no drop_coords dim is present.
+    _known_swath = [d for d in drop_coords if d in ds.dims]
+    if _known_swath:
+        swath_dims = _known_swath
+    else:
+        swath_dims = [d for d in ds.dims if d not in ("time", n_points_dim)]
     if not swath_dims:
         raise ValueError("No swath dims found (already 1D or unexpected format).")
 
-    # Stack swath dims into 'n_points'
-    ds_flat = ds.stack(n_points=swath_dims)
+    # -- R4: Reshape WITHOUT MultiIndex --------------------------------
+    # ds.stack(n_points=swath_dims) creates a pd.MultiIndex of tuples
+    # (~50 MB per file for SWOT) only to be immediately replaced with an
+    # integer range.  Instead, compute total n_points and reshape each
+    # variable directly — no MultiIndex ever created.
+    import dask.array as da
+
+    n_pts = 1
+    for d in swath_dims:
+        n_pts *= ds.sizes[d]
 
     # Save important Coordinates before removal
     coords_to_reassign: Dict[Any, Any] = {}
     for coord in coords_to_keep:
         if coord in ds.coords:
             arr = ds.coords[coord]
-            # If the coordinate depends on swath dims, we reindex it on n_points
             if set(arr.dims) <= set(swath_dims):
-                # Use .data to preserve dask arrays instead of .values (which forces compute)
-                coords_to_reassign[coord] = arr.stack(n_points=swath_dims).data
+                # Coordinate spans some/all swath dims.
+                # If it covers ALL swath dims, just flatten.
+                # If it covers a SUBSET, broadcast first then flatten.
+                if set(arr.dims) == set(swath_dims):
+                    raw = arr.data
+                    if hasattr(raw, 'reshape'):
+                        coords_to_reassign[coord] = raw.reshape(-1)
+                    else:
+                        coords_to_reassign[coord] = np.asarray(arr.values).reshape(-1)
+                else:
+                    # Partial coverage: e.g. time(num_lines,) needs
+                    # repeating across num_pixels to match n_pts.
+                    raw = arr.data
+                    if isinstance(raw, da.Array):
+                        bcast = da.broadcast_to(
+                            raw.reshape(
+                                tuple(ds.sizes[d] if d in arr.dims else 1 for d in swath_dims)
+                            ),
+                            tuple(ds.sizes[d] for d in swath_dims),
+                        )
+                        coords_to_reassign[coord] = bcast.reshape(-1)
+                    else:
+                        raw_np = np.asarray(arr.values)
+                        bcast = np.broadcast_to(
+                            raw_np.reshape(
+                                tuple(ds.sizes[d] if d in arr.dims else 1 for d in swath_dims)
+                            ),
+                            tuple(ds.sizes[d] for d in swath_dims),
+                        )
+                        coords_to_reassign[coord] = bcast.reshape(-1).copy()
             elif n_points_dim in arr.dims:
                 coords_to_reassign[coord] = arr.data
 
-    # -- Flatten the MultiIndex --> plain integer range ----------------
-    # Dropping individual MultiIndex levels triggers a FutureWarning in
-    # xarray >= 2024 and will become an error in later versions.
-    # Instead, replace the whole MultiIndex at once: drop all level
-    # sub-coordinates *and* the composite n_points, then assign a
-    # fresh integer range.  This also avoids materialising large
-    # per-level arrays (memory-safe for SWOT-scale data).
-    if n_points_dim in ds_flat.indexes:
-        _idx = ds_flat.indexes[n_points_dim]
-        if isinstance(_idx, pd.MultiIndex):
-            _n = ds_flat.sizes[n_points_dim]
-            _to_drop = list(_idx.names) + [n_points_dim]
-            ds_flat = (
-                ds_flat
-                .drop_vars([c for c in _to_drop if c in ds_flat.coords],
-                           errors='ignore')
-                .assign_coords({n_points_dim: np.arange(_n, dtype=np.int64)})
-            )
+    # Helper: broadcast a variable whose dims are a strict subset of
+    # swath_dims to the full (num_lines, num_pixels, ...) shape, then
+    # flatten.  E.g. time(num_lines,) → repeat across num_pixels.
+    def _broadcast_and_flatten(var_data, var_dims):
+        """Broadcast partial-swath var to full swath shape and flatten to 1D."""
+        target_shape = tuple(ds.sizes[d] for d in swath_dims)
+        inter_shape = tuple(
+            ds.sizes[d] if d in var_dims else 1 for d in swath_dims
+        )
+        if isinstance(var_data, da.Array):
+            return da.broadcast_to(var_data.reshape(inter_shape), target_shape).reshape(-1)
+        else:
+            arr_np = np.asarray(var_data)
+            return np.broadcast_to(arr_np.reshape(inter_shape), target_shape).reshape(-1).copy()
+
+    # Build new dataset with all variables reshaped to (n_points,)
+    # Must handle BOTH data_vars AND non-index coordinates that span
+    # swath dims (e.g. latitude, longitude are coords in SWOT zarr).
+    new_vars: Dict[str, Any] = {}
+    new_coords: Dict[str, Any] = {}
+
+    # Collect all variables + non-index coordinates with swath dims
+    _all_items: Dict[str, xr.DataArray] = {}
+    _is_coord: set = set()
+    for vname in ds.data_vars:
+        _all_items[vname] = ds[vname]
+    for cname in ds.coords:
+        if cname not in ds.dims and cname not in _all_items:
+            # Non-dimension coordinate (e.g. latitude, longitude, time)
+            _all_items[cname] = ds.coords[cname]
+            _is_coord.add(cname)
+
+    for vname, var in _all_items.items():
+        # Skip coords that will be re-attached via coords_to_reassign
+        if vname in coords_to_reassign:
+            continue
+        _target = new_coords if vname in _is_coord else new_vars
+        var_swath_dims = set(var.dims) & set(swath_dims)
+        if var_swath_dims:
+            other_dims = [d for d in var.dims if d not in swath_dims]
+            if not other_dims:
+                # Pure swath variable → flatten (with broadcast if partial)
+                if var_swath_dims == set(swath_dims):
+                    raw = var.data
+                    if isinstance(raw, da.Array):
+                        _target[vname] = (n_points_dim, raw.reshape(-1))
+                    else:
+                        _target[vname] = (n_points_dim, np.asarray(raw).reshape(-1))
+                else:
+                    _target[vname] = (n_points_dim, _broadcast_and_flatten(var.data, set(var.dims)))
+            else:
+                # Variable has swath dims + extra dims → reshape swath part.
+                # Transpose so that other_dims come first, then swath_dims,
+                # before flattening the swath portion into n_points.
+                desired_order = other_dims + swath_dims
+                if list(var.dims) != desired_order:
+                    var = var.transpose(*desired_order)
+                raw = var.data
+                new_shape = tuple(ds.sizes[d] for d in other_dims) + (n_pts,)
+                if isinstance(raw, da.Array):
+                    _target[vname] = (tuple(other_dims) + (n_points_dim,), raw.reshape(new_shape))
+                else:
+                    _target[vname] = (tuple(other_dims) + (n_points_dim,), np.asarray(raw).reshape(new_shape))
+        else:
+            # Variable doesn't involve swath dims → keep as-is
+            _target[vname] = var
+
+    # Merge dimension coord + flattened non-index coords
+    _all_coords = {n_points_dim: np.arange(n_pts, dtype=np.int64)}
+    _all_coords.update(new_coords)
+
+    ds_flat = xr.Dataset(
+        new_vars,
+        coords=_all_coords,
+    )
 
     # Remove remaining orphan coordinates (e.g. num_nadir)
     for coord in drop_coords:
@@ -188,14 +287,19 @@ def swath_to_points(
         if ds_flat[_vn].dtype == np.float64:
             ds_flat[_vn] = ds_flat[_vn].astype(np.float32)
 
-    # Ensure time is broadcast to n_points
-    if "time" in ds_flat.coords and ds_flat["time"].ndim < ds_flat[n_points_dim].ndim:
-        pass
-        # Case: time per line only -> broadcast to pixels
-        # ds_flat = ds_flat.assign_coords(
-        #     time=(n_points_dim, np.repeat(ds_flat["time"].values,
-        #           np.prod([ds_flat.sizes[d] for d in swath_dims[1:]])))
-        # )
+    # Ensure time is broadcast to n_points when it has fewer elements
+    # (e.g. time defined per-line only, not per-pixel).
+    if "time" in ds_flat.coords:
+        _time_arr = ds_flat.coords["time"]
+        if _time_arr.ndim == 1 and _time_arr.sizes.get(n_points_dim, 0) != n_pts:
+            # time was flattened from a partial swath dim (e.g. num_lines)
+            # and needs to be broadcast to the full n_points length.
+            _t_vals = _time_arr.values
+            if len(_t_vals) > 0 and n_pts % len(_t_vals) == 0:
+                _repeat_factor = n_pts // len(_t_vals)
+                ds_flat = ds_flat.assign_coords(
+                    time=(n_points_dim, np.repeat(_t_vals, _repeat_factor))
+                )
 
     return ds_flat
 
@@ -392,10 +496,10 @@ def preprocess_one_npoints(
                 coordinates.get("lat", None),
                 coordinates.get("lon", None),
             ]
-            coords_to_keep = list(filter(lambda x: x is not None, coords_to_keep))
+            coords_to_keep = [c for c in coords_to_keep if c is not None]
             ds = swath_to_points(
                 ds,
-                coords_to_keep=list(coordinates.keys()),
+                coords_to_keep=coords_to_keep,
                 n_points_dim=n_points_dim,
             )
 
@@ -423,40 +527,14 @@ def preprocess_one_npoints(
             idx=idx,
         )
 
-        ds_interp = ds_with_time.chunk({n_points_dim: 500000})
-
-        # Reset MultiIndex on n_points to a simple integer index.
-        # After swath_to_points (xr.stack), n_points has a MultiIndex of
-        # (num_lines, num_pixels) tuples.  xr.concat of N such datasets must
-        # concatenate N such MultiIndexes (each ~500 K entries) even with
-        # compat/join="override" — this is a pure-Python pandas operation
-        # that can saturate one CPU for seconds per batch.
-        # Replacing with a plain integer range lets concat proceed in
-        # microseconds while all DATA variables (lat, lon, time, ssh ...)
-        # remain as lazy dask arrays untouched.
-        if n_points_dim in ds_interp.indexes:
-            idx_obj = ds_interp.indexes[n_points_dim]
-            if isinstance(idx_obj, pd.MultiIndex):
-                n_pts = ds_interp.sizes[n_points_dim]
-                # Drop only the MultiIndex level sub-coordinates
-                # (e.g. num_lines, num_pixels) plus the composite
-                # n_points coordinate itself.  lat/lon/time etc. are
-                # ordinary data variables — they are NOT dropped here
-                # and stay backed by their lazy dask arrays.
-                sub_coords = list(idx_obj.names)  # ['num_lines', 'num_pixels']
-                ds_interp = (
-                    ds_interp
-                    .drop_vars(sub_coords + [n_points_dim], errors='ignore')
-                    .assign_coords(
-                        {n_points_dim: np.arange(n_pts, dtype=np.int64)}
-                    )
-                )
+        # Skip useless re-chunking: callers (.compute() or to_zarr)
+        # will materialise the data immediately, making the dask rechunk
+        # graph pure overhead.  Return the dataset as-is.
 
         del ds
-        del ds_with_time
         gc.collect()
 
-        return ds_interp
+        return ds_with_time
 
     except Exception as e:
         logger.warning(f"Failed to process n_points dataset {idx}: {e}")

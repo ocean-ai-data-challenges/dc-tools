@@ -785,3 +785,10 @@ def get_dataset_from_config(
             raise ValueError(f"Unknown dataset config name: {config_name}")
 
     return dataset
+
+
+def is_observation_alias(alias: str) -> bool:
+    """Return True if the alias corresponds to a known observation dataset type."""
+    # This is a simple heuristic. A more robust implementation might check
+    # a central registry or a pattern.
+    return "swot" in alias or "saral" in alias or "jason" in alias or "argo" in alias

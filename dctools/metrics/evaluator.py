@@ -129,6 +129,20 @@ class Evaluator:
             self._current_cluster_ref = ref_alias
             return
 
+        # For observation datasets (SWOT, saral, argo, …), force
+        # threads_per_worker=1 to prevent CPU oversubscription from
+        # C-level libraries (pyinterp, BLAS, OpenMP) that release the
+        # GIL and spawn their own threads.  This is the critical fix
+        # for the 0% progress stall on SWOT swath data.
+        from dctools.data.datasets.dataset import is_observation_alias
+        if is_observation_alias(str(ref_alias)):
+            desired = self.pcfg._adapt_obs_dask_cfg(desired)
+            logger.debug(
+                f"Observation dataset '{ref_alias}': forced "
+                f"threads_per_worker={desired.get('threads_per_worker', '?')}, "
+                f"n_workers={desired.get('n_workers', '?')}"
+            )
+
         # Read desired sizing.
         d_workers = int(desired.get("n_workers", 1))
         d_threads = int(desired.get("threads_per_worker", 1))
@@ -228,7 +242,10 @@ class Evaluator:
         # Propagate HDF5/NetCDF env vars to new workers.
         from dctools.utilities.init_dask import configure_dask_workers_env
         try:
-            configure_dask_workers_env(self.dataset_processor.client)
+            configure_dask_workers_env(
+                self.dataset_processor.client,
+                self.pcfg,
+            )
         except Exception:
             pass
 
@@ -680,6 +697,20 @@ class Evaluator:
         # argo_index is now passed as a Future (already scattered) or None.
         # No need to scatter it again per batch.
         scattered_argo_index = argo_index
+        # Track scattered Futures for cleanup at end of batch.
+        _scattered_futs: list = []
+
+        # Scatter argo_index once for the whole batch so it is not
+        # re-serialized inside the partial for every task.
+        if argo_index is not None:
+            try:
+                _client = self.dataset_processor.client
+                scattered_argo_index = _client.scatter(
+                    argo_index, broadcast=True
+                )
+                _scattered_futs.append(scattered_argo_index)
+            except Exception:
+                scattered_argo_index = argo_index
 
         metric_list = self.metrics.get(ref_alias)
         if not metric_list:
@@ -701,6 +732,10 @@ class Evaluator:
         try:
             # Use map_tasks for direct task submission (no delayed graph overhead)
             from functools import partial
+
+            # Retrieve look-ahead data downloaded during the previous batch.
+            _la_data = getattr(self, '_lookahead_cache', {}).pop(id(batch), None)
+
             fn = partial(
                 compute_metric,
                 pred_source_config=pred_connection_params,
@@ -753,38 +788,18 @@ class Evaluator:
             # In that case, limit concurrency to n_workers (not total_slots)
             # so that at most one heavy task runs per physical worker,
             # preventing concurrent threads from doubling memory pressure.
-            _has_shared_zarr = (
-                is_obs_batch
-                and batch
-                and isinstance(batch[0].get("ref_data"), dict)
-                and batch[0]["ref_data"].get("prefetched_obs_zarr_path") is not None
-            )
-            if is_obs_batch and not _has_shared_zarr:
-                # No shared zarr: each worker independently opens and
-                # preprocesses all matching local files for its task window.
-                # Running multiple such tasks in parallel multiplies peak
-                # resident memory by the concurrency factor.  For SWOT
-                # look-ahead batches (191 M pts / 158 files), even 2 parallel
-                # tasks can exhaust the per-worker 5 GB budget.
-                # Limit to n_workers (1 heavy task per worker), not 1 globally,
-                # to still utilise available workers while preventing
-                # concurrent heavy tasks on the same worker.
-                max_concurrent_obs = max(_N, 1)
+            # R9: For observation batches, cap concurrency to the number of
+            # available workers, not total slots (threads_per_worker is forced
+            # to 1 anyway). This prevents memory exhaustion when multiple
+            # heavy data loading tasks run on the same physical worker.
+            if is_obs_batch:
+                max_concurrent_tasks = max(_N, 1)
                 logger.debug(
-                    f"{ref_alias}: no shared obs Zarr — limiting to "
-                    f"{max_concurrent_obs} concurrent tasks (1 per worker) "
-                    f"to manage memory pressure"
+                    f"Observation batch: limiting concurrency to {max_concurrent_tasks} "
+                    f"tasks (1 per worker) to manage memory pressure."
                 )
-            elif is_obs_batch:
-                # With shared zarr, each task reads only its contiguous slice
-                # (searchsorted → slice) — memory is bounded to the slice size.
-                # Use ALL available execution slots (workers × threads) since
-                # per-task memory is small and predictable.  The previous
-                # cap at n_workers wasted half of the CPU slots when
-                # threads_per_worker > 1.
-                max_concurrent_obs = max(_total_slots, 2)
             else:
-                max_concurrent_obs = max(_total_slots, 4)
+                max_concurrent_tasks = max(_total_slots, 4)
 
             # -- Single clean progress bar ---------------------------------
             # One overall bar on the driver. No per-worker bars, no
@@ -904,31 +919,23 @@ class Evaluator:
                                     if isinstance(_ref_d, dict):
                                         _ref_d["prefetched_argo_shared_zarr"] = _shared_argo_zarr
 
-            # -- Use look-ahead prefetched data if available ------------
-            _la_cache = getattr(self, '_lookahead_cache', {})
-            _la_key = id(batch)  # use batch object identity
-            _la_data = _la_cache.pop(_la_key, None)
-            if _la_data:
-                logger.debug("Look-ahead: using pre-downloaded data from previous batch")
-            #   • A single visible progress bar for the download phase
-            #   • No concurrent S3 requests from multiple workers
-            #   • Workers open local files -> fast, no bandwidth contention
-            _obs_path_map: Dict[str, str] = _la_data.get('obs_map', {}) if _la_data else {}
-            _obs_prefetch = (
-                is_obs_batch
-                and ref_alias != "argo_profiles"
-                and not _argo_pipeline
-            )
+            # -- Observation data: download + shared Zarr preprocess pipeline --
+            # For all observation datasets (SWOT, nadir, etc.), we now use a
+            # unified pipeline that:
+            #   1. Gathers all unique remote file paths for the batch.
+            #   2. Downloads them to a local cache directory.
+            #   3. Preprocesses them into a shared Zarr store (manifest-based).
+            #   4. Injects the path to this shared store into each task.
+            # This is now the default, non-optional path.
+            _obs_path_map: Dict[str, str] = {}
+            _shared_obs_manifest_dir: Optional[str] = None
+            _t_obs_dl = 0.0
 
-            # -- Collect unique remote paths (no download yet) ------------------
-            # The actual download + preprocessing will be launched as a pipeline
-            # AFTER pred/ref background threads have started (below), so that
-            # obs download, obs preprocessing, and pred/ref downloads all run
-            # simultaneously.
-            _unique_remote: List[str] = []
-            _obs_cache_dir: str = ""
-            _obs_fs = None
-            if _obs_prefetch and not _obs_path_map:
+            if is_obs_batch and ref_alias != "argo_profiles":
+                _obs_pipeline_t0 = time.time()
+                _unique_remote: List[str] = []
+                _obs_cache_dir: str = ""
+                _obs_fs = None
                 _ref_mgr = self.dataloader.ref_managers.get(ref_alias)
                 _has_fs = (
                     _ref_mgr is not None
@@ -936,6 +943,7 @@ class Evaluator:
                     and hasattr(_ref_mgr.params, "fs")
                     and _ref_mgr.params.fs is not None
                 )
+
                 if _has_fs:
                     # Collect all unique remote paths across the batch
                     _all_remote_paths: List[str] = []
@@ -951,31 +959,79 @@ class Evaluator:
                                     pd.Timestamp(_tb[0]),
                                     pd.Timestamp(_tb[1]),
                                 )
-                                # Cost proxy for scheduling: how many catalog rows
-                                # (usually files) overlap this observation window.
-                                # Large windows tend to produce stragglers.
-                                try:
-                                    _entry["_obs_cost"] = int(len(_filt))
-                                except Exception:
-                                    _entry["_obs_cost"] = 0
                                 _paths = _filt["path"].tolist()
-                                _all_remote_paths.extend(_paths)  # type: ignore[arg-type]
-                    # De-duplicate
+                                _all_remote_paths.extend(_paths)
                     _unique_remote = list(dict.fromkeys(_all_remote_paths))
-                    if _unique_remote:
-                        from pathlib import Path as _PfPath
-                        _obs_cache_dir = str(
-                            _PfPath(
-                                getattr(self, "results_dir", None) or "/tmp"
-                            ) / "obs_prefetch_cache" / str(ref_alias)
+
+                if _unique_remote:
+                    from pathlib import Path as _PfPath
+                    from dctools.data.datasets.batch_preprocessing import (
+                        download_and_preprocess_obs_pipeline,
+                    )
+                    _obs_fs = _ref_mgr.params.fs
+                    _obs_cache_dir = str(
+                        _PfPath(os.path.abspath(self.results_dir or "/tmp"))
+                        / "obs_prefetch_cache" / str(ref_alias)
+                    )
+                    # The shared zarr is written to a batch-specific directory
+                    # to prevent conflicts and allow per-batch cleanup.
+                    _batch_shared_dir = (
+                        _PfPath(os.path.abspath(self.results_dir or "."))
+                        / "obs_batch_shared"
+                        / str(ref_alias)
+                        / f"batch_{_batch_idx}"
+                    )
+
+                    logger.info(
+                        f"Obs pipeline ({ref_alias}, batch {_batch_idx}): "
+                        f"{len(_unique_remote)} files queued for "
+                        f"concurrent download+preprocess"
+                    )
+
+                    _obs_coords = getattr(_ref_mgr.params, 'coordinates', None)
+                    if _obs_coords is None:
+                        _gm = getattr(_ref_mgr, '_global_metadata', None) or {}
+                        _cs = _gm.get('coord_system')
+                        _obs_coords = getattr(_cs, 'coordinates', None) or {"time": "time"}
+                    if not isinstance(_obs_coords, dict):
+                        _obs_coords = dict(_obs_coords)
+                    _obs_n_pts_dim = getattr(_ref_mgr.params, 'n_points_dim', None)
+                    if _obs_n_pts_dim is None:
+                        _obs_n_pts_dim = _obs_coords.get("n_points", "n_points")
+
+                    _obs_path_map, _shared_obs_manifest_dir = download_and_preprocess_obs_pipeline(
+                        remote_paths=_unique_remote,
+                        cache_dir=_obs_cache_dir,
+                        fs=_obs_fs,
+                        alias=ref_alias,
+                        keep_vars=getattr(_ref_mgr.params, 'keep_variables', None),
+                        coordinates=_obs_coords,
+                        n_points_dim=_obs_n_pts_dim,
+                        output_zarr_dir=str(_batch_shared_dir),
+                        download_workers=self.pcfg.prefetch_obs_workers,
+                        max_shared_obs_files=self.pcfg.max_shared_obs_files,
+                        prep_workers=self.pcfg.prep_workers,
+                        prep_use_processes=self.pcfg.prep_use_processes,
+                        dask_client=self.dataset_processor.client,
+                    )
+                    _t_obs_dl = time.time() - _obs_pipeline_t0
+
+                    # Inject path map and shared obs zarr into batch entries.
+                    # Use the same keys as the late pipeline so that workers
+                    # find data through _open_prefetched_obs_data().
+                    for _entry in batch:
+                        _ref_d = _entry.get("ref_data")
+                        if isinstance(_ref_d, dict):
+                            if _obs_path_map:
+                                _ref_d["prefetched_local_paths"] = _obs_path_map
+                            if _shared_obs_manifest_dir:
+                                _ref_d["prefetched_obs_zarr_path"] = _shared_obs_manifest_dir
+                    if not _shared_obs_manifest_dir:
+                        logger.warning(
+                            f"Obs pipeline ({ref_alias}, batch {_batch_idx}): "
+                            f"Failed to create shared obs manifest. "
+                            f"Workers will fall back to individual file processing."
                         )
-                        _obs_fs = _ref_mgr.params.fs  # type: ignore[union-attr]
-                        logger.info(
-                            f"Obs pipeline ({ref_alias}): "
-                            f"{len(_unique_remote)} files queued for "
-                            f"concurrent download+preprocess"
-                        )
-            _t_obs_dl = 0.0  # set by pipeline below
 
             # -- Prediction data prefetch — define + launch in background --
             # Runs concurrently with obs preprocessing below (different
@@ -1026,7 +1082,7 @@ class Evaluator:
                 import threading as _ref_dl_threading
 
                 _ref_cache_dir = str(
-                    _PfRef(getattr(self, "results_dir", None) or "/tmp")
+                    _PfRef(os.path.abspath(getattr(self, "results_dir", None) or "/tmp"))
                     / "ref_prefetch_cache"
                     / str(ref_alias)
                 )
@@ -1122,7 +1178,7 @@ class Evaluator:
 
                 _pred_cache_dir = str(
                     _PfPred(
-                        getattr(self, "results_dir", None) or "/tmp"
+                        os.path.abspath(getattr(self, "results_dir", None) or "/tmp")
                     )
                     / "pred_prefetch_cache"
                     / str(pred_alias)
@@ -1272,7 +1328,26 @@ class Evaluator:
             #     download and preprocessing run concurrently.
             _shared_obs_zarr: Optional[str] = None
             _t_obs_pipeline = time.time()
+            # Run the concurrent obs pipeline only if the early pipeline block
+            # (above, before pred/ref threads) did not already handle it.
+            _obs_prefetch = (
+                is_obs_batch
+                and ref_alias != "argo_profiles"
+                and not _obs_path_map
+                and not _shared_obs_manifest_dir
+            )
             if _obs_prefetch:
+                _n_remote = len(_unique_remote) if _unique_remote else 0
+                if _obs_path_map:
+                    logger.info(
+                        f"[Batch {_batch_idx+1}/{_total_batches}] {ref_alias.upper()}: "
+                        f"preprocessing {len(_obs_path_map)} cached obs files…"
+                    )
+                elif _n_remote > 0:
+                    logger.info(
+                        f"[Batch {_batch_idx+1}/{_total_batches}] {ref_alias.upper()}: "
+                        f"downloading + preprocessing {_n_remote} obs files…"
+                    )
                 _ref_d0 = batch[0].get("ref_data") if batch else None
                 if isinstance(_ref_d0, dict):
                     try:
@@ -1308,8 +1383,10 @@ class Evaluator:
                         from pathlib import Path as _PfPath2
                         _shared_zarr_dir = str(
                             _PfPath2(
-                                getattr(self, "results_dir", None)
-                                or "/tmp"
+                                os.path.abspath(
+                                    getattr(self, "results_dir", None)
+                                    or "/tmp"
+                                )
                             )
                             / "obs_batch_shared"
                             / str(ref_alias)
@@ -1333,6 +1410,14 @@ class Evaluator:
                             from dctools.data.datasets.dataloader import (
                                 preprocess_batch_obs_files,
                             )
+                            # When use_distributed_prep is enabled, pass the Dask client
+                            # so preprocessing runs on the cluster instead of a local
+                            # ProcessPoolExecutor (avoids RAM competition on the driver).
+                            _prep_dask_client = (
+                                self.dataset_processor.client
+                                if self.pcfg.use_distributed_prep
+                                else None
+                            )
                             _shared_obs_zarr = preprocess_batch_obs_files(
                                 local_paths=_local_unique,
                                 alias=str(ref_alias),
@@ -1343,6 +1428,7 @@ class Evaluator:
                                 max_shared_obs_files=self.pcfg.max_shared_obs_files,
                                 prep_workers=self.pcfg.prep_workers,
                                 prep_use_processes=self.pcfg.prep_use_processes,
+                                dask_client=_prep_dask_client,
                             )
                             if _shared_obs_zarr:
                                 for _entry in batch:
@@ -1358,6 +1444,11 @@ class Evaluator:
                                 download_and_preprocess_obs_pipeline,
                             )
                             _t_pipeline_start = time.time()
+                            _prep_dask_client2 = (
+                                self.dataset_processor.client
+                                if self.pcfg.use_distributed_prep
+                                else None
+                            )
                             _obs_path_map, _shared_obs_zarr = (
                                 download_and_preprocess_obs_pipeline(
                                     remote_paths=_unique_remote,
@@ -1372,6 +1463,7 @@ class Evaluator:
                                     max_shared_obs_files=self.pcfg.max_shared_obs_files,
                                     prep_workers=self.pcfg.prep_workers,
                                     prep_use_processes=self.pcfg.prep_use_processes,
+                                    dask_client=_prep_dask_client2,
                                 )
                             )
                             _t_obs_dl = time.time() - _t_pipeline_start
@@ -1407,6 +1499,19 @@ class Evaluator:
                 f"(obs_dl={_t_obs_dl:.1f}s  obs_prep={_t_obs_prep:.1f}s  "
                 f"ref_dl={_t_ref_dl:.1f}s  pred_dl={_t_pred_dl:.1f}s) — dispatching {num_tasks} tasks"  # noqa: E501
             )
+
+            # -- Cleanup workers after distributed preprocessing -----------
+            # When use_distributed_prep is true, preprocessing tasks run on
+            # cluster workers and leave behind unmanaged memory (NumPy
+            # arrays, mini-zarr write buffers, etc.).  Without cleanup,
+            # workers start metric tasks with ~3-4 GiB already consumed,
+            # leaving almost no headroom → tasks OOM → 0% progress.
+            if self.pcfg.use_distributed_prep and is_obs_batch:
+                try:
+                    _client.run(_worker_full_cleanup)
+                    time.sleep(0.5)  # let OS reclaim pages
+                except Exception:
+                    pass
 
             # Apply reference path remapping (from current batch prefetch)
             if _ref_result:
@@ -1515,6 +1620,55 @@ class Evaluator:
             _n_collected = 0
             _ac = as_completed([])
 
+            # -- Recalculate concurrency now that preprocessing is done --
+            # The initial max_concurrent_obs was set before the obs
+            # preprocessing pipeline ran, so prefetched_obs_zarr_path
+            # wasn't known yet.  Re-evaluate now.
+            if is_obs_batch:
+                _has_shared_zarr = (
+                    batch
+                    and isinstance(batch[0].get("ref_data"), dict)
+                    and batch[0]["ref_data"].get("prefetched_obs_zarr_path") is not None
+                )
+                if _has_shared_zarr:
+                    max_concurrent_obs = max(_total_slots, 2)
+                else:
+                    max_concurrent_obs = max(_N, 1)
+
+            # -- Scatter heavy shared objects once -------------------------
+            # Without scattering, Dask serializes every `entry` dict
+            # independently per task.  The observation catalog
+            # (DatasetCatalog / GeoDataFrame) is the *same* Python object
+            # across all entries in the batch — scattering it once
+            # eliminates N-1 redundant pickle round-trips through the
+            # scheduler, cutting submission overhead from ~100 MB to ~1 MB
+            # for a typical 30-task SWOT batch.
+            # When a shared zarr was built, workers never access the
+            # catalog at all — skip the scatter to save memory.
+            if is_obs_batch and batch and not _has_shared_zarr:
+                _ref_d0 = batch[0].get("ref_data")
+                if isinstance(_ref_d0, dict) and "source" in _ref_d0:
+                    try:
+                        _catalog_obj = _ref_d0["source"]
+                        _scattered_cat = _client.scatter(
+                            _catalog_obj, broadcast=True
+                        )
+                        _scattered_futs.append(_scattered_cat)
+                        for _entry in batch:
+                            _rd = _entry.get("ref_data")
+                            if isinstance(_rd, dict):
+                                _rd["source"] = _scattered_cat
+                        logger.debug(
+                            f"{ref_alias}: scattered obs catalog to "
+                            f"{_N} workers (avoiding {num_tasks}× "
+                            f"re-serialization)"
+                        )
+                    except Exception as _exc_scatter:
+                        logger.debug(
+                            f"{ref_alias}: scatter failed "
+                            f"({_exc_scatter!r}), proceeding without"
+                        )
+
             # Submit all tasks at once — ARGO data is already prefetched
             # to local Zarr, so workers won't block on HTTP.
             # For non-ARGO batches, same behaviour as before.
@@ -1602,11 +1756,13 @@ class Evaluator:
                                     )
                                     _la_cache = str(
                                         _PfLA(
-                                            getattr(
-                                                self, "results_dir",
-                                                None,
+                                            os.path.abspath(
+                                                getattr(
+                                                    self, "results_dir",
+                                                    None,
+                                                )
+                                                or "/tmp"
                                             )
-                                            or "/tmp"
                                         )
                                         / "obs_prefetch_cache"
                                         / str(_la_ref_alias)
@@ -1643,11 +1799,13 @@ class Evaluator:
                                 import shutil as _sh_la
                                 _la_pred_cache = str(
                                     _PfLA2(
-                                        getattr(
-                                            self, "results_dir",
-                                            None,
+                                        os.path.abspath(
+                                            getattr(
+                                                self, "results_dir",
+                                                None,
+                                            )
+                                            or "/tmp"
                                         )
-                                        or "/tmp"
                                     )
                                     / "pred_prefetch_cache"
                                     / str(
@@ -2048,6 +2206,13 @@ class Evaluator:
                     _t_cleanup.sleep(1.0)  # let scheduler → worker "delete" msgs arrive
             except Exception:
                 pass
+            # Release scattered shared data from workers' memory.
+            for _sf in _scattered_futs:
+                try:
+                    _client.cancel([_sf], force=True)
+                except Exception:
+                    pass
+            _scattered_futs.clear()
             # Step 2: GC + malloc_trim on every worker (called AFTER the task
             # store has had a chance to clear so RSS is as low as possible).
             try:
