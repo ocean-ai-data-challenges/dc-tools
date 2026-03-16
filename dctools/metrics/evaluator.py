@@ -1599,6 +1599,73 @@ class Evaluator:
                 del serial_results
                 gc.collect()
 
+                # ── Memory-triggered worker restart ───────────────────────
+                # Two criteria (either one triggers a restart):
+                #   1. Relative: current max fraction increased by more than
+                #      max_p_memory_increase compared to the post-batch-0
+                #      baseline (accumulation over batches).
+                #   2. Absolute: any worker exceeds max_worker_memory_fraction
+                #      of its Dask memory_limit.
+                if self.restart_workers_per_batch:
+                    _client = getattr(self.dataset_processor, "client", None)
+                    if _client is not None:
+                        _cur_frac = self.get_max_memory_fraction()
+
+                        # Initialise baseline on the very first batch.
+                        if self.baseline_memory is None:
+                            self.baseline_memory = _cur_frac
+                            logger.debug(
+                                f"Memory baseline set after batch {batch_idx}: "
+                                f"{_cur_frac:.2%}"
+                            )
+                        else:
+                            _rel_increase = (
+                                (_cur_frac - self.baseline_memory)
+                                / max(self.baseline_memory, 1e-6)
+                            )
+                            _abs_exceeded = (
+                                _cur_frac
+                                >= float(self.max_worker_memory_fraction or 1.0)
+                            )
+                            _rel_exceeded = (
+                                _rel_increase
+                                >= float(self.max_p_memory_increase or 1.0)
+                            )
+
+                            if _abs_exceeded or _rel_exceeded:
+                                _reason = (
+                                    f"absolute {_cur_frac:.2%} >= "
+                                    f"{self.max_worker_memory_fraction:.2%}"
+                                    if _abs_exceeded
+                                    else f"relative +{_rel_increase:.0%} >= "
+                                    f"+{self.max_p_memory_increase:.0%} "
+                                    f"(baseline={self.baseline_memory:.2%})"
+                                )
+                                logger.info(
+                                    f"Restarting Dask workers after batch "
+                                    f"{batch_idx} ({_reason})"
+                                )
+                                import logging as _log_restart
+                                _dist_lvl = _log_restart.getLogger(
+                                    "distributed"
+                                ).level
+                                _log_restart.getLogger(
+                                    "distributed"
+                                ).setLevel(_log_restart.CRITICAL)
+                                try:
+                                    _client.restart()
+                                except Exception as _exc_restart:
+                                    logger.warning(
+                                        f"Worker restart failed: {_exc_restart!r}"
+                                    )
+                                finally:
+                                    _log_restart.getLogger(
+                                        "distributed"
+                                    ).setLevel(_dist_lvl)
+                                # Reset baseline after the cluster is clean.
+                                self.baseline_memory = None
+                                gc.collect()
+
             # Cleanup scattered data
             self.scattered_argo_indexes.clear()
             self.scattered_ref_catalogs.clear()

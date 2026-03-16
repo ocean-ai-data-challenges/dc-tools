@@ -49,7 +49,7 @@ max_p_memory_increase: 0.50
 # Absolute memory safety trigger (in addition to baseline increase).
 # If any worker exceeds this fraction of its Dask memory_limit, we trigger a restart.
 # Example: 0.85 => restart when a worker goes above 85% of its limit.
-max_worker_memory_fraction: 0.80
+max_worker_memory_fraction: 0.60
 
 ############################# PER-BINS SPATIAL RESOLUTION ###################################
 

@@ -999,6 +999,7 @@ class BaseDCEvaluation:
                 reduce_precision=getattr(self.args, "reduce_precision", False),
                 restart_workers_per_batch=getattr(self.args, "restart_workers_per_batch", False),
                 restart_frequency=getattr(self.args, "restart_frequency", 1),
+                max_p_memory_increase=getattr(self.args, "max_p_memory_increase", 0.2),
                 max_worker_memory_fraction=getattr(self.args, "max_worker_memory_fraction", 0.85),
             )
             _n_pred_total = len(dataset_references)
