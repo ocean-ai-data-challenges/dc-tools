@@ -2310,6 +2310,7 @@ class Evaluator:
                             )
                             / "obs_batch_shared"
                             / str(ref_alias)
+                            / f"batch_{_batch_idx}"
                         )
 
                         _shared_obs_zarr = preprocess_batch_obs_files(
