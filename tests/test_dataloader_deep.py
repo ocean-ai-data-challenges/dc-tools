@@ -4,12 +4,15 @@
 import dask.array as da
 import numpy as np
 import pandas as pd
+import pytest
 import xarray as xr
+import zarr
 
 from dctools.data.datasets.dataloader import (
     add_time_dim,
     _drop_nan_points,
     _build_nan_mask,
+    _open_local_zarr_simple,
     concat_with_dim,
     preprocess_one_npoints,
 )
@@ -121,6 +124,23 @@ class TestAddTimeDim:
         df = _make_metadata_df()
         result = add_time_dim(ds, df, "n_points", time_coord=time_coord, idx=0)
         assert "time" in result.coords
+
+    def test_numeric_cf_nanoseconds_coerces_out_of_bounds(self):
+        """Numeric CF nanoseconds are decoded and invalid offsets become NaT."""
+        ds = _make_npoints_ds(3)
+        time_coord = xr.DataArray(
+            np.array([0, 1_000_000_000, 10_928_012_050_904_828_927], dtype=np.uint64),
+            dims=["n_points"],
+            attrs={"units": "nanoseconds since 2024-01-01 00:00:00"},
+        )
+        df = _make_metadata_df()
+        result = add_time_dim(ds, df, "n_points", time_coord=time_coord, idx=0)
+
+        time_vals = np.asarray(result.coords["time"].values)
+        assert np.issubdtype(time_vals.dtype, np.datetime64)
+        assert time_vals[0] == np.datetime64("2024-01-01T00:00:00.000000000")
+        assert time_vals[1] == np.datetime64("2024-01-01T00:00:01.000000000")
+        assert np.isnat(time_vals[2])
 
 
 # =====================================================================
@@ -419,3 +439,56 @@ class TestPreprocessOneNpoints:
         assert result is not None
         assert "ssh" in result
         assert "sst" not in result
+
+
+# =====================================================================
+# _open_local_zarr_simple
+# =====================================================================
+
+class TestOpenLocalZarrSimple:
+    """Tests for the local shared-batch Zarr opener."""
+
+    def test_cf_time_decode_error_uses_raw_retry(self, tmp_path):
+        """Bad CF nanosecond metadata should not abort the open."""
+        zarr_path = tmp_path / "bad_time.zarr"
+        ds = xr.Dataset(
+            {"ssh": ("n_points", [1.0, 2.0, 3.0])},
+            coords={
+                "n_points": np.arange(3),
+                "time": (
+                    "n_points",
+                    np.array(
+                        [0, 1_000_000_000, 10_928_012_050_904_828_927],
+                        dtype=np.uint64,
+                    ),
+                    {"units": "nanoseconds since 2024-01-01 00:00:00"},
+                ),
+            },
+        )
+        ds.to_zarr(str(zarr_path), consolidated=True)
+
+        with pytest.raises(Exception):
+            xr.open_zarr(str(zarr_path), consolidated=True, chunks={})
+
+        reopened = _open_local_zarr_simple(str(zarr_path))
+
+        assert reopened is not None
+        time_vals = np.asarray(reopened.coords["time"].values)
+        assert np.issubdtype(time_vals.dtype, np.datetime64)
+        assert time_vals[0] == np.datetime64("2024-01-01T00:00:00.000000000")
+        assert time_vals[1] == np.datetime64("2024-01-01T00:00:01.000000000")
+        assert np.isnat(time_vals[2])
+
+    def test_array_store_returns_none(self, tmp_path):
+        """Array-only stores are not valid dataset roots for xarray.open_zarr."""
+        arr_path = tmp_path / "array_only.zarr"
+        arr = zarr.open_array(
+            str(arr_path),
+            mode="w",
+            shape=(4,),
+            chunks=(2,),
+            dtype="i4",
+        )
+        arr[:] = np.arange(4, dtype=np.int32)
+
+        assert _open_local_zarr_simple(str(arr_path)) is None

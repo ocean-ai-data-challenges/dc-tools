@@ -5,6 +5,7 @@
 
 import atexit
 import gc
+import math
 import os
 import shutil
 import tempfile
@@ -230,7 +231,23 @@ def add_time_dim(
         hasattr(time_coord, "data") and hasattr(time_coord.data, "chunks")
     )
 
-    if is_lazy:
+    # Only attempt CF numeric decoding when the data is NOT lazy.
+    # Calling .values on a lazy (dask-backed) coordinate forces an eager
+    # compute of potentially millions of points — bypassing the lazy path
+    # below.  When is_lazy is True, xarray has already decoded the time
+    # to datetime64; any further decoding is redundant and costly.
+    decoded_cf_time = None
+    if not is_lazy and hasattr(time_coord, "attrs"):
+        _units = str(time_coord.attrs.get("units", "")).lower()
+        if "since" in _units:
+            decoded_cf_time = _decode_numeric_cf_time(
+                getattr(time_coord, "values", time_coord),
+                time_coord.attrs,
+            )
+
+    if decoded_cf_time is not None:
+        time_values = decoded_cf_time
+    elif is_lazy:
         # Avoid loading .values and computing unique()
         # Assume per-point coordinates (safest default for n_points dims)
 
@@ -254,17 +271,20 @@ def add_time_dim(
     # Standardize time_coord to pandas datetime
     # This forces loading into memory (.values)
     # Check if already datetime64 to avoid costly pd.to_datetime conversion on huge arrays
-    raw_values = getattr(time_coord, "values", time_coord)
-
-    if hasattr(raw_values, "dtype") and np.issubdtype(raw_values.dtype, np.datetime64):
-         time_values = raw_values
+    if decoded_cf_time is not None:
+         time_values = decoded_cf_time
     else:
-         try:
-             # Fast path for large arrays: pd.to_datetime can be slow on large object arrays
-             time_values = pd.to_datetime(raw_values)
-         except Exception:
-             # Fallback if errors
-             time_values = pd.to_datetime(raw_values, errors='coerce')
+         raw_values = getattr(time_coord, "values", time_coord)
+
+         if hasattr(raw_values, "dtype") and np.issubdtype(raw_values.dtype, np.datetime64):
+              time_values = raw_values
+         else:
+              try:
+                  # Fast path for large arrays: pd.to_datetime can be slow on large object arrays
+                  time_values = pd.to_datetime(raw_values)
+              except Exception:
+                  # Fallback if errors
+                  time_values = pd.to_datetime(raw_values, errors='coerce')
 
     # Case: time per point
     # Avoid pd.unique on massive arrays if not strictly necessary
@@ -853,15 +873,240 @@ def _build_nan_mask(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
 # These must be at module scope so they are picklable by ProcessPoolExecutor.
 # ---------------------------------------------------------------------------
 
-def _open_local_zarr_simple(path: str, _alias: Any = None) -> xr.Dataset:
+_CF_TIME_UNIT_TO_NS: Dict[str, int] = {
+    "nanosecond": 1,
+    "nanoseconds": 1,
+    "ns": 1,
+    "microsecond": 1_000,
+    "microseconds": 1_000,
+    "us": 1_000,
+    "millisecond": 1_000_000,
+    "milliseconds": 1_000_000,
+    "ms": 1_000_000,
+    "second": 1_000_000_000,
+    "seconds": 1_000_000_000,
+    "sec": 1_000_000_000,
+    "secs": 1_000_000_000,
+    "s": 1_000_000_000,
+    "minute": 60 * 1_000_000_000,
+    "minutes": 60 * 1_000_000_000,
+    "min": 60 * 1_000_000_000,
+    "mins": 60 * 1_000_000_000,
+    "hour": 3_600 * 1_000_000_000,
+    "hours": 3_600 * 1_000_000_000,
+    "hr": 3_600 * 1_000_000_000,
+    "hrs": 3_600 * 1_000_000_000,
+    "h": 3_600 * 1_000_000_000,
+    "day": 86_400 * 1_000_000_000,
+    "days": 86_400 * 1_000_000_000,
+    "d": 86_400 * 1_000_000_000,
+}
+
+_STANDARD_CF_CALENDARS = {
+    "",
+    "standard",
+    "gregorian",
+    "proleptic_gregorian",
+    "julian",
+}
+
+
+def _decode_numeric_cf_time(
+    raw_values: Any,
+    attrs: Optional[Dict[str, Any]],
+) -> Optional[np.ndarray]:
+    """Decode numeric CF-style time offsets into datetime64[ns].
+
+    This is used as a fallback when xarray cannot decode a coordinate like
+    ``nanoseconds since ...`` during ``open_zarr``. Out-of-range values are
+    coerced to ``NaT`` instead of aborting the whole file open.
+    """
+    if not attrs:
+        return None
+
+    units_text = str(attrs.get("units", "")).strip()
+    units_lower = units_text.lower()
+    if "since" not in units_lower:
+        return None
+
+    since_idx = units_lower.index("since")
+    unit_name = units_lower[:since_idx].strip()
+    ref_text = units_text[since_idx + len("since"):].strip()
+    if not unit_name or not ref_text:
+        return None
+
+    calendar = str(attrs.get("calendar", "standard")).strip().lower()
+    if calendar not in _STANDARD_CF_CALENDARS:
+        return None
+
+    scale_ns = _CF_TIME_UNIT_TO_NS.get(unit_name)
+    if scale_ns is None:
+        return None
+
+    arr = np.asarray(raw_values)
+    if not np.issubdtype(arr.dtype, np.number):
+        return None
+
+    try:
+        ref_ns = np.datetime64(pd.Timestamp(ref_text).to_datetime64(), "ns").astype("int64")
+    except Exception:
+        return None
+
+    min_ns = np.iinfo(np.int64).min + 1
+    max_ns = np.iinfo(np.int64).max
+    min_raw = math.ceil((min_ns - int(ref_ns)) / scale_ns)
+    max_raw = math.floor((max_ns - int(ref_ns)) / scale_ns)
+    nat_ns = np.datetime64("NaT", "ns").astype("int64")
+
+    flat = arr.reshape(-1)
+    decoded_ns = np.full(flat.shape, nat_ns, dtype=np.int64)
+
+    if np.issubdtype(flat.dtype, np.floating):
+        valid_mask = np.isfinite(flat) & (flat >= min_raw) & (flat <= max_raw)
+        if np.any(valid_mask):
+            delta_ns = np.rint(flat[valid_mask] * scale_ns).astype(np.int64, copy=False)
+            decoded_ns[valid_mask] = ref_ns + delta_ns
+    elif np.issubdtype(flat.dtype, np.unsignedinteger):
+        if max_raw >= 0:
+            valid_mask = flat <= np.array(max_raw, dtype=flat.dtype)
+            if np.any(valid_mask):
+                delta_ns = flat[valid_mask].astype(np.int64, copy=False) * scale_ns
+                decoded_ns[valid_mask] = ref_ns + delta_ns
+    else:
+        valid_mask = (flat >= min_raw) & (flat <= max_raw)
+        if np.any(valid_mask):
+            delta_ns = flat[valid_mask].astype(np.int64, copy=False) * scale_ns
+            decoded_ns[valid_mask] = ref_ns + delta_ns
+
+    return decoded_ns.view("datetime64[ns]").reshape(arr.shape)
+
+
+def _is_time_like_variable(name: str, var: xr.DataArray) -> bool:
+    """Return True for variables that plausibly represent time."""
+    lname = str(name).lower()
+    if "time" in lname or "date" in lname or "juld" in lname:
+        return True
+
+    axis = str(var.attrs.get("axis", "")).upper()
+    if axis == "T":
+        return True
+
+    standard_name = str(var.attrs.get("standard_name", "")).lower()
+    long_name = str(var.attrs.get("long_name", "")).lower()
+    return (
+        "time" in standard_name
+        or "time" in long_name
+        or "date" in standard_name
+        or "date" in long_name
+    )
+
+
+def _repair_undecoded_time_variables(ds: xr.Dataset) -> Tuple[xr.Dataset, bool]:
+    """Decode numeric CF time variables after ``decode_times=False`` fallback."""
+    repaired = False
+    coord_names = set(ds.coords)
+
+    for name in list(ds.variables):
+        var = ds[name]
+        if not _is_time_like_variable(str(name), var):
+            continue
+
+        decoded = _decode_numeric_cf_time(var.values, dict(var.attrs))
+        if decoded is None:
+            continue
+
+        cleaned_attrs = {
+            key: value
+            for key, value in dict(var.attrs).items()
+            if key not in {"units", "calendar"}
+        }
+        decoded_da = xr.DataArray(decoded, dims=var.dims, attrs=cleaned_attrs, name=name)
+
+        if name in coord_names:
+            ds = ds.assign_coords({name: decoded_da})
+        else:
+            ds[name] = decoded_da
+        repaired = True
+
+    return ds, repaired
+
+
+def _is_consolidated_metadata_error(exc: Exception) -> bool:
+    """Return True when a Zarr open should retry without consolidated metadata."""
+    message = str(exc).lower()
+    return "zmetadata" in message or (
+        "consolidated" in message and "metadata" in message
+    )
+
+
+def _is_cf_time_decode_error(exc: Exception) -> bool:
+    """Return True for xarray CF time decode failures that should use a raw retry."""
+    message = f"{type(exc).__name__}: {exc}".lower()
+    return (
+        "out of bounds nanosecond timestamp" in message
+        or ("units must be one of" in message and "nanoseconds" in message)
+        or "unable to decode time units" in message
+    )
+
+
+def _is_invalid_local_zarr_error(exc: Exception) -> bool:
+    """Return True when the path clearly does not point to a readable Zarr group."""
+    message = f"{type(exc).__name__}: {exc}".lower()
+    return (
+        "group not found at path" in message
+        or "nothing found at path" in message
+        or "_array_dimensions" in message
+        or "_nczarr_array" in message
+    )
+
+
+def _is_probable_local_zarr_group(path: str) -> bool:
+    """Cheap validation for local Zarr directories before xarray touches them."""
+    if not path or not os.path.isdir(path):
+        return False
+
+    if any(
+        os.path.exists(os.path.join(path, marker))
+        for marker in (".zgroup", ".zmetadata", "zarr.json")
+    ):
+        return True
+
+    return not os.path.exists(os.path.join(path, ".zarray"))
+
+
+def _open_local_zarr_simple(path: str, _alias: Any = None) -> Optional[xr.Dataset]:
     """Open a local zarr file — prefer consolidated metadata.
 
     Module-level function (picklable for multiprocessing).
     """
+    if not _is_probable_local_zarr_group(path):
+        return None
+
     try:
         return xr.open_zarr(path, consolidated=True, chunks={})  # type: ignore[no-any-return]
-    except Exception:
-        return xr.open_zarr(path, consolidated=False, chunks={})  # type: ignore[no-any-return]
+    except Exception as exc:
+        if _is_cf_time_decode_error(exc):
+            ds = xr.open_zarr(
+                path,
+                consolidated=True,
+                chunks={},
+                decode_times=False,
+            )
+            ds, _ = _repair_undecoded_time_variables(ds)
+            return ds
+
+        if _is_invalid_local_zarr_error(exc):
+            return None
+
+        if _is_consolidated_metadata_error(exc):
+            try:
+                return xr.open_zarr(path, consolidated=False, chunks={})  # type: ignore[no-any-return]
+            except Exception as fallback_exc:
+                if _is_invalid_local_zarr_error(fallback_exc):
+                    return None
+                raise
+
+        raise
 
 
 def _nan_mask_numpy(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
@@ -1007,20 +1252,16 @@ def concat_with_dim(
                 ds = ds.expand_dims({concat_dim: [i]})
         datasets_with_dim.append(ds)
 
-    # Optimization: override to avoid comparing all coordinates (slow on S3/Dask)
-    # join='override' assumes that non-concatenated coordinates are identical.
-    join_mode = "outer"
-    compat_mode = "no_conflicts"
-
-    # If we concatenate on time or n_points for massive data, override is much faster
-    if len(datasets) > 10:
-        join_mode = "override"
-        compat_mode = "override"
-
+    # Always use compat="override" to stay fully lazy.
+    # compat="no_conflicts" forces xarray to compare coordinates across all
+    # datasets — for dask-backed coords (lat, lon, etc.) this triggers an
+    # eager compute of every coordinate array, saturating RAM on large SWATH
+    # batches.  For n_points concatenation the coordinates never conflict
+    # (each dataset contributes its own disjoint slice), so "override" is safe.
     result: xr.Dataset = xr.concat(  # type: ignore[call-overload]
         datasets_with_dim, dim=concat_dim,
         coords="minimal",
-        compat=compat_mode, join=join_mode,
+        compat="override", join="outer",
     )
     if sort:
         result = result.sortby(concat_dim)
@@ -1113,10 +1354,12 @@ def preprocess_batch_obs_files(
     # attributes; dimension info lives only in the consolidated
     # .zmetadata file.  Use consolidated=True first (with fallback).
     try:
-        try:
-            _first = xr.open_zarr(local_paths[0], consolidated=True, chunks={})
-        except Exception:
-            _first = xr.open_zarr(local_paths[0], consolidated=False, chunks={})
+        _first = _open_local_zarr_simple(local_paths[0], alias)
+        if _first is None:
+            logger.error(
+                f"Cannot probe first obs file for batch preproc: invalid zarr store {local_paths[0]}"
+            )
+            return None
         is_swath = {"num_lines", "num_pixels"}.issubset(_first.dims)
         _first.close()
         del _first
@@ -1219,6 +1462,44 @@ def preprocess_batch_obs_files(
         shutil.rmtree(output_zarr_dir, ignore_errors=True)
         return None
 
+    # ── Pre-sort mini-zarrs by first time element (1 chunk read per file) ──
+    # Reading one element per file costs O(n_files × chunk_size) ≈ a few MB,
+    # versus the O(n_total_pts) = 191 M element global argsort that previously
+    # consumed ~3 GB (time array + index array) and serialised on a single CPU.
+    # For non-overlapping SWOT/SARAL passes this guarantees that the final
+    # xr.concat produces a globally time-sorted dataset without any permutation.
+    _time_name = coordinates.get("time", "time")
+    if len(_mini_zarr_paths) > 1 and _time_name:
+        _t_starts: List[Any] = []
+        for _mp in _mini_zarr_paths:
+            _t0: Any = None
+            try:
+                _zt = xr.open_zarr(_mp, consolidated=False)
+                if _time_name in _zt.variables:
+                    _tv0 = np.asarray(_zt[_time_name].values[0:1])
+                    if len(_tv0) > 0:
+                        _t0 = _tv0[0]
+                _zt.close()
+            except Exception:
+                pass
+            _t_starts.append(_t0)
+
+        _valid_pairs = [
+            (t, p) for t, p in zip(_t_starts, _mini_zarr_paths) if t is not None
+        ]
+        _none_paths = [
+            p for t, p in zip(_t_starts, _mini_zarr_paths) if t is None
+        ]
+        try:
+            _valid_pairs.sort(key=lambda x: x[0])
+        except TypeError:
+            pass  # mixed dtypes – keep existing order
+        _mini_zarr_paths = [p for _, p in _valid_pairs] + _none_paths
+        logger.debug(
+            f"Shared batch ({alias}): sorted {len(_mini_zarr_paths)} "
+            "mini-zarrs by time start"
+        )
+
     # ── Final concat → shared zarr ─────────────────────────────────────
     lazy_parts = [
         xr.open_zarr(p, consolidated=False) for p in _mini_zarr_paths
@@ -1251,29 +1532,11 @@ def preprocess_batch_obs_files(
                 combined["time"].encoding[_ek] = _time_encoding[_ek]
 
     # ── Sort by time so workers can use fast contiguous slicing ────────
-    # Boolean-mask isel on a dask-backed zarr forces reading ALL chunks
-    # (35 M pts × N vars).  When 8 worker threads do this simultaneously
-    # the I/O bandwidth is saturated and tasks either time out or OOM.
-    # Sorting by time lets workers use slice(i0, i1) which reads only
-    # the relevant contiguous chunks — typically 10-100× less I/O.
-    _time_name = coordinates.get("time", "time")
-    if _time_name in combined.variables:
-        _tarr = combined[_time_name].values
-        if hasattr(_tarr, "compute"):
-            _tarr = _tarr.compute()
-        _tarr = np.asarray(_tarr)
-        if not np.issubdtype(_tarr.dtype, np.datetime64):
-            try:
-                _tarr = _tarr.astype("datetime64[ns]")
-            except Exception:
-                _tarr = None  # type: ignore[assignment]
-        if _tarr is not None and len(_tarr) > 1 and not bool(np.all(_tarr[:-1] <= _tarr[1:])):
-            logger.info(
-                f"Shared batch ({alias}): sorting {len(_tarr):,} "
-                "points by time for fast worker slicing..."
-            )
-            _sort_idx = np.argsort(_tarr, kind="mergesort")
-            combined = combined.isel({n_points_dim: _sort_idx})
+    # The mini-zarrs were pre-sorted by their first time element above,
+    # so xr.concat produces an already-monotone time axis for
+    # non-overlapping SWOT/SARAL passes.  The expensive global argsort
+    # (191 M timestamps → 3 GB RAM + single-threaded CPU) is no longer
+    # needed and has been eliminated.
 
     # Rechunk to uniform sizes — xr.concat of files with varying n_points
     # produces non-uniform dask chunks which zarr cannot store.
@@ -1286,24 +1549,39 @@ def preprocess_batch_obs_files(
 
     # ── Save time index as sidecar .npy for zero-copy worker access ───
     # Workers need the full time array for searchsorted filtering.
-    # Loading it from the zarr means each worker independently calls
-    # .compute() on a 107 M-element dask array → ~860 MB per worker.
-    # By saving it as a contiguous .npy file, workers can np.load()
-    # with mmap_mode='r' and share the same OS page cache pages.
+    # We stream through the pre-sorted mini-zarrs reading only the time
+    # variable from each, writing directly into a memory-mapped .npy file.
+    # Peak RAM = one mini-zarr's time array (a few MB) versus the previous
+    # approach of loading all 191 M timestamps at once (~1.5 GB).
     _time_npy_path = os.path.join(output_zarr_dir, "time_index.npy")
     try:
         _time_name_coord = coordinates.get("time", "time")
-        if _time_name_coord in combined.variables:
-            _tv = combined[_time_name_coord].values
-            if hasattr(_tv, "compute"):
-                _tv = _tv.compute()
-            _tv = np.asarray(_tv)
-            if np.issubdtype(_tv.dtype, np.integer):
-                _tv = _tv.astype("datetime64[ns]")
-            np.save(_time_npy_path, _tv)
+        if n_pts_total > 0 and any(
+            _time_name_coord in _lp.variables for _lp in lazy_parts
+        ):
+            _tv_mmap = np.lib.format.open_memmap(
+                _time_npy_path, mode="w+",
+                dtype="datetime64[ns]", shape=(n_pts_total,),
+            )
+            _offset = 0
+            for _lp in lazy_parts:
+                if _time_name_coord not in _lp.variables:
+                    continue
+                _tv = np.asarray(_lp[_time_name_coord].values)
+                if np.issubdtype(_tv.dtype, np.integer):
+                    _tv = _tv.astype("datetime64[ns]")
+                elif not np.issubdtype(_tv.dtype, np.datetime64):
+                    _tv = pd.to_datetime(_tv).values.astype("datetime64[ns]")
+                elif _tv.dtype != np.dtype("datetime64[ns]"):
+                    _tv = _tv.astype("datetime64[ns]")
+                _n = len(_tv)
+                _tv_mmap[_offset:_offset + _n] = _tv
+                _offset += _n
+                del _tv
+            del _tv_mmap  # flush to disk
             logger.debug(
                 f"Shared batch ({alias}): saved time index "
-                f"({len(_tv):,} pts) to {_time_npy_path}"
+                f"({_offset:,} pts) to {_time_npy_path}"
             )
     except Exception as _exc_npy:
         logger.debug(f"Could not save time index .npy: {_exc_npy}")
