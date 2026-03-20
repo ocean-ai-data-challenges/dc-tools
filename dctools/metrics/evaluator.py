@@ -440,12 +440,15 @@ class Evaluator:
                         if ref_alias in _ref_aliases_ordered
                         else "?"
                     )
-                    _sep_ref = "-" * 60
-                    print(f"    ┌{_sep_ref}┐")
+                    _c = "\033[1;96m"   # bright cyan, bold
+                    _y = "\033[1;93m"   # bright yellow, bold
+                    _r = "\033[0m"      # reset
+                    _sep_ref = "─" * 60
+                    print(f"\n    {_c}┌{_sep_ref}┐{_r}")
                     print(
-                        f"    │  ◆  Reference dataset ({_n_ref_current}/{_n_ref_total}) :  {str(ref_alias).upper():<28}│"  # noqa: E501
+                        f"    {_c}│{_r}  {_y}📡 Reference dataset ({_n_ref_current}/{_n_ref_total}){_r} ›  {_c}{str(ref_alias).upper():<27}{_c}│{_r}"  # noqa: E501
                     )
-                    print(f"    └{_sep_ref}┘")
+                    print(f"    {_c}└{_sep_ref}┘{_r}\n")
                     _prev_ref_alias = ref_alias
 
                 # -- Reconfigure cluster if this ref dataset needs
@@ -1340,12 +1343,12 @@ class Evaluator:
                 _n_remote = len(_unique_remote) if _unique_remote else 0
                 if _obs_path_map:
                     logger.info(
-                        f"[Batch {_batch_idx+1}/{_total_batches}] {ref_alias.upper()}: "
+                        f"📦 Batch N°{_batch_idx+1}/{_total_batches} ▸ {ref_alias.upper()}: "
                         f"preprocessing {len(_obs_path_map)} cached obs files…"
                     )
                 elif _n_remote > 0:
                     logger.info(
-                        f"[Batch {_batch_idx+1}/{_total_batches}] {ref_alias.upper()}: "
+                        f"📦 Batch N°{_batch_idx+1}/{_total_batches} ▸ {ref_alias.upper()}: "
                         f"downloading + preprocessing {_n_remote} obs files…"
                     )
                 _ref_d0 = batch[0].get("ref_data") if batch else None
@@ -1542,15 +1545,16 @@ class Evaluator:
                         _entry["pred_data"] = _la_pred_map[_pd]
 
             # Always create the progress bar, even if no lookahead
-            _bar_cyan  = "\033[1;96m"   # bright cyan, bold
-            _bar_reset = "\033[0m"
+            _bar_bold   = "\033[1m"
+            _bar_cyan   = "\033[1;96m"   # bright cyan, bold
+            _bar_yellow = "\033[1;93m"   # bright yellow, bold
+            _bar_reset  = "\033[0m"
             _overall_bar = tqdm(
                 total=num_tasks,
                 desc=(
-                    f"{_bar_cyan}"
-                    f"[Batch {_batch_idx+1}/{_total_batches}]"
-                    f" Reference dataset {str(ref_alias).upper()}"
-                    f"{_bar_reset}"
+                    f"{_bar_cyan}📦 Batch N°{_batch_idx+1}/{_total_batches}{_bar_reset}"
+                    f" {_bar_bold}│{_bar_reset}"
+                    f" {_bar_yellow}🔗 {str(ref_alias).upper()}{_bar_reset}"
                 ),
                 leave=True,
                 unit="task",

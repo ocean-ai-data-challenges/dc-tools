@@ -173,7 +173,7 @@ per_bins_resolution: 4
 start_time: "2024-01-01"
 
 ## end time
-end_time: "2025-01-01"
+end_time: "2024-02-01"
 
 # Target region coordinates
 min_lon: -180
