@@ -1,14 +1,14 @@
 """CLI runner for DC evaluations.
 
 This module centralizes the boilerplate needed to run an evaluation from a YAML
-config file (dc/config/*.yaml):
+config file shipped by the challenge package (dc2/config/*.yaml):
 - ensure the project root is on sys.path
 - set HDF5/NetCDF/argopy environment variables early
 - load CLI args + YAML config into a Namespace
 - create derived directories (catalogs/results) and paths
 - run the evaluation with a Dask performance report
 
-Keeping this logic here makes dc/evaluate.py a thin wrapper.
+Keeping this logic here makes dc2/evaluate.py a thin wrapper.
 """
 
 from __future__ import annotations
@@ -37,10 +37,10 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _dc_config_dir() -> Path:
+def _challenge_config_dir() -> Path:
     # runner.py -> dctools/processing/runner.py
-    # config lives at <repo root>/dc/config
-    return _project_root() / "dc" / "config"
+    # config lives at <repo root>/dc2/config
+    return _project_root() / "dc2" / "config"
 
 
 def _ensure_project_on_syspath() -> None:
@@ -61,7 +61,7 @@ def _configure_hdf5_netcdf_env() -> None:
 def resolve_config_path(default_config_name: str, cli_args: Any) -> Path:
     """Resolve the YAML config path from CLI args (if any) or default."""
     config_name = getattr(cli_args, "config_name", None) or default_config_name
-    return _dc_config_dir() / f"{config_name}.yaml"
+    return _challenge_config_dir() / f"{config_name}.yaml"
 
 
 def run_from_config(
@@ -88,7 +88,7 @@ def run_from_config(
         from dctools.utilities.args_config import load_args_and_config
 
         if evaluation_cls is None:
-            from dc.evaluation.evaluation import DC2Evaluation as _DefaultEval  # noqa: E402
+            from dc2.evaluation.evaluation import DC2Evaluation as _DefaultEval  # noqa: E402
 
             evaluation_cls = _DefaultEval
 
@@ -151,7 +151,7 @@ def run_from_config(
 
 
 def run_from_cli(default_config_name: str = "dc2") -> int:
-    """Entry point used by dc/evaluate.py."""
+    """Entry point used by dc2/evaluate.py."""
     _ensure_project_on_syspath()
     _configure_hdf5_netcdf_env()
 

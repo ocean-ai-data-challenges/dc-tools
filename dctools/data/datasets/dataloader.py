@@ -1384,8 +1384,27 @@ def preprocess_batch_obs_files(
 
     _cpu_count = os.cpu_count() or 4
     _env_max = int(os.environ.get("DCTOOLS_PREP_WORKERS", "0"))
+
+    # Default: use threads, not processes.
+    # ProcessPoolExecutor spawns/forks complete Python processes; each forked
+    # child accumulates ~400 MB of copied pages (interpreter + xarray/zarr
+    # imports) on Linux copy-on-write, so 16 processes = ~6 GB overhead
+    # before processing a single SWOT file.  Threads share the parent's
+    # address space and imported modules, so only the numpy arrays (a few
+    # tens of MB per file) are duplicated.  The GIL is released during zarr
+    # I/O, Blosc decompression, and numpy operations, giving near-equivalent
+    # throughput at a fraction of the memory cost.
+    # Set DCTOOLS_PREP_USE_PROCESSES=1 to restore the old process-based path
+    # (useful on pure-compute workloads with no Blosc-compressed I/O).
+    _use_processes = os.environ.get(
+        "DCTOOLS_PREP_USE_PROCESSES", ""
+    ).lower() in ("1", "true", "yes")
+
+    # Default worker cap: 8 threads (plenty for I/O-bound zarr reads).
+    # When using processes, cap at 4 to limit forked-process RAM overhead.
+    _default_max = 4 if _use_processes else 8
     _MAX_PREP_WORKERS = min(
-        _env_max if _env_max > 0 else min(_cpu_count, 16),
+        _env_max if _env_max > 0 else min(_cpu_count, _default_max),
         len(local_paths),
     )
 
@@ -1396,10 +1415,6 @@ def preprocess_batch_obs_files(
         for idx, p in enumerate(local_paths)
     ]
 
-    _use_processes = os.environ.get(
-        "DCTOOLS_PREP_THREADS_ONLY", ""
-    ).lower() not in ("1", "true", "yes")
-
     logger.info(
         f"Shared batch preprocessing ({alias}): "
         f"{len(local_paths)} unique files, "
@@ -1409,34 +1424,48 @@ def preprocess_batch_obs_files(
     try:
         if _use_processes:
             from concurrent.futures import ProcessPoolExecutor as _FilePool
+            with _FilePool(max_workers=_MAX_PREP_WORKERS) as pool:
+                from concurrent.futures import as_completed as _proc_ac
+                _futs = [pool.submit(_process_file_to_zarr, a) for a in _args_list]
+                _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
+                for fut in _proc_ac(_futs):
+                    try:
+                        zarr_path, n_pts = fut.result()
+                    except Exception as _fe:
+                        _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
+                        logger.warning(
+                            f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+                        )
+                        continue
+                    if zarr_path is not None:
+                        _mini_zarr_paths.append(zarr_path)
+                        n_ok += 1
+                        n_pts_total += n_pts
         else:
-            raise RuntimeError("threads-only requested via env")  # → fallback
+            from concurrent.futures import ThreadPoolExecutor as _ThrPool
+            from concurrent.futures import as_completed as _thr_ac
+            with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
+                _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
+                _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
+                for fut in _thr_ac(_futs):
+                    try:
+                        zarr_path, n_pts = fut.result()
+                    except Exception as _fe:
+                        _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
+                        logger.warning(
+                            f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+                        )
+                        continue
+                    if zarr_path is not None:
+                        _mini_zarr_paths.append(zarr_path)
+                        n_ok += 1
+                        n_pts_total += n_pts
 
-        with _FilePool(max_workers=_MAX_PREP_WORKERS) as pool:
-            from concurrent.futures import as_completed as _proc_ac
-            _futs = [pool.submit(_process_file_to_zarr, a) for a in _args_list]
-            _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
-            for fut in _proc_ac(_futs):
-                try:
-                    zarr_path, n_pts = fut.result()
-                except Exception as _fe:
-                    _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
-                    logger.warning(
-                        f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
-                    )
-                    continue
-                if zarr_path is not None:
-                    _mini_zarr_paths.append(zarr_path)
-                    n_ok += 1
-                    n_pts_total += n_pts
-
-    except (RuntimeError, OSError, BrokenPipeError) as _pool_exc:
-        # Fallback: ThreadPoolExecutor (GIL-limited but portable).
-        if _use_processes:
-            logger.warning(
-                f"Batch preproc ({alias}): ProcessPoolExecutor failed "
-                f"({_pool_exc!r}), falling back to threads"
-            )
+    except (OSError, BrokenPipeError) as _pool_exc:
+        logger.warning(
+            f"Batch preproc ({alias}): executor failed "
+            f"({_pool_exc!r}), retrying with ThreadPoolExecutor"
+        )
         from concurrent.futures import ThreadPoolExecutor as _ThrPool
         from concurrent.futures import as_completed as _thr_ac
 
@@ -1553,10 +1582,26 @@ def preprocess_batch_obs_files(
     # variable from each, writing directly into a memory-mapped .npy file.
     # Peak RAM = one mini-zarr's time array (a few MB) versus the previous
     # approach of loading all 191 M timestamps at once (~1.5 GB).
+    #
+    # Size guard: for very large swath datasets (SWOT, SARAL) a full-year
+    # batch can total hundreds of millions of points.  Each point requires
+    # 8 bytes in the time index.  Skip the sidecar when the estimated file
+    # size would exceed DCTOOLS_TIME_NPY_MAX_GB (default 1 GB) to avoid
+    # exhausting disk space and OS dirty-page RAM during the mmap write.
+    # Workers fall back to loading the time coordinate from the zarr store.
+    _TIME_NPY_MAX_GB = float(os.environ.get("DCTOOLS_TIME_NPY_MAX_GB", "1.0"))
+    _time_npy_size_gb = n_pts_total * 8 / 1e9
     _time_npy_path = os.path.join(output_zarr_dir, "time_index.npy")
     try:
         _time_name_coord = coordinates.get("time", "time")
-        if n_pts_total > 0 and any(
+        if _time_npy_size_gb > _TIME_NPY_MAX_GB:
+            logger.debug(
+                f"Shared batch ({alias}): skipping time index .npy "
+                f"(estimated {_time_npy_size_gb:.2f} GB > "
+                f"limit {_TIME_NPY_MAX_GB} GB). "
+                "Workers will read time from the shared zarr."
+            )
+        elif n_pts_total > 0 and any(
             _time_name_coord in _lp.variables for _lp in lazy_parts
         ):
             _tv_mmap = np.lib.format.open_memmap(

@@ -298,6 +298,56 @@ class TestClass4Observation:
         # Class4 returns a DataFrame (or None on empty match)
         # Either outcome exercises the code path.
 
+    def test_class4_returns_spatial_per_bins_when_requested(self):
+        """Class4 path emits leaderboard-compatible per_bins when bin_resolution is set."""
+        from dctools.metrics.metrics import MetricComputer
+
+        times = pd.date_range("2025-01-01", periods=2, freq="1D")
+        pred = _make_gridded_ds(
+            times,
+            lat=np.linspace(-1, 1, 5),
+            lon=np.linspace(-1, 1, 5),
+            var_name="ssh",
+            seed=300,
+        )
+        obs = _make_obs_ds(n_points=15, var_name="ssh", seed=400)
+
+        mc = MetricComputer(
+            eval_variables=["ssh"],
+            is_class4=True,
+            metric_name="class4",
+            class4_kwargs={
+                "list_scores": ["rmse"],
+                "interpolation_method": "scipy",
+                "time_tolerance": pd.Timedelta("24h"),
+                "apply_qc": False,
+            },
+            bin_resolution=4,
+        )
+
+        result = mc.compute(
+            pred_data=pred,
+            ref_data=obs,
+            pred_coords=_gridded_coord_system(),
+            ref_coords=_obs_coord_system(),
+        )
+
+        assert result is not None
+        assert "results" in result
+        assert "per_bins" in result
+        assert "ssh" in result["per_bins"]
+        assert result["per_bins"]["ssh"]
+
+        first_bin = result["per_bins"]["ssh"][0]
+        assert "lat_bin" in first_bin
+        assert "lon_bin" in first_bin
+        assert "rmse" in first_bin
+
+        lat_bin = first_bin["lat_bin"]
+        lon_bin = first_bin["lon_bin"]
+        assert round(float(lat_bin.right) - float(lat_bin.left), 6) == 4.0
+        assert round(float(lon_bin.right) - float(lon_bin.left), 6) == 4.0
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 2b. Class4 variable-name harmonization
@@ -1241,6 +1291,42 @@ class TestMiniEvaluationPipeline:
         )
         # Class4 may return DataFrame or None depending on matching
         # Both outcomes exercise the full code path
+
+    def test_compute_spatial_per_bins_3d_includes_depth_bins(self):
+        """3D gridded per-bins should include depth_bin for depth-aware variables."""
+        from dctools.metrics.oceanbench_metrics import _compute_spatial_per_bins
+
+        times = pd.date_range("2025-01-01", periods=1, freq="1D")
+        depth = np.array([0.494025, 47.37369, 92.32607], dtype=np.float64)
+
+        pred = _make_gridded_ds(
+            times,
+            lat=np.linspace(-1, 1, 5),
+            lon=np.linspace(-1, 1, 5),
+            depth=depth,
+            var_name="temperature",
+            std_name=_STD_NAME_TEMP,
+            seed=123,
+        )
+        ref = pred.copy(deep=True)
+        ref["temperature"] = ref["temperature"] + 0.5
+
+        result = _compute_spatial_per_bins(
+            pred_ds=pred,
+            ref_ds=ref,
+            eval_variables=["temperature"],
+            has_depth=True,
+            depth_levels=None,
+            bin_resolution=4,
+        )
+
+        assert "temperature" in result
+        assert result["temperature"]
+        assert all("depth_bin" in item for item in result["temperature"])
+
+        first_bin = result["temperature"][0]["depth_bin"]
+        assert first_bin["left"] == depth[0]
+        assert first_bin["right"] == depth[1]
 
 
 def _make_catalog_json(

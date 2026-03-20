@@ -20,6 +20,8 @@ _LEADERBOARD_TEXTS_YAML = Path(__file__).parent.parent / "config" / "leaderboard
 class DC2Evaluation(BaseDCEvaluation):
     """Class that manages evaluation of Data Challenge 2."""
 
+    CHALLENGE_NAME = "DC2"
+
     def __init__(self, arguments: Namespace) -> None:
         """Init class.
 
@@ -28,7 +30,7 @@ class DC2Evaluation(BaseDCEvaluation):
         """
         super().__init__(arguments)
 
-        # Load leaderboard display config from the YAML shipped in dc/config/.
+        # Load leaderboard display config from the YAML shipped in dc2/config/.
         if _LEADERBOARD_TEXTS_YAML.is_file():
             try:
                 self.leaderboard_custom_config = (
@@ -39,7 +41,7 @@ class DC2Evaluation(BaseDCEvaluation):
 
         self.dataset_references = {
             "glonet": [
-                "swot"  # "argo_profiles", "glorys", "jason3", "saral", "swot", # "argo_velocities",
+                "swot"  #"argo_profiles", "glorys", "jason3", "saral", "swot", # "argo_velocities",
                 # "SSS_fields", "SST_fields",
             ],
         }

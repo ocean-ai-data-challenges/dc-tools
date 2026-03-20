@@ -22,6 +22,8 @@ from oceanbench.core.distributed import DatasetProcessor
 from tqdm import tqdm
 
 from dctools.data.connection.connection_manager import (
+    _invalidate_local_dataset_cache,
+    _is_valid_local_dataset_cache,
     clean_for_serialization,
     create_worker_connect_config,
 )
@@ -1646,7 +1648,10 @@ class Evaluator:
                 #      baseline (accumulation over batches).
                 #   2. Absolute: any worker exceeds max_worker_memory_fraction
                 #      of its Dask memory_limit.
-                if self.restart_workers_per_batch:
+                # restart_frequency controls how often the memory check runs
+                # (every N batches).  A value of 1 checks after every batch.
+                _freq = int(self.restart_frequency or 1)
+                if self.restart_workers_per_batch and (batch_idx % _freq == 0):
                     _client = getattr(self.dataset_processor, "client", None)
                     if _client is not None:
                         _cur_frac = self.get_max_memory_fraction()
@@ -2152,10 +2157,16 @@ class Evaluator:
                     _fname = _PfRef(_rp).name
                     _local_zarr = os.path.join(_ref_cache_dir, _fname)
                     if os.path.isdir(_local_zarr) and os.listdir(_local_zarr):
-                        with _ref_lock:
-                            _ref_result[_rp] = _local_zarr
-                            _counters["hit"] += 1
-                        return
+                        if _is_valid_local_dataset_cache(_local_zarr):
+                            with _ref_lock:
+                                _ref_result[_rp] = _local_zarr
+                                _counters["hit"] += 1
+                            return
+                        logger.warning(
+                            f"Invalid cached reference store detected for {_fname}; "
+                            "removing and re-downloading."
+                        )
+                        _invalidate_local_dataset_cache(_local_zarr)
                     try:
                         # logger.debug(f"Prefetching reference: {_fname}")
                         _tid = _ref_dl_threading.current_thread().ident
@@ -2258,10 +2269,16 @@ class Evaluator:
                     if os.path.isdir(_local_zarr) and os.listdir(
                         _local_zarr
                     ):
-                        with _pred_lock:
-                            _pred_result[_rp] = _local_zarr
-                            _counters["hit"] += 1
-                        return
+                        if _is_valid_local_dataset_cache(_local_zarr):
+                            with _pred_lock:
+                                _pred_result[_rp] = _local_zarr
+                                _counters["hit"] += 1
+                            return
+                        logger.warning(
+                            f"Invalid cached prediction store detected for {_fname}; "
+                            "removing and re-downloading."
+                        )
+                        _invalidate_local_dataset_cache(_local_zarr)
                     try:
                         logger.debug(
                             f"Prefetching prediction: {_fname}"
@@ -2536,7 +2553,7 @@ class Evaluator:
                 logger.debug(
                     f"{ref_alias}: batch has {num_tasks} tasks for {_N} workers; "
                     "CPU may drop mid-batch due to stragglers. "
-                    "If this is undesirable, increase batch_size (more tasks than workers) "
+                    "If this is undesirable, increase obs_batch_size (more tasks than workers) "
                     "or reduce n_workers."
                 )
 

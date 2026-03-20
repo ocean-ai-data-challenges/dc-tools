@@ -173,8 +173,8 @@ warn_unused_configs = true
 types = "mypy --install-types --non-interactive dctools"
 lint = "ruff check 'dctools' 'tests'"
 test-fast = "pytest --capture=no -m 'not slow and not integration' tests/"
-test-coverage = "pytest --capture=no -m 'not slow' --cov=dctools --cov=dc --cov-report=term-missing --cov-fail-under=50 tests/"
-test-fast-strict = "pytest --capture=no -m 'not slow' --cov=dctools --cov=dc --cov-report=term-missing --cov-fail-under=80 tests/"
+test-coverage = "pytest --capture=no -m 'not slow' --cov=dctools --cov=dc2 --cov-report=term-missing --cov-fail-under=50 tests/"
+test-fast-strict = "pytest --capture=no -m 'not slow' --cov=dctools --cov=dc2 --cov-report=term-missing --cov-fail-under=80 tests/"
 test-slow = "pytest --capture=no -m 'slow' tests/"
 test = { ref = "test-fast" }
 # run all — unit + integration (complete coverage, excludes slow/hanging tests)

@@ -63,12 +63,12 @@ def test_ensure_project_on_syspath_inserts_once(monkeypatch):
 
 def test_resolve_config_path_uses_cli_override(monkeypatch):
     """resolve_config_path should prefer cli args config_name when provided."""
-    monkeypatch.setattr(runner, "_dc_config_dir", lambda: Path("/tmp/dc/config"))
+    monkeypatch.setattr(runner, "_challenge_config_dir", lambda: Path("/tmp/dc2/config"))
     cli_args = Namespace(config_name="dc3")
 
     out = runner.resolve_config_path("dc2", cli_args)
 
-    assert out == Path("/tmp/dc/config/dc3.yaml")
+    assert out == Path("/tmp/dc2/config/dc3.yaml")
 
 
 def test_configure_hdf5_env_uses_setdefault(monkeypatch):

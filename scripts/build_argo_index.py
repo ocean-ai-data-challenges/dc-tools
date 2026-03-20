@@ -11,7 +11,7 @@ Ce script utilise la nouvelle classe ArgoInterface pour :
 4. Stocker les index sur S3/Wasabi pour un accès ultra-rapide
 
 Usage:
-    python scripts/build_argo_index.py --year 2024 --config dc/config/dc2.yaml
+    python scripts/build_argo_index.py --year 2024 --config dc2/config/dc2.yaml
 """
 
 import argparse
@@ -151,8 +151,8 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="dc/config/dc2.yaml",
-        help="Path to configuration file (default: dc/config/dc2.yaml)",
+        default="dc2/config/dc2.yaml",
+        help="Path to configuration file (default: dc2/config/dc2.yaml)",
     )
 
     parser.add_argument(
