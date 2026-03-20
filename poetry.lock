@@ -5619,7 +5619,7 @@ optional = false
 python-versions = ">=3.11.0,<3.14.0"
 groups = ["custom"]
 files = []
-develop = true
+develop = false
 
 [package.dependencies]
 aiohttp = ">=3.0.0"
@@ -5638,8 +5638,10 @@ xskillscore = ">=0.0.27"
 zarr = "2.18.4"
 
 [package.source]
-type = "directory"
-url = "../../oceanbench"
+type = "git"
+url = "https://github.com/aitmohandk/oceanbench.git"
+reference = "main"
+resolved_reference = "406f0dfb9591034ec379ead09616156a545f9d1d"
 
 [[package]]
 name = "omegaconf"
@@ -9653,4 +9655,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11.0,<3.14.0"
-content-hash = "e6754a7a43205b19f088d80c07196d3610494d20521b5eb88fad4dd86b1086d5"
+content-hash = "2dbaec267d095d41bace308ce6b061d13a30a2d2b4ba81242a5b82e7a703b2b9"
