@@ -2511,14 +2511,28 @@ class Evaluator:
                         _entry["pred_data"] = _la_pred_map[_pd]
 
             # Always create the progress bar, even if no lookahead
+            # ANSI colour helpers (reset automatically at end of each segment)
+            _C = "\033[1;36m"   # bold cyan  – batch number
+            _Y = "\033[1;33m"   # bold yellow – reference dataset name
+            _D = "\033[0;90m"   # dim grey   – separator
+            _R = "\033[0m"      # reset
+            _batch_desc = (
+                f"{_C}⏳ Batch N°{_batch_idx+1}/{_total_batches}{_R}"
+                f" {_D}│{_R} "
+                f"{_Y}📊 {ref_alias}{_R}"
+            )
             _overall_bar = tqdm(
                 total=num_tasks,
-                desc=f"[Batch {_batch_idx+1}/{_total_batches}] {ref_alias}",
+                desc=_batch_desc,
                 leave=True,
                 unit="task",
                 dynamic_ncols=True,
+                colour="#36b3a0",
                 file=_sys_bars.stderr,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {desc}"
+                bar_format=(
+                    "{desc}: {percentage:3.0f}%|{bar}| "
+                    "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]{postfix}"
+                ),
             )
 
             logger.debug(
