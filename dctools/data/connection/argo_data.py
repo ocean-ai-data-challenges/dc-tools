@@ -497,15 +497,40 @@ class ArgoInterface:
         n_fail = 0
         n_cached = 0
 
+        def _is_valid_cached_profile(local_path: Path) -> bool:
+            ds = None
+            try:
+                if not local_path.exists() or local_path.stat().st_size <= 0:
+                    return False
+                ds = xr.open_dataset(
+                    local_path,
+                    engine="scipy",
+                    backend_kwargs={"mmap": False},
+                )
+                return True
+            except Exception:
+                return False
+            finally:
+                try:
+                    if ds is not None:
+                        ds.close()
+                except Exception:
+                    pass
+
         def _dl_one(url: str) -> tuple:
             stem = Path(url).stem or "profile"
             local_path = cache_dir / f"{stem}.nc"
             if local_path.exists() and local_path.stat().st_size > 0:
-                return (url, str(local_path), True)  # cache hit
+                if _is_valid_cached_profile(local_path):
+                    return (url, str(local_path), True)  # cache hit
+                local_path.unlink(missing_ok=True)
             try:
                 resp = session.get(url, timeout=60)
                 resp.raise_for_status()
                 local_path.write_bytes(resp.content)
+                if not _is_valid_cached_profile(local_path):
+                    local_path.unlink(missing_ok=True)
+                    raise OSError("downloaded ARGO profile cache is unreadable")
                 return (url, str(local_path), False)
             except Exception as exc:
                 # Try alternate GDAC mirror
@@ -518,6 +543,11 @@ class ArgoInterface:
                                 resp = session.get(alt_url, timeout=60)
                                 resp.raise_for_status()
                                 local_path.write_bytes(resp.content)
+                                if not _is_valid_cached_profile(local_path):
+                                    local_path.unlink(missing_ok=True)
+                                    raise OSError(
+                                        "downloaded ARGO profile cache is unreadable"
+                                    )
                                 return (url, str(local_path), False)
                             except Exception:
                                 pass

@@ -17,7 +17,9 @@ mutualizing generic helpers:
 
 from __future__ import annotations
 
+import gzip
 import json
+import math
 import os
 import time as _time
 import warnings
@@ -25,6 +27,7 @@ from argparse import Namespace
 from datetime import timedelta
 from glob import glob
 from pathlib import Path
+from textwrap import wrap
 from typing import Any, Dict, List, Optional
 
 import dask
@@ -56,6 +59,183 @@ import dcleaderboard as _dcleaderboard
 warnings.simplefilter("ignore", UserWarning)
 
 
+# Stable short-alias dictionaries for the compact .jsonl.gz format (v2).
+# These are intentionally module-level constants so both the writer (here)
+# and the reader (dcleaderboard.map_processing) share the same definition.
+#   _PB_FIELD_ALIASES  : short → full name for top-level entry fields
+#   _PB_COORD_ALIASES  : short → full name for columnar coordinate keys
+_PB_FIELD_ALIASES: Dict[str, str] = {
+    "ra": "ref_alias",
+    "rt": "ref_type",
+    "lt": "lead_time",
+    "ft": "forecast_reference_time",
+    "pb": "per_bins",
+}
+_PB_COORD_ALIASES: Dict[str, str] = {
+    "yl": "lat_l",
+    "yr": "lat_r",
+    "xl": "lon_l",
+    "xr": "lon_r",
+    "dl": "depth_l",
+    "dr": "depth_r",
+}
+_PB_FIELD_SHORT: Dict[str, str] = {v: k for k, v in _PB_FIELD_ALIASES.items()}
+_PB_COORD_SHORT: Dict[str, str] = {v: k for k, v in _PB_COORD_ALIASES.items()}
+
+
+def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
+    """Aggregate a raw per-bins JSONL into a compact gzip JSONL (format v2).
+
+    Reads the raw file produced during batch consolidation, where one line
+    exists per (forecast_reference_time, ref_alias, lead_time).  Groups
+    by (ref_alias, lead_time, ref_type, forecast_reference_time) and writes
+    a gzip JSONL where:
+
+    * **First line**: schema header ``{"_v": 2, "f": {…}, "c": {…}}``
+      carrying the alias dictionaries so readers can expand short keys.
+    * One data line per unique (ref_alias, lead_time, ref_type,
+      forecast_reference_time) — the full temporal resolution is preserved.
+    * Per-bins data uses a **columnar** layout (one array per coordinate/
+      metric) to eliminate repeated JSON key overhead (~4x JSON compactness
+      vs per-bin dicts).  Coordinate/field keys use the short aliases from
+      ``_PB_COORD_ALIASES`` / ``_PB_FIELD_ALIASES``.
+    * Bin boundary coordinates are rounded to 2 decimal places to merge
+      entries whose float representations differ only in trailing digits
+      (e.g. Glorys vs Argo depth bin edges for the same nominal depth).
+
+    The resulting file is always smaller or equal to the raw file and its
+    size is **bounded regardless of the temporal extent** of the evaluation:
+    adding more forecast windows only improves accuracy, not file size.
+
+    Returns the path to the new ``.jsonl.gz`` file, or ``None`` if the raw
+    file did not exist or contained no per-bins entries.
+    """
+    if not os.path.isfile(raw_path):
+        return None
+
+    _COORD_DP = 2   # decimal places for bin boundary rounding
+    _METRIC_DP = 6  # decimal places for averaged metric values
+    # Keys that are bin coordinates / counters, not metrics to average.
+    _SKIP = frozenset({
+        "lat_bin", "lon_bin", "depth_bin",
+        "count", "n", "n_points", "time_bin",
+    })
+
+    def _bin_key(b: Dict) -> tuple:
+        """Build a hashable, rounded spatial bin key."""
+        lat = (round(b["lat_bin"]["left"], _COORD_DP),
+               round(b["lat_bin"]["right"], _COORD_DP))
+        lon = (round(b["lon_bin"]["left"], _COORD_DP),
+               round(b["lon_bin"]["right"], _COORD_DP))
+        if "depth_bin" in b:
+            db = b["depth_bin"]
+            dep = (round(db["left"], _COORD_DP), round(db["right"], _COORD_DP))
+            return lat + lon + dep
+        return lat + lon
+
+    # accum[(ref_alias, lead_time, ref_type, forecast_reference_time)]
+    #       [var][bin_key] = {metric: [s, n]}
+    accum: Dict[tuple, Dict] = {}
+    n_raw = 0
+
+    with open(raw_path, encoding="utf-8") as fh:
+        for raw_line in fh:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            n_raw += 1
+            entry = json.loads(raw_line)
+            ref_alias = entry.get("ref_alias", "")
+            lead_time = entry.get("lead_time")
+            ref_type = entry.get("ref_type", "gridded")
+            forecast_reference_time = entry.get("forecast_reference_time", "")
+            group_key = (ref_alias, lead_time, ref_type, forecast_reference_time)
+
+            group = accum.setdefault(group_key, {})
+            for var, bins in entry.get("per_bins", {}).items():
+                var_d = group.setdefault(var, {})
+                for b in bins:
+                    bk = _bin_key(b)
+                    cell = var_d.setdefault(bk, {})
+                    for metric, val in b.items():
+                        if metric in _SKIP or val is None:
+                            continue
+                        try:
+                            fval = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isnan(fval):
+                            continue
+                        ms = cell.setdefault(metric, [0.0, 0])
+                        ms[0] += fval
+                        ms[1] += 1
+
+    if not accum:
+        logger.debug("  _aggregate_per_bins_jsonl: no entries found in {}", raw_path)
+        return None
+
+    n_groups = len(accum)
+    logger.info(
+        f"  Compacting per-bins: {n_raw} raw entr"
+        f"{'y' if n_raw == 1 else 'ies'} → {n_groups} aggregated group"
+        f"{'s' if n_groups != 1 else ''}"
+    )
+
+    out_path = raw_path + ".gz"
+
+    def _sort_key(item: tuple) -> tuple:
+        ref_alias, lead_time, ref_type, frt = item[0]
+        lt = lead_time if isinstance(lead_time, (int, float)) else 0
+        return (ref_alias, lt, ref_type, frt)
+
+    # Write schema header as the first line so readers can resolve aliases.
+    _schema = json.dumps(
+        {"_v": 2, "f": _PB_FIELD_ALIASES, "c": _PB_COORD_ALIASES},
+        separators=(",", ":"), ensure_ascii=False,
+    )
+    with gzip.open(out_path, "wt", encoding="utf-8", compresslevel=6) as gz:
+        gz.write(_schema + "\n")
+        for (ref_alias, lead_time, ref_type, forecast_reference_time), var_bins in sorted(accum.items(), key=_sort_key):
+            per_bins_out: Dict[str, Dict] = {}
+            for var, bins_dict in var_bins.items():
+                keys = list(bins_dict.keys())
+                if not keys:
+                    continue
+                has_depth = len(keys[0]) == 6
+                col: Dict[str, list] = {
+                    "yl": [bk[0] for bk in keys],
+                    "yr": [bk[1] for bk in keys],
+                    "xl": [bk[2] for bk in keys],
+                    "xr": [bk[3] for bk in keys],
+                }
+                if has_depth:
+                    col["dl"] = [bk[4] for bk in keys]
+                    col["dr"] = [bk[5] for bk in keys]
+
+                all_metrics: set = set()
+                for bk in keys:
+                    all_metrics.update(bins_dict[bk])
+                for metric in sorted(all_metrics):
+                    col[metric] = [
+                        round(bins_dict[bk][metric][0] / bins_dict[bk][metric][1], _METRIC_DP)
+                        if metric in bins_dict[bk] and bins_dict[bk][metric][1] > 0
+                        else None
+                        for bk in keys
+                    ]
+                per_bins_out[var] = col
+
+            row = {
+                "ra": ref_alias,
+                "rt": ref_type,
+                "lt": lead_time,
+                "ft": forecast_reference_time,
+                "pb": per_bins_out,
+            }
+            gz.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+
+    return out_path
+
+
 class BaseDCEvaluation:
     """Base class for evaluation orchestration.
 
@@ -65,10 +245,14 @@ class BaseDCEvaluation:
     - implement a `run_eval()` method
     """
 
+    CHALLENGE_NAME = "DC"
+
     def __init__(self, arguments: Namespace) -> None:
         self.args = arguments
         self.results_directory = os.path.join(self.args.data_directory, "results")
         os.makedirs(self.results_directory, exist_ok=True)
+        self._startup_summary_logged = False
+        self._startup_dask_cfg: Dict[str, Any] = {}
         self.surface_only: bool = getattr(arguments, "surface_only", False)
         self.target_dimensions = get_target_dimensions(
             self.args, surface=self.surface_only,
@@ -231,6 +415,136 @@ class BaseDCEvaluation:
             return
         configure_dask_workers_env(dataset_processor.client)
 
+    def _box_line(self, text: str, width: int, center: bool = False) -> str:
+        """Format *text* inside a fixed-width Unicode box line."""
+        if center:
+            clipped = text[:width]
+            return f"║{clipped.center(width)}║"
+
+        usable = max(width - 2, 0)
+        clipped = text[:usable]
+        return f"║  {clipped.ljust(usable)}║"
+
+    def _append_wrapped_box_lines(
+        self,
+        rows: List[str],
+        label: str,
+        value: Any,
+        width: int,
+    ) -> None:
+        """Append wrapped ``label: value`` lines to the startup summary box."""
+        value_text = "?" if value in (None, "") else str(value)
+        prefix = f"{label:<14} "
+        inner_width = max(width - 2, 10)
+        wrapped_lines = wrap(
+            f"{prefix}{value_text}",
+            width=inner_width,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [prefix.rstrip()]
+        rows.extend(self._box_line(line, width) for line in wrapped_lines)
+
+    def _build_eval_summary_banner(self) -> str:
+        """Build a one-shot startup summary banner for the evaluation run."""
+        width = 78
+        top = f"╔{'═' * width}╗"
+        bottom = f"╚{'═' * width}╝"
+        sep = f"╟{'─' * width}╢"
+        blank = f"║{' ' * width}║"
+
+        challenge_name = getattr(self, "CHALLENGE_NAME", self.__class__.__name__) or "DC"
+        args = getattr(self, "args", Namespace())
+        dataset_references = getattr(self, "dataset_references", {}) or {}
+        all_datasets = sorted(set(getattr(self, "all_datasets", []) or []))
+        dask_cfg = getattr(self, "_startup_dask_cfg", {}) or {}
+
+        data_directory = getattr(args, "data_directory", "?")
+        results_directory = getattr(
+            self,
+            "results_directory",
+            os.path.join(data_directory, "results") if data_directory != "?" else "?",
+        )
+
+        dask_parts = [
+            f"{dask_cfg.get('n_workers', '?')} worker(s)",
+            f"{dask_cfg.get('threads_per_worker', '?')} thread(s)/worker",
+        ]
+        if dask_cfg.get("memory_limit"):
+            dask_parts.append(f"{dask_cfg['memory_limit']}/worker")
+
+        dataset_processor = getattr(self, "dataset_processor", None)
+        client = getattr(dataset_processor, "client", None)
+        dashboard_link = getattr(client, "dashboard_link", None)
+
+        rows: List[str] = [top, blank]
+        rows.append(self._box_line(f"{challenge_name} Evaluation Summary", width, center=True))
+        rows.append(blank)
+        rows.append(sep)
+        self._append_wrapped_box_lines(
+            rows,
+            "Period",
+            f"{getattr(args, 'start_time', '?')} -> {getattr(args, 'end_time', '?')}",
+            width,
+        )
+        self._append_wrapped_box_lines(
+            rows,
+            "Forecast",
+            f"{getattr(args, 'n_days_forecast', '?')} day(s)",
+            width,
+        )
+        self._append_wrapped_box_lines(
+            rows,
+            "Interval",
+            f"{getattr(args, 'n_days_interval', '?')} day(s)",
+            width,
+        )
+        self._append_wrapped_box_lines(rows, "Data dir", data_directory, width)
+        self._append_wrapped_box_lines(rows, "Results dir", results_directory, width)
+        self._append_wrapped_box_lines(rows, "Dask", ", ".join(dask_parts), width)
+        if dashboard_link:
+            self._append_wrapped_box_lines(rows, "Dashboard", dashboard_link, width)
+
+        rows.append(sep)
+        models = list(dataset_references.keys())
+        rows.append(self._box_line(f"Models to evaluate ({len(models)})", width))
+        if models:
+            for model in models:
+                refs = dataset_references.get(model) or []
+                refs_text = ", ".join(refs) if refs else "(no references)"
+                self._append_wrapped_box_lines(rows, f"- {model}", refs_text, width)
+        else:
+            rows.append(self._box_line("No prediction dataset configured.", width))
+
+        rows.append(sep)
+        self._append_wrapped_box_lines(
+            rows,
+            "Datasets",
+            ", ".join(all_datasets) if all_datasets else "(none)",
+            width,
+        )
+
+        max_cache_files = getattr(args, "max_cache_files", None)
+        if max_cache_files not in (None, ""):
+            rows.append(sep)
+            self._append_wrapped_box_lines(rows, "Max cache", max_cache_files, width)
+        else:
+            rows.append(blank)
+        rows.append(bottom)
+        return "\n".join(rows)
+
+    def _log_startup_summary_once(self) -> None:
+        """Log the startup summary exactly once for the whole evaluation."""
+        if getattr(self, "_startup_summary_logged", False):
+            return
+
+        logger.info(f"\n{self._build_eval_summary_banner()}")
+        self._startup_summary_logged = True
+
+    def _log_dask_dashboard_once(self) -> None:
+        """Backward-compatible wrapper for the startup summary banner."""
+        self._log_startup_summary_once()
+
     # ---------------------------------------------------------------------
     # Generic reusable evaluation helpers
     # ---------------------------------------------------------------------
@@ -320,21 +634,16 @@ class BaseDCEvaluation:
         n_parallel_workers = int(_initial_cfg.get("n_workers", 1))
         nthreads_per_worker = int(_initial_cfg.get("threads_per_worker", 1))
 
-        # Cap worker count to batch_size to avoid idle workers.
-        _batch_size = getattr(self.args, "batch_size", None)
-        if isinstance(_batch_size, int) and _batch_size > 0:
-            if n_parallel_workers > _batch_size:
-                logger.info(
-                    "Capping n_parallel_workers from "
-                    f"{n_parallel_workers} to {_batch_size} "
-                    f"(batch_size={_batch_size}) to avoid idle workers."
-                )
-                n_parallel_workers = _batch_size
-
         logger.info(
             f"Init DatasetProcessor with: Workers={n_parallel_workers}, "
             f"Threads={nthreads_per_worker}, MemLimit={memory_limit_per_worker}"
         )
+
+        self._startup_dask_cfg = {
+            "n_workers": n_parallel_workers,
+            "threads_per_worker": nthreads_per_worker,
+            "memory_limit": memory_limit_per_worker,
+        }
 
         self._configure_thread_caps_env(threads="1")
 
@@ -346,6 +655,7 @@ class BaseDCEvaluation:
         )
 
         self._configure_dataset_processor_workers()
+        self._log_startup_summary_once()
 
     # ------------------------------------------------------------------
     # Transform setup
@@ -362,7 +672,7 @@ class BaseDCEvaluation:
         depth level only).  This is the standard mode for 2-D challenges
         such as DC1.
         """
-        surface_only: bool = self.surface_only
+        surface_only: bool = getattr(self, "surface_only", False)
         transforms_dict = {}
         for alias in aliases:
             kwargs: Dict[str, Any] = {"reduce_precision": self.args.reduce_precision}
@@ -812,16 +1122,6 @@ class BaseDCEvaluation:
         evaluators: Dict[str, Any] = {}
         models_results: Dict[str, Any] = {}
 
-        # Affiche le lien dashboard Dask une seule fois, avant le début des traitements.
-        try:
-            dashboard_link = getattr(self.dataset_processor.client, "dashboard_link", None)
-            if dashboard_link:
-                logger.info(
-                    f"Link to Dask dashboard : {dashboard_link}"
-                )
-        except Exception:
-            pass
-
         for alias in dataset_references.keys():
             dataset_json_path = os.path.join(self.results_directory, f"results_{alias}.json")
             results_files_dir = os.path.join(self.args.data_directory, "results_batches")
@@ -997,7 +1297,6 @@ class BaseDCEvaluation:
             dataloaders[alias] = dataset_manager.get_dataloader(
                 pred_alias=alias,
                 ref_aliases=effective_references,
-                batch_size=self.args.batch_size,
                 obs_batch_size=_obs_batch_size,
                 gridded_batch_size=_gridded_batch_size,
                 pred_transform=pred_transform,
@@ -1124,10 +1423,27 @@ class BaseDCEvaluation:
                     logger.info("  │  No per-bins spatial data produced for this dataset")
                 else:
                     logger.info(
-                        f"  │  Per-bins spatial data  ->  {_pb_count} entr"
-                        f"{'y' if _pb_count == 1 else 'ies'} written "
-                        f"(JSONL, compact format)"
+                        f"  │  Per-bins spatial data  ->  {_pb_count} raw entr"
+                        f"{'y' if _pb_count == 1 else 'ies'} written; aggregating …"
                     )
+                    # Compact the raw JSONL (one-per-forecast-time) into a
+                    # pre-aggregated columnar gzip JSONL whose size is bounded
+                    # regardless of the temporal extent of the evaluation.
+                    gz_path = _aggregate_per_bins_jsonl(per_bins_path)
+                    if gz_path is not None:
+                        # Replace raw JSONL with the compact version.
+                        try:
+                            os.remove(per_bins_path)
+                        except OSError:
+                            pass
+                        per_bins_path = gz_path
+                        raw_kb = _pb_count * 40 * 1024  # rough raw estimate
+                        gz_bytes = os.path.getsize(gz_path)
+                        logger.info(
+                            f"  │  Per-bins compacted  ->  "
+                            f"{gz_bytes / 1e6:.1f} MB  "
+                            f"({os.path.basename(gz_path)})"
+                        )
 
                 # ── Write results JSON before checking for errors ──────────
                 # Writing first ensures partial results are never discarded
@@ -1238,14 +1554,16 @@ class BaseDCEvaluation:
             os.makedirs(_leaderboard_input_dir, exist_ok=True)
 
             # Copy reference baseline JSONs.
-            # Primary source: <dc_pkg>/leaderboard_results/ (sibling of evaluate.py).
+            # Primary source: <challenge_pkg>/leaderboard_results/ (sibling of evaluate.py).
             # _repo_root was derived from self.results_directory above (not __file__).
-            _dc_pkg_name = getattr(self, "CHALLENGE_NAME", "dc").lower()
-            _dc_dir = _repo_root / _dc_pkg_name
-            _local_lb_dir = _dc_dir / "leaderboard_results"
+            _challenge_pkg_name = getattr(self, "CHALLENGE_NAME", self.__class__.__name__).lower()
+            _challenge_dir = _repo_root / _challenge_pkg_name
+            _local_lb_dir = _challenge_dir / "leaderboard_results"
             if _local_lb_dir.is_dir():
                 _ref_results_src = str(_local_lb_dir)
-                logger.debug(f" Using {_dc_pkg_name}/leaderboard_results/  ->  {_local_lb_dir}")
+                logger.debug(
+                    f" Using {_challenge_pkg_name}/leaderboard_results/  ->  {_local_lb_dir}"
+                )
             else:
                 _ref_results_src = os.path.join(
                     os.path.dirname(_dcleaderboard.__file__), "results"
@@ -1282,16 +1600,30 @@ class BaseDCEvaluation:
                     )
                     _copied.append(f"results_{_alias}.json")
 
-            # Copy ALL per-bins files (both .jsonl and legacy .json) via glob
-            # to avoid any alias-name mismatch issues.
+            # Copy ALL per-bins files via glob (prefer .jsonl.gz, fall back to
+            # .jsonl then legacy .json) to avoid any alias-name mismatch.
+            # For each stem, only copy the most-compact format that is present
+            # so the reader in map_processing.py always gets the compact form.
+            _pb_stems_copied: set = set()
+            for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.jsonl.gz")):
+                _stem = os.path.basename(_pb_src).replace(".jsonl.gz", "")
+                _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
+                _shutil.copy2(_pb_src, _pb_dst)
+                _copied.append(os.path.basename(_pb_src))
+                _pb_stems_copied.add(_stem)
             for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.jsonl")):
-                _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
-                _shutil.copy2(_pb_src, _pb_dst)
-                _copied.append(os.path.basename(_pb_src))
+                _stem = os.path.basename(_pb_src).replace(".jsonl", "")
+                if _stem not in _pb_stems_copied:
+                    _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
+                    _shutil.copy2(_pb_src, _pb_dst)
+                    _copied.append(os.path.basename(_pb_src))
+                    _pb_stems_copied.add(_stem)
             for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.json")):
-                _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
-                _shutil.copy2(_pb_src, _pb_dst)
-                _copied.append(os.path.basename(_pb_src))
+                _stem = os.path.basename(_pb_src).replace("_per_bins.json", "")
+                if _stem not in _pb_stems_copied:
+                    _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
+                    _shutil.copy2(_pb_src, _pb_dst)
+                    _copied.append(os.path.basename(_pb_src))
 
             for _fname in _copied:
                 logger.debug(f" Staged for leaderboard  ->  {_fname}")

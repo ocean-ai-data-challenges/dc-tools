@@ -121,7 +121,7 @@ def test_no_persist_between_batches():
             "--include=*.py",
             r"\.persist()",
             os.path.join(project_root, "dctools"),
-            os.path.join(project_root, "dc"),
+            os.path.join(project_root, "dc2"),
         ],
         capture_output=True,
         text=True,

@@ -52,7 +52,7 @@ build:
       # It is committed to the repo and requires NO regeneration on RTD.
       #
       # Workflow to update the published leaderboard after a new evaluation:
-      #   1. python dc/evaluate.py  (writes to docs/source/_extra/leaderboard/ automatically)
+      #   1. python dc2/evaluate.py  (writes to docs/source/_extra/leaderboard/ automatically)
       #   2. git add docs/source/_extra/leaderboard/
       #   3. git commit -m "update leaderboard" && git push
       #

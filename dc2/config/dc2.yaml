@@ -35,7 +35,6 @@ logging:
 
 ############################# PARALLELIZATION ###################################
 
-batch_size: 512  # number of samples to process in each batch (e.g., for parallel file reading or computations across batches)
 obs_batch_size: 30  # batch size for observation datasets (SWOT, saral, etc.) — smaller to avoid driver-side bottleneck downloading/preprocessing thousands of files
 reduce_precision: true   # reduce precision of intermediate results to save memory (e.g., float32 instead of float64)
 restart_workers_per_batch: true   # restart workers after each batch to free up memory and avoid memory leaks
@@ -226,7 +225,14 @@ sources:  # lists all datasets used in the DC
     nthreads_per_worker: 1
     memory_limit_per_worker: "6GB"
     observation_dataset: true
-    obs_batch_size: 30  # small batches to avoid downloading 9000+ files at once
+    # SWOT swath files are large (several hundred MB uncompressed per file).
+    # Keep batches small to cap the per-batch file set that the driver must
+    # prefetch + preprocess.  Each batch covers obs_batch_size evaluations
+    # each needing ~time_tolerance×2 = 24 h of files.  With n_days_interval=7
+    # the 30 time windows are non-overlapping → ~30 × unique-files/day files
+    # are preprocessed at once on the driver.  10 tasks × ~20 files/day
+    # × 8 threads (DCTOOLS_PREP_WORKERS) keeps driver-side RAM below ~2 GB.
+    obs_batch_size: 10  # reduced from 30 to limit per-batch SWOT file count
     metrics:
       - "rmsd"
     time_tolerance: 12   # tolerance for matching the observations (hours)

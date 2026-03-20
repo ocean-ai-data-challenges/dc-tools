@@ -175,6 +175,73 @@ def test_configure_dataset_processor_workers_noop_without_client(monkeypatch):
     ev._configure_dataset_processor_workers()
 
 
+def test_log_dask_dashboard_once_logs_only_once(monkeypatch):
+    """Startup summary should be logged a single time for the whole evaluation."""
+    ev = _obj()
+    ev.CHALLENGE_NAME = "DC2"
+    ev._startup_summary_logged = False
+    ev._startup_dask_cfg = {"n_workers": 2, "threads_per_worker": 1, "memory_limit": "4GB"}
+    ev.args = Namespace(
+        start_time="2024-01-01",
+        end_time="2024-01-02",
+        n_days_forecast=7,
+        n_days_interval=1,
+        data_directory="/tmp/dc-data",
+        max_cache_files=12,
+    )
+    ev.results_directory = "/tmp/dc-data/results"
+    ev.dataset_references = {"glonet": ["argo_profiles", "swot"]}
+    ev.all_datasets = ["glonet", "argo_profiles", "swot"]
+    ev.dataset_processor = SimpleNamespace(
+        client=SimpleNamespace(dashboard_link="http://127.0.0.1:8787/status")
+    )
+
+    import dctools.processing.base as base_mod
+
+    messages: list[str] = []
+    monkeypatch.setattr(base_mod.logger, "info", lambda message: messages.append(message))
+
+    ev._log_dask_dashboard_once()
+    ev._log_dask_dashboard_once()
+
+    assert len(messages) == 1
+    assert "DC2 Evaluation Summary" in messages[0]
+    assert "Dashboard" in messages[0]
+    assert "http://127.0.0.1:8787/status" in messages[0]
+    assert ev._startup_summary_logged is True
+
+
+def test_build_eval_summary_banner_contains_key_runtime_fields():
+    """The startup banner should expose the key run parameters."""
+    ev = _obj()
+    ev.CHALLENGE_NAME = "DC2"
+    ev.args = Namespace(
+        start_time="2024-03-01",
+        end_time="2024-03-31",
+        n_days_forecast=5,
+        n_days_interval=2,
+        data_directory="/tmp/eval-data",
+        max_cache_files=42,
+    )
+    ev.results_directory = "/tmp/eval-data/results"
+    ev._startup_dask_cfg = {"n_workers": 3, "threads_per_worker": 2, "memory_limit": "6GB"}
+    ev.dataset_references = {"glonet": ["argo_profiles", "glorys", "swot"]}
+    ev.all_datasets = ["swot", "glonet", "argo_profiles", "glorys"]
+    ev.dataset_processor = SimpleNamespace(
+        client=SimpleNamespace(dashboard_link="http://127.0.0.1:8787/status")
+    )
+
+    banner = ev._build_eval_summary_banner()
+
+    assert "DC2 Evaluation Summary" in banner
+    assert "2024-03-01 -> 2024-03-31" in banner
+    assert "5 day(s)" in banner
+    assert "3 worker(s), 2 thread(s)/worker, 6GB/worker" in banner
+    assert "glonet" in banner
+    assert "argo_profiles, glorys, swot" in banner
+    assert "/tmp/eval-data/results" in banner
+
+
 def test_filter_data_applies_time_and_region_filters():
     """filter_data should call manager date and region filters and return manager."""
     ev = _obj()

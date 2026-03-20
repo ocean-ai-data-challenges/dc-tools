@@ -507,6 +507,42 @@ class TestOpenDispatch:
                     ds = mgr.open("nonexistent://file")
                     assert ds is None
 
+    def test_open_redownloads_unreadable_cached_copy(self, tmp_path):
+        """Unreadable cached remote file should be purged and downloaded again."""
+        mgr = _make_local_manager(tmp_path)
+        cached_path = tmp_path / "cached.nc"
+        cached_path.write_bytes(b"corrupt-cache")
+        recovered = xr.Dataset({"ssh": (["x"], [1.0, 2.0])})
+
+        with patch.object(LocalConnectionManager, "supports", return_value=False):
+            with patch.object(mgr, "supports", return_value=True):
+                with patch.object(mgr, "_get_local_path", return_value=str(cached_path)):
+                    with patch.object(mgr, "open_local", side_effect=[None, recovered]):
+                        with patch.object(mgr, "download_file") as download_file:
+                            ds = mgr.open("s3://bucket/cached.nc")
+
+        assert ds is recovered
+        download_file.assert_called_once_with("s3://bucket/cached.nc", str(cached_path))
+
+
+class TestLocalCacheValidation:
+    """Probe helpers used before reusing persistent caches."""
+
+    def test_valid_netcdf_cache_is_accepted(self, tmp_path):
+        """A readable local NetCDF cache should validate successfully."""
+        from dctools.data.connection.connection_manager import _is_valid_local_dataset_cache
+
+        nc_path = _make_nc(tmp_path, "valid.nc")
+        assert _is_valid_local_dataset_cache(nc_path) is True
+
+    def test_invalid_netcdf_cache_is_rejected(self, tmp_path):
+        """A corrupted local NetCDF cache should fail validation."""
+        from dctools.data.connection.connection_manager import _is_valid_local_dataset_cache
+
+        bad_path = tmp_path / "bad.nc"
+        bad_path.write_bytes(b"not-a-netcdf")
+        assert _is_valid_local_dataset_cache(str(bad_path)) is False
+
 
 # ---------------------------------------------------------------------------
 # Section 10 – LocalConnectionManager list_files with real files

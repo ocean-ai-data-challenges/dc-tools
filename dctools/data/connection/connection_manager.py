@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 import gc
 import math
 import os
+import shutil
 import tempfile
 import traceback
 from types import SimpleNamespace
@@ -103,6 +104,98 @@ TIME_NAMES = [
 ]
 # List of possible names for the n_points dimension
 POINT_DIM_NAMES = ("N_POINTS", "n_points", "points", "obs")
+
+
+def _invalidate_local_dataset_cache(local_path: str) -> bool:
+    """Remove a corrupted local cache entry.
+
+    Supports both single files (``.nc``) and directory stores (``.zarr``).
+    """
+    path_obj = Path(local_path)
+    if not path_obj.exists():
+        return False
+
+    try:
+        if path_obj.is_dir():
+            shutil.rmtree(path_obj, ignore_errors=True)
+        else:
+            path_obj.unlink(missing_ok=True)
+        return True
+    except Exception as exc:
+        logger.warning(f"Could not remove corrupted cache entry {local_path}: {exc!r}")
+        return False
+
+
+def _is_valid_local_dataset_cache(local_path: str) -> bool:
+    """Return True when a local cached dataset can be reopened successfully."""
+    path_obj = Path(local_path)
+    if not path_obj.exists():
+        return False
+
+    if path_obj.is_dir():
+        try:
+            if not any(path_obj.iterdir()):
+                return False
+        except Exception:
+            return False
+
+        for consolidated in (True, False):
+            ds = None
+            try:
+                ds = xr.open_zarr(str(path_obj), consolidated=consolidated)
+                return True
+            except Exception:
+                continue
+            finally:
+                try:
+                    if ds is not None:
+                        ds.close()
+                except Exception:
+                    pass
+        return False
+
+    try:
+        if not path_obj.is_file() or path_obj.stat().st_size <= 0:
+            return False
+    except Exception:
+        return False
+
+    ds = None
+    try:
+        ds = FileLoader.open_dataset_auto(
+            str(path_obj),
+            adaptive_chunking=False,
+            file_storage=None,
+            reading_retries=1,
+        )
+        if ds is not None:
+            return True
+    except Exception:
+        pass
+    finally:
+        try:
+            if ds is not None:
+                ds.close()
+        except Exception:
+            pass
+
+    ds = None
+    try:
+        ds = xr.open_dataset(
+            str(path_obj),
+            engine="scipy",
+            backend_kwargs={"mmap": False},
+            decode_timedelta=False,
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            if ds is not None:
+                ds.close()
+        except Exception:
+            pass
 
 
 def get_time_bound_values(ds: xr.Dataset) -> tuple:
@@ -318,12 +411,35 @@ class BaseConnectionManager(ABC):
         # Download the file locally, then open it
         try:
             local_path = self._get_local_path(path)
-            if not os.path.isfile(local_path):
-                self.download_file(path, local_path)
+            if not local_path:
+                return None
+
+            local_exists = Path(local_path).exists()
+            if local_exists:
                 ds = self.open_local(local_path)
-                return ds
-            else:
-                return self.open_local(local_path)
+                if ds is not None:
+                    return ds
+
+                if self.supports(path):
+                    logger.warning(
+                        f"Cached local copy is unreadable for {path}; "
+                        f"deleting {local_path} and retrying download."
+                    )
+                    _invalidate_local_dataset_cache(local_path)
+                else:
+                    return None
+
+            if not self.supports(path):
+                return None
+
+            self.download_file(path, local_path)
+            ds = self.open_local(local_path)
+            if ds is None:
+                logger.warning(
+                    f"Downloaded cache is unreadable for {path}; removing {local_path}."
+                )
+                _invalidate_local_dataset_cache(local_path)
+            return ds
         except Exception as exc:
             logger.warning(f"Failed to open file: {path}. Error: {repr(exc)}")
             traceback.print_exc()
@@ -2153,20 +2269,27 @@ def prefetch_obs_files_to_local(
         try:
             if extension == ".zarr":
                 if os.path.isdir(local_path) and os.listdir(local_path):
-                    # Consolidate metadata if missing (legacy cached files)
-                    _zmetadata = os.path.join(local_path, ".zmetadata")
-                    if not os.path.isfile(_zmetadata):
-                        try:
-                            import zarr as _zarr_consolidate
+                    if not _is_valid_local_dataset_cache(local_path):
+                        logger.warning(
+                            f"Invalid cached observation store detected for {filename}; "
+                            "removing and re-downloading."
+                        )
+                        _invalidate_local_dataset_cache(local_path)
+                    else:
+                        # Consolidate metadata if missing (legacy cached files)
+                        _zmetadata = os.path.join(local_path, ".zmetadata")
+                        if not os.path.isfile(_zmetadata):
+                            try:
+                                import zarr as _zarr_consolidate
 
-                            _zarr_consolidate.consolidate_metadata(local_path)
-                        except Exception:
-                            pass  # non-critical
-                    with _lock:
-                        path_map[rpath] = local_path
-                        _stats["cached"] += 1
-                        _bar.update(1)
-                    return
+                                _zarr_consolidate.consolidate_metadata(local_path)
+                            except Exception:
+                                pass  # non-critical
+                        with _lock:
+                            path_map[rpath] = local_path
+                            _stats["cached"] += 1
+                            _bar.update(1)
+                        return
                 s3_key = rpath
                 if s3_key.startswith("s3://"):
                     s3_key = s3_key[5:]
@@ -2214,11 +2337,18 @@ def prefetch_obs_files_to_local(
                     _stats["downloaded"] += 1
             else:
                 if os.path.isfile(local_path):
-                    with _lock:
-                        path_map[rpath] = local_path
-                        _stats["cached"] += 1
-                        _bar.update(1)
-                    return
+                    if not _is_valid_local_dataset_cache(local_path):
+                        logger.warning(
+                            f"Invalid cached observation file detected for {filename}; "
+                            "removing and re-downloading."
+                        )
+                        _invalidate_local_dataset_cache(local_path)
+                    else:
+                        with _lock:
+                            path_map[rpath] = local_path
+                            _stats["cached"] += 1
+                            _bar.update(1)
+                        return
                 tmp_path = local_path + f".tmp.{_dl_threading.current_thread().ident}"
                 with fs.open(rpath, "rb") as remote_file:
                     with open(tmp_path, "wb") as local_file:

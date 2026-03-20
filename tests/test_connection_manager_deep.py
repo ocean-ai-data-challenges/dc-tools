@@ -502,10 +502,36 @@ class TestPrefetchObsFilesToLocal:
         local_file = tmp_path / "data.nc"
         local_file.write_bytes(b"fake")
         fs = MagicMock()
-        result = prefetch_obs_files_to_local(
-            ["s3://bucket/data.nc"], str(tmp_path), fs, "test"
-        )
+        with patch(
+            "dctools.data.connection.connection_manager._is_valid_local_dataset_cache",
+            return_value=True,
+        ):
+            result = prefetch_obs_files_to_local(
+                ["s3://bucket/data.nc"], str(tmp_path), fs, "test"
+            )
         assert "s3://bucket/data.nc" in result
+        assert result["s3://bucket/data.nc"] == str(local_file)
+
+    def test_invalid_cached_nc_file_is_redownloaded(self, tmp_path):
+        """Corrupted cached .nc file should be removed and downloaded again."""
+        local_file = tmp_path / "data.nc"
+        local_file.write_bytes(b"corrupt")
+        fs = MagicMock()
+        fake_remote = MagicMock()
+        fake_remote.read.return_value = b"fresh-nc-content"
+        fake_remote.__enter__ = MagicMock(return_value=fake_remote)
+        fake_remote.__exit__ = MagicMock(return_value=False)
+        fs.open.return_value = fake_remote
+
+        with patch(
+            "dctools.data.connection.connection_manager._is_valid_local_dataset_cache",
+            return_value=False,
+        ):
+            result = prefetch_obs_files_to_local(
+                ["s3://bucket/data.nc"], str(tmp_path), fs, "test"
+            )
+
+        fs.open.assert_called_once_with("s3://bucket/data.nc", "rb")
         assert result["s3://bucket/data.nc"] == str(local_file)
 
     def test_nc_file_downloaded(self, tmp_path):
@@ -536,10 +562,14 @@ class TestPrefetchObsFilesToLocal:
         local_file = tmp_path / "data.nc"
         local_file.write_bytes(b"fake")
         fs = MagicMock()
-        result = prefetch_obs_files_to_local(
-            ["s3://bucket/data.nc", "s3://bucket/data.nc"],
-            str(tmp_path), fs, "test",
-        )
+        with patch(
+            "dctools.data.connection.connection_manager._is_valid_local_dataset_cache",
+            return_value=True,
+        ):
+            result = prefetch_obs_files_to_local(
+                ["s3://bucket/data.nc", "s3://bucket/data.nc"],
+                str(tmp_path), fs, "test",
+            )
         assert len(result) == 1
 
 
