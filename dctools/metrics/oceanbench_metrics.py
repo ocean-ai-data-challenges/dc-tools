@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 _OCEANBENCH_IMPORT_ERROR: Exception | None = None
 try:
     import oceanbench.metrics as oceanbench_metrics
+    from oceanbench.core.class4_metrics import class4_evaluator as oceanbench_class4_module
     from oceanbench.core.class4_metrics.class4_evaluator import Class4Evaluator
     from oceanbench.core.derived_quantities import (
         add_geostrophic_currents,
@@ -22,6 +23,7 @@ try:
     OCEANBENCH_AVAILABLE = True
 except Exception as exc:  # pragma: no cover
     oceanbench_metrics = None
+    oceanbench_class4_module = None
     Class4Evaluator = None
     add_geostrophic_currents = None
     add_mixed_layer_depth = None
@@ -31,10 +33,11 @@ except Exception as exc:  # pragma: no cover
     rmsd = None
     OCEANBENCH_AVAILABLE = False
     _OCEANBENCH_IMPORT_ERROR = exc
+import pandas as pd  # noqa: E402
 import xarray as xr  # noqa: E402
 from loguru import logger  # noqa: E402
 
-from dctools.utilities.coordinates import (  # noqa: E402
+from dctools.data.coordinates import (  # noqa: E402
     COORD_ALIASES,
     EVAL_VARIABLES_GLONET,
     GLOBAL_ZONE_COORDINATES,
@@ -76,6 +79,326 @@ def get_variable_alias(variable: str) -> Variable | None:
         if alias == variable or var == variable:
             return var
     return None
+
+
+# ---------------------------------------------------------------------------
+# Per-bins spatial RMSD helper
+# ---------------------------------------------------------------------------
+
+def _compute_spatial_per_bins(
+    pred_ds: xr.Dataset,
+    ref_ds: xr.Dataset,
+    eval_variables: List[str],
+    has_depth: bool,
+    depth_levels: Any,
+    bin_resolution: int,
+) -> Dict[str, list]:
+    """Compute spatial-binned RMSE for grid-to-grid datasets.
+
+    Returns a dict ``{variable_name: [{"lat_bin": ..., "lon_bin": ..., "rmse": ...}, ...]}``.
+    """
+    import numpy as np
+
+    per_bins: Dict[str, list] = {}
+
+    def _iter_depth_slices(da: xr.DataArray) -> List[tuple[Optional[int], Optional[Dict[str, float]]]]:
+        da = da.squeeze(drop=True)
+        if "depth" not in da.dims:
+            return [(None, None)]
+
+        depth_values = np.asarray(da["depth"].values, dtype=np.float64)
+        if depth_values.ndim != 1 or depth_values.size == 0:
+            return []
+        if depth_values.size == 1:
+            depth = float(depth_values[0])
+            return [(0, {"left": depth, "right": depth, "closed": "right"})]
+
+        return [
+            (
+                depth_index,
+                {
+                    "left": float(depth_values[depth_index]),
+                    "right": float(depth_values[depth_index + 1]),
+                    "closed": "right",
+                },
+            )
+            for depth_index in range(depth_values.size - 1)
+        ]
+
+    # Determine variables to process
+    var_names = [v for v in eval_variables if v in pred_ds.data_vars and v in ref_ds.data_vars]
+    if not var_names:
+        # Fallback: use common data vars
+        var_names = [v for v in pred_ds.data_vars if v in ref_ds.data_vars]
+
+    # Select first time step if present (per_bins is per-timestep already)
+    def _squeeze_time(ds: xr.Dataset) -> xr.Dataset:
+        for t_dim in ("time", "lead_time", "forecast_reference_time"):
+            if t_dim in ds.dims and ds.sizes[t_dim] > 0:
+                ds = ds.isel({t_dim: 0})
+        return ds
+
+    pred_ds = _squeeze_time(pred_ds)
+    ref_ds = _squeeze_time(ref_ds)
+
+    # Get lat/lon coordinate arrays
+    lat_coord = pred_ds["lat"].values if "lat" in pred_ds.coords else None
+    lon_coord = pred_ds["lon"].values if "lon" in pred_ds.coords else None
+    if lat_coord is None or lon_coord is None:
+        return {}
+
+    # Build bin edges
+    lat_bins = np.arange(-90, 90 + bin_resolution, bin_resolution)
+    lon_bins = np.arange(-180, 180 + bin_resolution, bin_resolution)
+
+    for var in var_names:
+        try:
+            pred_da = pred_ds[var].squeeze(drop=True)
+            ref_da = ref_ds[var].squeeze(drop=True)
+        except Exception:
+            continue
+
+        if set(pred_da.dims) != set(ref_da.dims):
+            continue
+
+        depth_slices = _iter_depth_slices(pred_da)
+        if not depth_slices:
+            continue
+
+        bins_list = []
+        for depth_index, depth_bin in depth_slices:
+            if depth_index is None:
+                pred_slice = pred_da
+                ref_slice = ref_da
+            else:
+                if "depth" not in ref_da.dims or ref_da.sizes.get("depth", 0) <= depth_index:
+                    continue
+
+                pred_slice = pred_da.isel(depth=depth_index)
+                ref_slice = ref_da.isel(depth=depth_index)
+
+            try:
+                pred_slice = pred_slice.transpose("lat", "lon")
+                ref_slice = ref_slice.transpose("lat", "lon")
+            except Exception:
+                continue
+
+            pred_arr = pred_slice.values.astype(np.float64)
+            ref_arr = ref_slice.values.astype(np.float64)
+            if pred_arr.shape != ref_arr.shape or pred_arr.ndim != 2:
+                continue
+
+            for i in range(len(lat_bins) - 1):
+                lat_mask = (lat_coord >= lat_bins[i]) & (lat_coord < lat_bins[i + 1])
+                if not lat_mask.any():
+                    continue
+                for j in range(len(lon_bins) - 1):
+                    lon_mask = (lon_coord >= lon_bins[j]) & (lon_coord < lon_bins[j + 1])
+                    if not lon_mask.any():
+                        continue
+
+                    # Extract sub-array for this bin
+                    sub_pred = pred_arr[np.ix_(lat_mask, lon_mask)]
+                    sub_ref = ref_arr[np.ix_(lat_mask, lon_mask)]
+
+                    # Flatten and mask NaN
+                    sp = sub_pred.ravel()
+                    sr = sub_ref.ravel()
+                    valid = ~(np.isnan(sp) | np.isnan(sr))
+                    n_valid = int(valid.sum())
+                    if n_valid == 0:
+                        continue
+
+                    diff = sp[valid] - sr[valid]
+                    rmse_val = float(np.sqrt(np.mean(diff * diff)))
+
+                    bin_entry = {
+                        "lat_bin": {
+                            "left": float(lat_bins[i]),
+                            "right": float(lat_bins[i + 1]),
+                        },
+                        "lon_bin": {
+                            "left": float(lon_bins[j]),
+                            "right": float(lon_bins[j + 1]),
+                        },
+                        "rmse": rmse_val,
+                        "count": n_valid,
+                    }
+                    if depth_bin is not None:
+                        bin_entry["depth_bin"] = depth_bin
+                    bins_list.append(bin_entry)
+
+        if bins_list:
+            per_bins[var] = bins_list
+
+    return per_bins
+
+
+def _build_class4_bin_specs(bin_resolution: int) -> Dict[str, Any]:
+    """Build the spatial binning config expected by Class4Evaluator."""
+    import numpy as np
+
+    step = int(bin_resolution)
+    if step <= 0:
+        raise ValueError(f"bin_resolution must be > 0, got {bin_resolution!r}")
+
+    return {
+        "time": "1D",
+        "lat": np.arange(-90, 90 + step, step),
+        "lon": np.arange(-180, 180 + step, step),
+        "depth": None,
+    }
+
+
+def _extract_raw_class4_per_bins(class4_results_df: pd.DataFrame) -> Dict[str, list]:
+    """Preserve raw Class4 per-bin payloads in the leaderboard-compatible schema."""
+    per_bins_by_var: Dict[str, list] = {}
+    if class4_results_df.empty or "per_bins" not in class4_results_df.columns:
+        return per_bins_by_var
+
+    for _, row in class4_results_df.iterrows():
+        variable = row.get("variable")
+        per_bins = row.get("per_bins", [])
+        if not variable or not isinstance(per_bins, list) or not per_bins:
+            continue
+        per_bins_by_var[str(variable)] = per_bins
+
+    return per_bins_by_var
+
+
+def _class4_compat_helpers_available() -> bool:
+    """Return True when the installed oceanbench exposes the helper functions we need."""
+    required = (
+        "add_model_values",
+        "apply_binning",
+        "compute_scores_xskillscore",
+        "filter_observations_by_qc",
+        "format_class4_results",
+        "interpolate_model_on_obs",
+        "make_superobs",
+        "superobs_binning",
+        "xr_to_obs_dataframe",
+    )
+    return oceanbench_class4_module is not None and all(
+        hasattr(oceanbench_class4_module, name) for name in required
+    )
+
+
+def _run_class4_with_raw_per_bins(
+    evaluator: Any,
+    model_ds: xr.Dataset,
+    obs_ds: xr.Dataset,
+    variables: List[str],
+    matching_type: str = "nearest",
+) -> Any:
+    """Run Class4 evaluation while preserving raw per_bins for leaderboard maps."""
+    if not _class4_compat_helpers_available():
+        raise RuntimeError("Required oceanbench Class4 helpers are not available")
+
+    all_scores: Dict[str, pd.DataFrame] = {}
+
+    for var in variables:
+        obs_da = obs_ds[var]
+        model_da = model_ds[var]
+
+        if getattr(evaluator, "apply_qc", False):
+            obs_da = oceanbench_class4_module.filter_observations_by_qc(
+                ds=obs_da,
+                qc_mappings=getattr(evaluator, "qc_mapping", None),
+            )
+
+        groupby_cols: List[str] = []
+        obs_col = f"{var}_obs"
+        model_col = f"{var}_model"
+
+        if matching_type == "nearest":
+            obs_df = oceanbench_class4_module.xr_to_obs_dataframe(
+                obs_da,
+                include_geometry=False,
+            )
+            obs_df, groupby_cols = oceanbench_class4_module.apply_binning(
+                obs_df,
+                getattr(evaluator, "bin_specs", None),
+            )
+            if obs_df.empty:
+                continue
+
+            if var not in obs_df.columns:
+                for candidate in ("value", "variable"):
+                    if candidate in obs_df.columns:
+                        obs_df = obs_df.rename(columns={candidate: var})
+                        break
+            if var not in obs_df.columns:
+                continue
+
+            obs_df = obs_df.dropna(subset=[var]).copy()
+            if obs_df.empty:
+                continue
+
+            obs_df = obs_df.rename(columns={var: obs_col})
+            final_df = oceanbench_class4_module.interpolate_model_on_obs(
+                model_da,
+                obs_df,
+                var,
+                method=getattr(evaluator, "interp_method", "nearest"),
+            )
+        elif matching_type == "superobs":
+            superobs = oceanbench_class4_module.make_superobs(
+                obs_da,
+                model_da,
+                var,
+                reduce="mean",
+            )
+            obs_binned = oceanbench_class4_module.superobs_binning(
+                superobs,
+                model_da,
+                var=var,
+            )
+            binned_df = oceanbench_class4_module.xr_to_obs_dataframe(
+                obs_binned,
+                include_geometry=False,
+            )
+            if f"{var}_binned" in binned_df.columns:
+                binned_df = binned_df.dropna(subset=[f"{var}_binned"]).rename(
+                    columns={f"{var}_binned": obs_col}
+                )
+            final_df = oceanbench_class4_module.add_model_values(
+                binned_df,
+                model_da,
+                var=var,
+            )
+        else:
+            raise ValueError(f"Unknown matching_type: {matching_type}")
+
+        scores_result = oceanbench_class4_module.compute_scores_xskillscore(
+            df=final_df,
+            y_obs_col=obs_col,
+            y_pred_col=model_col,
+            metrics=getattr(evaluator, "metrics", []),
+            weights=None,
+            groupby=groupby_cols,
+        )
+
+        if isinstance(scores_result, dict):
+            scores_df = pd.DataFrame([scores_result])
+            scores_df["variable"] = var
+        elif isinstance(scores_result, pd.DataFrame):
+            scores_df = scores_result.copy()
+            scores_df["variable"] = var
+        else:
+            scores_df = pd.DataFrame({"variable": [var], "result": [scores_result]})
+
+        all_scores[var] = scores_df
+
+    if not all_scores:
+        return pd.DataFrame()
+
+    final_result = pd.concat(list(all_scores.values()), ignore_index=True)
+    per_bins_by_var = _extract_raw_class4_per_bins(final_result)
+    grid_results = oceanbench_class4_module.format_class4_results(final_result)
+    if per_bins_by_var:
+        return {"results": grid_results, "per_bins": per_bins_by_var}
+    return grid_results
 
 
 class DCMetric(ABC):
@@ -184,6 +507,7 @@ class OceanbenchMetrics(DCMetric):
         self.is_class4 = is_class4
         self.class4_kwargs = class4_kwargs or {}
         self.bin_resolution = kwargs.get("bin_resolution", None)
+        self.class4_matching_type = self.class4_kwargs.get("matching_type", "nearest")
 
         self.metrics_set: Dict[str, Optional[Dict[str, Any]]] = {
             "rmsd": {
@@ -216,6 +540,8 @@ class OceanbenchMetrics(DCMetric):
 
         if is_class4:
             class4_args = dict(self.class4_kwargs)
+            if self.bin_resolution is not None and "binning" not in class4_args:
+                class4_args["binning"] = _build_class4_bin_specs(self.bin_resolution)
             logger.debug(f"Class4Evaluator config: {class4_args}")
             self.class4_evaluator = Class4Evaluator(
                 metrics=class4_args["list_scores"],
@@ -252,7 +578,7 @@ class OceanbenchMetrics(DCMetric):
 
         if self.is_class4:
             try:
-                # -- Promote lat/lon/time to coordinates for obs datasets --
+                # ── Promote lat/lon/time to coordinates for obs datasets ──
                 # ARGO observation data has lat/lon/time as data_vars, not
                 # as coordinates.  Class4Evaluator accesses individual
                 # DataArrays via obs_ds[var], and only *coordinates* carry
@@ -268,7 +594,7 @@ class OceanbenchMetrics(DCMetric):
                 if promote:
                     ref_data = ref_data.set_coords(promote)  # type: ignore[union-attr]
 
-                # -- Harmonize variable names between datasets --
+                # ── Harmonize variable names between datasets ──
                 # Class4Evaluator.run() uses the same variable name to
                 # index into *both* model_ds and obs_ds.  When prediction
                 # and observation datasets use different names for the
@@ -336,12 +662,24 @@ class OceanbenchMetrics(DCMetric):
                     )
                     return None
 
-                res = self.class4_evaluator.run(
-                    model_ds=pred_data,
-                    obs_ds=ref_data,
-                    variables=resolved_variables,
-                    ref_coords=ref_coords,
-                )
+                matching_type = extra_kwargs.get("matching_type", self.class4_matching_type)
+
+                if self.bin_resolution is not None and _class4_compat_helpers_available():
+                    res = _run_class4_with_raw_per_bins(
+                        evaluator=self.class4_evaluator,
+                        model_ds=pred_data,
+                        obs_ds=ref_data,
+                        variables=resolved_variables,
+                        matching_type=matching_type,
+                    )
+                else:
+                    res = self.class4_evaluator.run(
+                        model_ds=pred_data,
+                        obs_ds=ref_data,
+                        variables=resolved_variables,
+                        ref_coords=ref_coords,
+                        matching_type=matching_type,
+                    )
 
                 return res
 
@@ -405,9 +743,34 @@ class OceanbenchMetrics(DCMetric):
 
                 # Forward per-bins spatial resolution when set
                 if self.bin_resolution is not None:
-                    kwargs["bin_resolution"] = self.bin_resolution
+                    import inspect
+                    _sig = inspect.signature(metric_func)
+                    if "bin_resolution" in _sig.parameters:
+                        kwargs["bin_resolution"] = self.bin_resolution
 
                 result = metric_func(**kwargs)
+
+                # If metric_func (e.g. oceanbench's rmsd()) already returned a
+                # {"results": …, "per_bins": …} wrapper, strip the inner per_bins
+                # before re-wrapping.  The inner per_bins use the legacy string-
+                # label lat_bin format (e.g. "78S-74S") which is incompatible with
+                # the dict format expected by _aggregate_per_bins_jsonl.  We
+                # always recompute per_bins via _compute_spatial_per_bins below
+                # so no scientific data is lost.
+                if isinstance(result, dict) and "results" in result and "per_bins" in result:
+                    result = result["results"]
+
+                # Compute per-bins spatial RMSD when bin_resolution is set.
+                if self.bin_resolution is not None and ref_data is not None:
+                    per_bins = _compute_spatial_per_bins(
+                        pred_data, ref_data,
+                        self.eval_variables or [],
+                        has_depth_dim or has_depth_coord,
+                        kwargs.get("depth_levels"),
+                        self.bin_resolution,
+                    )
+                    if per_bins:
+                        return {"results": result, "per_bins": per_bins}
 
                 return result
             except Exception as exc:
