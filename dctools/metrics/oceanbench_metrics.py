@@ -750,8 +750,17 @@ class OceanbenchMetrics(DCMetric):
 
                 result = metric_func(**kwargs)
 
-                # Compute per-bins spatial RMSD when bin_resolution is set and
-                # the metric function does not natively support it.
+                # If metric_func (e.g. oceanbench's rmsd()) already returned a
+                # {"results": …, "per_bins": …} wrapper, strip the inner per_bins
+                # before re-wrapping.  The inner per_bins use the legacy string-
+                # label lat_bin format (e.g. "78S-74S") which is incompatible with
+                # the dict format expected by _aggregate_per_bins_jsonl.  We
+                # always recompute per_bins via _compute_spatial_per_bins below
+                # so no scientific data is lost.
+                if isinstance(result, dict) and "results" in result and "per_bins" in result:
+                    result = result["results"]
+
+                # Compute per-bins spatial RMSD when bin_resolution is set.
                 if self.bin_resolution is not None and ref_data is not None:
                     per_bins = _compute_spatial_per_bins(
                         pred_data, ref_data,
