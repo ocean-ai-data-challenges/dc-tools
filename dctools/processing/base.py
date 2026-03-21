@@ -21,6 +21,7 @@ import gzip
 import json
 import math
 import os
+import re
 import time as _time
 import warnings
 from argparse import Namespace
@@ -82,6 +83,37 @@ _PB_COORD_ALIASES: Dict[str, str] = {
 _PB_FIELD_SHORT: Dict[str, str] = {v: k for k, v in _PB_FIELD_ALIASES.items()}
 _PB_COORD_SHORT: Dict[str, str] = {v: k for k, v in _PB_COORD_ALIASES.items()}
 
+_GEO_LABEL_PAT = re.compile(r'^(\d+(?:\.\d+)?[SNWEsnwe]|0)-(\d+(?:\.\d+)?[SNWEsnwe]|0)$')
+
+
+def _parse_geo_label(label: str) -> Dict[str, float]:
+    """Parse a human-readable geographic bin label back to a {left, right} dict.
+
+    Handles labels produced by oceanbench's ``_lat_bin_label`` / ``_lon_bin_label``
+    helpers such as ``"78S-74S"`` (→ ``{"left": -78.0, "right": -74.0}``) or
+    ``"180W-176W"`` (→ ``{"left": -180.0, "right": -176.0}``).  The special
+    label ``"global"`` is treated as ``{"left": -180.0, "right": 180.0}`` for
+    geographic bins; it is handled gracefully but will not produce a meaningful
+    bin boundary.
+    """
+    if label == "global":
+        return {"left": -180.0, "right": 180.0}
+
+    def _side(s: str) -> float:
+        if s == "0":
+            return 0.0
+        if s[-1].upper() in ("S", "W"):
+            return -float(s[:-1])
+        return float(s[:-1])  # N or E
+
+    m = _GEO_LABEL_PAT.match(label)
+    if m:
+        return {"left": _side(m.group(1)), "right": _side(m.group(2))}
+    # Fallback: return zeros rather than raising so the JSONL aggregation
+    # can continue; affected bins will aggregate to (0, 0) boundaries.
+    logger.warning(f"_parse_geo_label: unrecognised label {label!r}, defaulting to 0")
+    return {"left": 0.0, "right": 0.0}
+
 
 def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
     """Aggregate a raw per-bins JSONL into a compact gzip JSONL (format v2).
@@ -122,11 +154,22 @@ def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
     })
 
     def _bin_key(b: Dict) -> tuple:
-        """Build a hashable, rounded spatial bin key."""
-        lat = (round(b["lat_bin"]["left"], _COORD_DP),
-               round(b["lat_bin"]["right"], _COORD_DP))
-        lon = (round(b["lon_bin"]["left"], _COORD_DP),
-               round(b["lon_bin"]["right"], _COORD_DP))
+        """Build a hashable, rounded spatial bin key.
+
+        Accepts both the standard dict format ``{"left": float, "right": float}``
+        and the legacy string-label format produced by oceanbench's rmsd.py
+        (e.g. ``"78S-74S"``).  String labels are parsed by ``_parse_geo_label``.
+        """
+        lb = b["lat_bin"]
+        lob = b["lon_bin"]
+        if isinstance(lb, str):
+            lb = _parse_geo_label(lb)
+        if isinstance(lob, str):
+            lob = _parse_geo_label(lob)
+        lat = (round(lb["left"], _COORD_DP),
+               round(lb["right"], _COORD_DP))
+        lon = (round(lob["left"], _COORD_DP),
+               round(lob["right"], _COORD_DP))
         if "depth_bin" in b:
             db = b["depth_bin"]
             dep = (round(db["left"], _COORD_DP), round(db["right"], _COORD_DP))
