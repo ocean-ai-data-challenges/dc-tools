@@ -684,8 +684,14 @@ def get_dataset_transform(
         pipeline.extend(std_dataset_params)
 
     elif transform_name == "standardize_to_surface":
-        pipeline.extend(std_dataset_params)
+        # Move to_surface early: apply right after variable selection and
+        # coord renaming (which standardises the depth coord name) but
+        # BEFORE longitude normalisation.  This reduces the dataset from
+        # 3-D to 2-D before any computational transform, saving memory
+        # and I/O (especially for large gridded datasets like glonet).
+        pipeline.extend(std_dataset_params[:2])  # select_variables + rename
         pipeline.append({"name": "to_surface", "kwargs": {"depth_coord_name": "depth"}})
+        pipeline.extend(std_dataset_params[2:])  # detect_normalize_longitude
     else:
         # Fallback or error
         # Check if it matches a specific dataset alias special case,

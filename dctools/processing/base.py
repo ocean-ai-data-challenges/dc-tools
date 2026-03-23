@@ -792,7 +792,9 @@ class BaseDCEvaluation:
                 "dataset_processor": self.dataset_processor,
                 "max_samples": self.args.max_samples,
                 "file_cache": manager.file_cache,
-                "target_depth_values": get_target_depth_values(self.args),
+                "target_depth_values": get_target_depth_values(
+                    self.args, surface=getattr(self, "surface_only", False),
+                ),
                 "filter_values": {
                     "start_time": self.args.start_time,
                     "end_time": self.args.end_time,
@@ -1358,6 +1360,7 @@ class BaseDCEvaluation:
                 dask_cfgs_by_dataset=self.dask_cfgs_by_dataset,
                 results_dir=results_files_dir,
                 reduce_precision=getattr(self.args, "reduce_precision", False),
+                surface_only=self.surface_only,
                 restart_workers_per_batch=getattr(self.args, "restart_workers_per_batch", False),
                 restart_frequency=getattr(self.args, "restart_frequency", 1),
                 max_p_memory_increase=getattr(self.args, "max_p_memory_increase", 0.2),

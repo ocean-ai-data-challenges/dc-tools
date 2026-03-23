@@ -387,6 +387,7 @@ def compute_metric(
     argo_index: Optional[Optional[Any]] = None,
     reduce_precision: bool = False,
     results_dir: Optional[str] = None,
+    surface_only: bool = False,
 ) -> Dict[str, Any]:
     """
     Compute metrics for a single prediction-reference pair entry.
@@ -472,6 +473,17 @@ def compute_metric(
         # Computing *before* transforms can load far more data than needed
         # and can blow worker memory (leading to worker restarts / scheduler
         # errors). We keep it lazy here, apply transforms, then compute once.
+
+        # ── Early surface depth selection ──────────────────────────────
+        # When the challenge is surface-only (e.g. DC1), slice the depth
+        # dimension as early as possible.  This prevents all downstream
+        # operations (variable filtering, precision reduction, longitude
+        # normalisation, etc.) from carrying the full 3-D depth axis.
+        # The operation is lazy (isel on a dask-backed dataset just
+        # narrows the graph), so the actual I/O reduction happens at the
+        # final .compute() — but only the surface zarr chunk(s) are read.
+        if surface_only and hasattr(pred_data, "dims") and "depth" in pred_data.dims:
+            pred_data = pred_data.isel(depth=slice(0, 1))
 
         # Drop unused variables early when possible (reduces IO + memory).
         _pred_keep = getattr(pred_source_config, "keep_variables", None)
@@ -901,6 +913,15 @@ def compute_metric(
                             logger.warning(
                                 f"Could not slice reference {ref_alias} by time: {_exc_slice!r}"
                             )
+
+                # ── Early surface depth selection for gridded references ──
+                if (
+                    surface_only
+                    and ref_data is not None
+                    and hasattr(ref_data, "dims")
+                    and "depth" in ref_data.dims
+                ):
+                    ref_data = ref_data.isel(depth=slice(0, 1))
         else:
             ref_data = None
 
@@ -1273,6 +1294,7 @@ class Evaluator:
         dask_cfgs_by_dataset: Optional[Dict[str, Dict[str, Any]]] = None,
         results_dir: Optional[str] = None,
         reduce_precision: bool = False,
+        surface_only: bool = False,
         restart_workers_per_batch: bool = False,
         restart_frequency: int = 1,
         max_p_memory_increase: float = 0.2, # 20% increase default
@@ -1296,6 +1318,10 @@ class Evaluator:
             results_dir (str, optional): Folder to save results. Defaults to None.
             reduce_precision (bool, optional): Reduce float precision (float32).
                 Defaults to False.
+            surface_only (bool, optional): When True, select only the surface
+                depth level immediately after opening gridded datasets.  This
+                avoids carrying the full 3-D depth dimension through all
+                subsequent transform and compute steps.  Defaults to False.
             restart_workers_per_batch (bool, optional): Restart workers after each batch.
                 Defaults to False.
             restart_frequency (int, optional): Frequency (nb of batches) cleanup/restart.
@@ -1312,6 +1338,7 @@ class Evaluator:
         self.dataloader = dataloader
         self.dask_cfgs_by_dataset = dask_cfgs_by_dataset or {}
         self.reduce_precision = reduce_precision
+        self.surface_only = surface_only
         self.restart_workers_per_batch = restart_workers_per_batch
         self.restart_frequency = restart_frequency
         self.max_p_memory_increase = max_p_memory_increase
@@ -1816,6 +1843,7 @@ class Evaluator:
                 argo_index=scattered_argo_index,
                 reduce_precision=self.reduce_precision,
                 results_dir=self.results_dir,
+                surface_only=self.surface_only,
             )
             fn.__name__ = "compute_metric"  # type: ignore[attr-defined]  # prevent full repr in tqdm progress bar
 
