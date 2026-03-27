@@ -63,8 +63,8 @@ warnings.simplefilter("ignore", UserWarning)
 # Stable short-alias dictionaries for the compact .jsonl.gz format (v2).
 # These are intentionally module-level constants so both the writer (here)
 # and the reader (dcleaderboard.map_processing) share the same definition.
-#   _PB_FIELD_ALIASES  : short → full name for top-level entry fields
-#   _PB_COORD_ALIASES  : short → full name for columnar coordinate keys
+#   _PB_FIELD_ALIASES  : short --> full name for top-level entry fields
+#   _PB_COORD_ALIASES  : short --> full name for columnar coordinate keys
 _PB_FIELD_ALIASES: Dict[str, str] = {
     "ra": "ref_alias",
     "rt": "ref_type",
@@ -90,8 +90,8 @@ def _parse_geo_label(label: str) -> Dict[str, float]:
     """Parse a human-readable geographic bin label back to a {left, right} dict.
 
     Handles labels produced by oceanbench's ``_lat_bin_label`` / ``_lon_bin_label``
-    helpers such as ``"78S-74S"`` (→ ``{"left": -78.0, "right": -74.0}``) or
-    ``"180W-176W"`` (→ ``{"left": -180.0, "right": -176.0}``).  The special
+    helpers such as ``"78S-74S"`` (--> ``{"left": -78.0, "right": -74.0}``) or
+    ``"180W-176W"`` (--> ``{"left": -180.0, "right": -176.0}``).  The special
     label ``"global"`` is treated as ``{"left": -180.0, "right": 180.0}`` for
     geographic bins; it is handled gracefully but will not produce a meaningful
     bin boundary.
@@ -109,6 +109,10 @@ def _parse_geo_label(label: str) -> Dict[str, float]:
     m = _GEO_LABEL_PAT.match(label)
     if m:
         return {"left": _side(m.group(1)), "right": _side(m.group(2))}
+    # Interval-notation strings produced by str(pd.Interval), e.g. "(-10.0, -9.0]"
+    m2 = re.match(r'^[\[\(]\s*([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*[\]\)]$', label)
+    if m2:
+        return {"left": float(m2.group(1)), "right": float(m2.group(2))}
     # Fallback: return zeros rather than raising so the JSONL aggregation
     # can continue; affected bins will aggregate to (0, 0) boundaries.
     logger.warning(f"_parse_geo_label: unrecognised label {label!r}, defaulting to 0")
@@ -119,14 +123,12 @@ def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
     """Aggregate a raw per-bins JSONL into a compact gzip JSONL (format v2).
 
     Reads the raw file produced during batch consolidation, where one line
-    exists per (forecast_reference_time, ref_alias, lead_time).  Groups
-    by (ref_alias, lead_time, ref_type, forecast_reference_time) and writes
+    exists per (forecast_reference_time, ref_alias, lead_time), and writes
     a gzip JSONL where:
 
     * **First line**: schema header ``{"_v": 2, "f": {…}, "c": {…}}``
       carrying the alias dictionaries so readers can expand short keys.
-    * One data line per unique (ref_alias, lead_time, ref_type,
-      forecast_reference_time) — the full temporal resolution is preserved.
+    * One data line per raw entry — the full temporal resolution is preserved.
     * Per-bins data uses a **columnar** layout (one array per coordinate/
       metric) to eliminate repeated JSON key overhead (~4x JSON compactness
       vs per-bin dicts).  Coordinate/field keys use the short aliases from
@@ -135,9 +137,9 @@ def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
       entries whose float representations differ only in trailing digits
       (e.g. Glorys vs Argo depth bin edges for the same nominal depth).
 
-    The resulting file is always smaller or equal to the raw file and its
-    size is **bounded regardless of the temporal extent** of the evaluation:
-    adding more forecast windows only improves accuracy, not file size.
+    This implementation is **streaming**: it processes one JSONL line at a
+    time, keeping memory usage bounded (~2× the size of the largest single
+    line) regardless of the total file size.
 
     Returns the path to the new ``.jsonl.gz`` file, or ``None`` if the raw
     file did not exist or contained no per-bins entries.
@@ -154,12 +156,7 @@ def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
     })
 
     def _bin_key(b: Dict) -> tuple:
-        """Build a hashable, rounded spatial bin key.
-
-        Accepts both the standard dict format ``{"left": float, "right": float}``
-        and the legacy string-label format produced by oceanbench's rmsd.py
-        (e.g. ``"78S-74S"``).  String labels are parsed by ``_parse_geo_label``.
-        """
+        """Build a hashable, rounded spatial bin key."""
         lb = b["lat_bin"]
         lob = b["lon_bin"]
         if isinstance(lb, str):
@@ -172,109 +169,122 @@ def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
                round(lob["right"], _COORD_DP))
         if "depth_bin" in b:
             db = b["depth_bin"]
+            if isinstance(db, str):
+                db = _parse_geo_label(db)
             dep = (round(db["left"], _COORD_DP), round(db["right"], _COORD_DP))
             return lat + lon + dep
         return lat + lon
 
-    # accum[(ref_alias, lead_time, ref_type, forecast_reference_time)]
-    #       [var][bin_key] = {metric: [s, n]}
-    accum: Dict[tuple, Dict] = {}
-    n_raw = 0
+    def _entry_to_columnar(entry: Dict) -> Optional[Dict]:
+        """Convert a single raw entry to the compact columnar row format.
 
-    with open(raw_path, encoding="utf-8") as fh:
+        Returns a dict ready for JSON serialization, or None if no bins.
+        """
+        ref_alias = entry.get("ref_alias", "")
+        lead_time = entry.get("lead_time")
+        ref_type = entry.get("ref_type", "gridded")
+        frt = entry.get("forecast_reference_time", "")
+
+        per_bins_out: Dict[str, Dict] = {}
+        for var, bins in entry.get("per_bins", {}).items():
+            bins_by_key: Dict[tuple, Dict] = {}
+            for b in bins:
+                bk = _bin_key(b)
+                cell = bins_by_key.setdefault(bk, {})
+                for metric, val in b.items():
+                    if metric in _SKIP or val is None:
+                        continue
+                    try:
+                        fval = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isnan(fval):
+                        continue
+                    ms = cell.setdefault(metric, [0.0, 0])
+                    ms[0] += fval
+                    ms[1] += 1
+
+            keys = list(bins_by_key.keys())
+            if not keys:
+                continue
+            has_depth = len(keys[0]) == 6
+            col: Dict[str, list] = {
+                "yl": [bk[0] for bk in keys],
+                "yr": [bk[1] for bk in keys],
+                "xl": [bk[2] for bk in keys],
+                "xr": [bk[3] for bk in keys],
+            }
+            if has_depth:
+                col["dl"] = [bk[4] for bk in keys]
+                col["dr"] = [bk[5] for bk in keys]
+
+            all_metrics: set = set()
+            for bk in keys:
+                all_metrics.update(bins_by_key[bk])
+            for metric in sorted(all_metrics):
+                col[metric] = [
+                    round(bins_by_key[bk][metric][0] / bins_by_key[bk][metric][1], _METRIC_DP)
+                    if metric in bins_by_key[bk] and bins_by_key[bk][metric][1] > 0
+                    else None
+                    for bk in keys
+                ]
+            per_bins_out[var] = col
+
+        if not per_bins_out:
+            return None
+
+        return {
+            "ra": ref_alias,
+            "rt": ref_type,
+            "lt": lead_time,
+            "ft": frt,
+            "pb": per_bins_out,
+        }
+
+    # ── Streaming single-pass: process one line at a time ──────────────
+    out_path = raw_path + ".gz"
+    n_raw = 0
+    n_written = 0
+
+    _schema = json.dumps(
+        {"_v": 2, "f": _PB_FIELD_ALIASES, "c": _PB_COORD_ALIASES},
+        separators=(",", ":"), ensure_ascii=False,
+    )
+
+    with open(raw_path, encoding="utf-8") as fh, \
+         gzip.open(out_path, "wt", encoding="utf-8", compresslevel=6) as gz:
+        gz.write(_schema + "\n")
         for raw_line in fh:
             raw_line = raw_line.strip()
             if not raw_line:
                 continue
             n_raw += 1
             entry = json.loads(raw_line)
-            ref_alias = entry.get("ref_alias", "")
-            lead_time = entry.get("lead_time")
-            ref_type = entry.get("ref_type", "gridded")
-            forecast_reference_time = entry.get("forecast_reference_time", "")
-            group_key = (ref_alias, lead_time, ref_type, forecast_reference_time)
+            row = _entry_to_columnar(entry)
+            # Free the parsed entry immediately to limit peak memory.
+            del entry
+            if row is not None:
+                gz.write(
+                    json.dumps(row, separators=(",", ":"), ensure_ascii=False)
+                    + "\n"
+                )
+                n_written += 1
+                del row
 
-            group = accum.setdefault(group_key, {})
-            for var, bins in entry.get("per_bins", {}).items():
-                var_d = group.setdefault(var, {})
-                for b in bins:
-                    bk = _bin_key(b)
-                    cell = var_d.setdefault(bk, {})
-                    for metric, val in b.items():
-                        if metric in _SKIP or val is None:
-                            continue
-                        try:
-                            fval = float(val)
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isnan(fval):
-                            continue
-                        ms = cell.setdefault(metric, [0.0, 0])
-                        ms[0] += fval
-                        ms[1] += 1
-
-    if not accum:
+    if n_written == 0:
+        # Nothing useful was produced — remove the empty gz.
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
         logger.debug("  _aggregate_per_bins_jsonl: no entries found in {}", raw_path)
         return None
 
-    n_groups = len(accum)
     logger.info(
         f"  Compacting per-bins: {n_raw} raw entr"
-        f"{'y' if n_raw == 1 else 'ies'} → {n_groups} aggregated group"
-        f"{'s' if n_groups != 1 else ''}"
+        f"{'y' if n_raw == 1 else 'ies'} --> {n_written} compacted line"
+        f"{'s' if n_written != 1 else ''}"
     )
-
-    out_path = raw_path + ".gz"
-
-    def _sort_key(item: tuple) -> tuple:
-        ref_alias, lead_time, ref_type, frt = item[0]
-        lt = lead_time if isinstance(lead_time, (int, float)) else 0
-        return (ref_alias, lt, ref_type, frt)
-
-    # Write schema header as the first line so readers can resolve aliases.
-    _schema = json.dumps(
-        {"_v": 2, "f": _PB_FIELD_ALIASES, "c": _PB_COORD_ALIASES},
-        separators=(",", ":"), ensure_ascii=False,
-    )
-    with gzip.open(out_path, "wt", encoding="utf-8", compresslevel=6) as gz:
-        gz.write(_schema + "\n")
-        for (ref_alias, lead_time, ref_type, forecast_reference_time), var_bins in sorted(accum.items(), key=_sort_key):
-            per_bins_out: Dict[str, Dict] = {}
-            for var, bins_dict in var_bins.items():
-                keys = list(bins_dict.keys())
-                if not keys:
-                    continue
-                has_depth = len(keys[0]) == 6
-                col: Dict[str, list] = {
-                    "yl": [bk[0] for bk in keys],
-                    "yr": [bk[1] for bk in keys],
-                    "xl": [bk[2] for bk in keys],
-                    "xr": [bk[3] for bk in keys],
-                }
-                if has_depth:
-                    col["dl"] = [bk[4] for bk in keys]
-                    col["dr"] = [bk[5] for bk in keys]
-
-                all_metrics: set = set()
-                for bk in keys:
-                    all_metrics.update(bins_dict[bk])
-                for metric in sorted(all_metrics):
-                    col[metric] = [
-                        round(bins_dict[bk][metric][0] / bins_dict[bk][metric][1], _METRIC_DP)
-                        if metric in bins_dict[bk] and bins_dict[bk][metric][1] > 0
-                        else None
-                        for bk in keys
-                    ]
-                per_bins_out[var] = col
-
-            row = {
-                "ra": ref_alias,
-                "rt": ref_type,
-                "lt": lead_time,
-                "ft": forecast_reference_time,
-                "pb": per_bins_out,
-            }
-            gz.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
     return out_path
 
@@ -792,7 +802,9 @@ class BaseDCEvaluation:
                 "dataset_processor": self.dataset_processor,
                 "max_samples": self.args.max_samples,
                 "file_cache": manager.file_cache,
-                "target_depth_values": get_target_depth_values(self.args),
+                "target_depth_values": get_target_depth_values(
+                    self.args, surface=getattr(self, "surface_only", False),
+                ),
                 "filter_values": {
                     "start_time": self.args.start_time,
                     "end_time": self.args.end_time,
@@ -1305,43 +1317,43 @@ class BaseDCEvaluation:
                 if ref_alias in ref_transforms
             }
 
-            # ── Determine obs_batch_size ───────────────────────────────
-            # Look for per-dataset obs_batch_size first, then global, then default.
-            _obs_batch_size = None
+            # ── Determine per-reference obs_batch_size ─────────────────
+            # Build a dict {ref_alias: batch_size} so each reference dataset
+            # can have its own batch size.  Per-dataset YAML values take
+            # precedence over the global obs_batch_size.
+            _global_obs_bs = getattr(self.args, "obs_batch_size", None)
+            if _global_obs_bs is not None:
+                _global_obs_bs = int(_global_obs_bs)
+            _obs_batch_sizes: Dict[str, int] = {}
             for _ref_alias in effective_references:
                 _ref_src: Dict[str, Any] = next(
                     (s for s in self.args.sources if s.get("dataset") == _ref_alias), {}
                 )
                 if _ref_src.get("obs_batch_size") is not None:
-                    _obs_batch_size = int(_ref_src["obs_batch_size"])
-                    break
-            if _obs_batch_size is None:
-                _obs_batch_size = getattr(self.args, "obs_batch_size", None)
-                if _obs_batch_size is not None:
-                    _obs_batch_size = int(_obs_batch_size)
+                    _obs_batch_sizes[_ref_alias] = int(_ref_src["obs_batch_size"])
+                elif _global_obs_bs is not None:
+                    _obs_batch_sizes[_ref_alias] = _global_obs_bs
 
-            # ── Determine gridded_batch_size ───────────────────────────
-            # Per-reference gridded_batch_size overrides the global batch_size
-            # for non-observation (gridded) reference datasets such as GLORYS.
-            # A small value (e.g. 6) limits per-batch I/O + RAM pressure.
-            _gridded_batch_size = None
+            # ── Determine per-reference gridded_batch_size ─────────────
+            # Same approach: per-dataset YAML value --> global fallback.
+            _global_grid_bs = getattr(self.args, "gridded_batch_size", None)
+            if _global_grid_bs is not None:
+                _global_grid_bs = int(_global_grid_bs)
+            _gridded_batch_sizes: Dict[str, int] = {}
             for _ref_alias in effective_references:
                 _ref_src = next(
                     (s for s in self.args.sources if s.get("dataset") == _ref_alias), {}
                 )
                 if _ref_src.get("gridded_batch_size") is not None:
-                    _gridded_batch_size = int(_ref_src["gridded_batch_size"])
-                    break
-            if _gridded_batch_size is None:
-                _gridded_batch_size = getattr(self.args, "gridded_batch_size", None)
-                if _gridded_batch_size is not None:
-                    _gridded_batch_size = int(_gridded_batch_size)
+                    _gridded_batch_sizes[_ref_alias] = int(_ref_src["gridded_batch_size"])
+                elif _global_grid_bs is not None:
+                    _gridded_batch_sizes[_ref_alias] = _global_grid_bs
 
             dataloaders[alias] = dataset_manager.get_dataloader(
                 pred_alias=alias,
                 ref_aliases=effective_references,
-                obs_batch_size=_obs_batch_size,
-                gridded_batch_size=_gridded_batch_size,
+                obs_batch_size=_obs_batch_sizes or None,
+                gridded_batch_size=_gridded_batch_sizes or None,
                 pred_transform=pred_transform,
                 ref_transforms=ref_transforms,  # type: ignore[arg-type]
                 forecast_mode=forecast_mode,
@@ -1358,6 +1370,7 @@ class BaseDCEvaluation:
                 dask_cfgs_by_dataset=self.dask_cfgs_by_dataset,
                 results_dir=results_files_dir,
                 reduce_precision=getattr(self.args, "reduce_precision", False),
+                surface_only=self.surface_only,
                 restart_workers_per_batch=getattr(self.args, "restart_workers_per_batch", False),
                 restart_frequency=getattr(self.args, "restart_frequency", 1),
                 max_p_memory_increase=getattr(self.args, "max_p_memory_increase", 0.2),
@@ -1579,7 +1592,7 @@ class BaseDCEvaluation:
             # dc2_output/results/) rather than __file__, because dctools may be
             # installed as a *separate* package (its own repo) so __file__ would
             # resolve to the dctools source tree instead of the user's DC project.
-            # results_directory → dc2_output/ → project root (parents[1]).
+            # results_directory --> dc2_output/ --> project root (parents[1]).
             _repo_root = Path(self.results_directory).resolve().parents[1]
             _docs_leaderboard = _repo_root / "docs" / "source" / "_extra" / "leaderboard"
             if (_repo_root / "docs").is_dir():

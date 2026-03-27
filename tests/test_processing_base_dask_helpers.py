@@ -375,7 +375,7 @@ def test_setup_dataset_manager_happy_path_with_skips(monkeypatch):
 
     monkeypatch.setattr(base_mod, "MultiSourceDatasetManager", _manager_ctor)
     monkeypatch.setattr(base_mod, "get_client", lambda: SimpleNamespace(run=lambda fn: None))
-    monkeypatch.setattr(base_mod, "get_target_depth_values", lambda args: [0.0, 10.0])
+    monkeypatch.setattr(base_mod, "get_target_depth_values", lambda args, **kw: [0.0, 10.0])
 
     created_ds: list[dict] = []
 

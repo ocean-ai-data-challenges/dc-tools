@@ -489,7 +489,17 @@ class SubsetCoordTransform:
 
 @register_transform("to_surface")
 class ToSurfaceTransform:
-    """Reduces 'depth' dimension to its first value (closest to surface)."""
+    """Reduces 'depth' dimension to the shallowest available value.
+
+    For gridded data (where depth[0] always has values) this behaves identically
+    to the previous ``isel(depth=0)`` approach.  For sparse observation data such
+    as Argo profiles, where the first depth level may be NaN for most profiles,
+    ``bfill`` along depth propagates the shallowest valid value to the surface
+    before selecting depth[0], dramatically improving spatial coverage.
+
+    The implementation stays fully lazy (dask-compatible) and never calls
+    ``.values`` on the dataset.
+    """
 
     def __init__(self, depth_coord_name: str = "depth"):
         """Initialize."""
@@ -497,11 +507,19 @@ class ToSurfaceTransform:
 
     def __call__(self, ds: xr.Dataset):
         """Apply transform."""
-        if self.depth_coord_name in ds.dims:
-            # Selects first value of depth dimension keeping the dimension
-            surface_ds = ds.isel({self.depth_coord_name: slice(0, 1)})
-            return surface_ds
-        return ds
+        if self.depth_coord_name not in ds.dims:
+            return ds
+
+        depth_dim = self.depth_coord_name
+
+        if ds.sizes[depth_dim] <= 1:
+            return ds.isel({depth_dim: slice(0, 1)})
+
+        # bfill along depth: for each position, NaN at shallow depths are
+        # replaced by the nearest valid value from a deeper level.  For data
+        # without NaN at the surface this is effectively a no-op.
+        filled = ds.bfill(dim=depth_dim)
+        return filled.isel({depth_dim: slice(0, 1)})
 
 
 @register_transform("std_percentage")
@@ -684,8 +702,14 @@ def get_dataset_transform(
         pipeline.extend(std_dataset_params)
 
     elif transform_name == "standardize_to_surface":
-        pipeline.extend(std_dataset_params)
+        # Move to_surface early: apply right after variable selection and
+        # coord renaming (which standardises the depth coord name) but
+        # BEFORE longitude normalisation.  This reduces the dataset from
+        # 3-D to 2-D before any computational transform, saving memory
+        # and I/O (especially for large gridded datasets like glonet).
+        pipeline.extend(std_dataset_params[:2])  # select_variables + rename
         pipeline.append({"name": "to_surface", "kwargs": {"depth_coord_name": "depth"}})
+        pipeline.extend(std_dataset_params[2:])  # detect_normalize_longitude
     else:
         # Fallback or error
         # Check if it matches a specific dataset alias special case,

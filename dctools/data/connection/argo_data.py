@@ -1420,7 +1420,7 @@ class ArgoInterface:
                 failed = n_refs - len(per_profile)
 
                 if failed > 0:
-                    logger.info(f"Month {key}: {failed}/{n_refs} profiles failed to load")
+                    logger.debug(f"Month {key}: {failed}/{n_refs} profiles failed to load")
                 if not per_profile:
                     return None
                 _profiles_loaded_counter[0] += len(per_profile)

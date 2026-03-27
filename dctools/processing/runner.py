@@ -100,6 +100,14 @@ def run_from_config(
         vars(args)["regridder_weights"] = os.path.join(args.data_directory, "weights")
         vars(args)["catalog_dir"] = os.path.join(args.data_directory, "catalogs")
         vars(args)["result_dir"] = os.path.join(args.data_directory, "results")
+        vars(args)["logs_dir"] = os.path.join(args.data_directory, "logs")
+
+        # If no explicit --logfile was given, default to <data_directory>/logs/dc2.log
+        if not getattr(args, "logfile", None):
+            vars(args)["logfile"] = os.path.join(args.logs_dir, "dc2.log")
+            # Re-apply logging config so the file sink is registered.
+            from dctools.utilities.args_config import configure_logging_from_args
+            configure_logging_from_args(args)
 
         # Backward-compatible: previously this tried to delete the weights path.
         # Only remove it when it is a file.
@@ -111,6 +119,7 @@ def run_from_config(
 
         os.makedirs(args.catalog_dir, exist_ok=True)
         os.makedirs(args.result_dir, exist_ok=True)
+        os.makedirs(args.logs_dir, exist_ok=True)
 
         evaluator_instance = evaluation_cls(args)  # type: ignore[call-arg]
 

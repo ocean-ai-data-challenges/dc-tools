@@ -387,6 +387,7 @@ def compute_metric(
     argo_index: Optional[Optional[Any]] = None,
     reduce_precision: bool = False,
     results_dir: Optional[str] = None,
+    surface_only: bool = False,
 ) -> Dict[str, Any]:
     """
     Compute metrics for a single prediction-reference pair entry.
@@ -473,6 +474,17 @@ def compute_metric(
         # and can blow worker memory (leading to worker restarts / scheduler
         # errors). We keep it lazy here, apply transforms, then compute once.
 
+        # ── Early surface depth selection ──────────────────────────────
+        # When the challenge is surface-only (e.g. DC1), slice the depth
+        # dimension as early as possible.  This prevents all downstream
+        # operations (variable filtering, precision reduction, longitude
+        # normalisation, etc.) from carrying the full 3-D depth axis.
+        # The operation is lazy (isel on a dask-backed dataset just
+        # narrows the graph), so the actual I/O reduction happens at the
+        # final .compute() — but only the surface zarr chunk(s) are read.
+        if surface_only and hasattr(pred_data, "dims") and "depth" in pred_data.dims:
+            pred_data = pred_data.isel(depth=slice(0, 1))
+
         # Drop unused variables early when possible (reduces IO + memory).
         _pred_keep = getattr(pred_source_config, "keep_variables", None)
         if not _pred_keep:
@@ -484,6 +496,66 @@ def compute_metric(
 
         if reduce_precision:
             pred_data = to_float32(pred_data)
+
+        def _required_obs_vars() -> set[str]:
+            required: set[str] = set()
+            for metric in list_metrics:
+                candidates = None
+                if hasattr(metric, "get_eval_variables"):
+                    try:
+                        candidates = metric.get_eval_variables()
+                    except Exception:
+                        candidates = None
+                if not candidates:
+                    candidates = getattr(metric, "eval_variables", None)
+                if not candidates:
+                    candidates = getattr(metric, "oceanbench_eval_variables", None)
+                if not candidates:
+                    continue
+                required.update(str(v) for v in candidates if v is not None)
+            return required
+
+        def _slim_observation_dataset(
+            ds: Optional[xr.Dataset],
+            *,
+            metadata_obj: Any,
+            ref_coords_obj: Any,
+        ) -> Optional[xr.Dataset]:
+            if ds is None or not hasattr(ds, "data_vars"):
+                return ds
+
+            coord_names: set[str] = set()
+            for coord_obj in (
+                getattr(metadata_obj, "coord_system", None),
+                ref_coords_obj,
+            ):
+                coordinates = getattr(coord_obj, "coordinates", None)
+                if isinstance(coordinates, dict):
+                    coord_names.update(
+                        str(v) for v in coordinates.values() if isinstance(v, str)
+                    )
+
+            required_vars = _required_obs_vars()
+            if not required_vars:
+                return ds
+
+            from dctools.data.coordinates import get_standardized_var_name
+
+            required_std = {get_standardized_var_name(var) for var in required_vars}
+            required_std.discard(None)
+
+            keep_data_vars: list[str] = []
+            for var_name in ds.data_vars:
+                if var_name in coord_names or var_name in required_vars:
+                    keep_data_vars.append(var_name)
+                    continue
+                std_name = get_standardized_var_name(str(var_name))
+                if std_name is not None and std_name in required_std:
+                    keep_data_vars.append(var_name)
+
+            if keep_data_vars and len(keep_data_vars) < len(ds.data_vars):
+                ds = ds[keep_data_vars]
+            return ds
 
         if ref_source is not None:
             if ref_is_observation:
@@ -782,6 +854,14 @@ def compute_metric(
                                     }
                                 )
 
+                            ref_data = _slim_observation_dataset(
+                                ref_data,
+                                metadata_obj=metadata,
+                                ref_coords_obj=ref_coords,
+                            )
+                            if reduce_precision:
+                                ref_data = to_float32(ref_data)
+
                             ref_data = ref_data.compute(
                                 scheduler="synchronous"
                             )
@@ -856,6 +936,14 @@ def compute_metric(
                         dataset_processor=None,
                     )
                     ref_data = ref_raw_data.preprocess_datasets(ref_df)
+
+                ref_data = _slim_observation_dataset(
+                    ref_data,
+                    metadata_obj=metadata,
+                    ref_coords_obj=ref_coords,
+                )
+                if reduce_precision and ref_data is not None:
+                    ref_data = to_float32(ref_data)
             else:
                 # Non-observation references are passed as a single source
                 # (typically a path string or datetime for CMEMS). Do not pass
@@ -901,6 +989,15 @@ def compute_metric(
                             logger.warning(
                                 f"Could not slice reference {ref_alias} by time: {_exc_slice!r}"
                             )
+
+                # ── Early surface depth selection for gridded references ──
+                if (
+                    surface_only
+                    and ref_data is not None
+                    and hasattr(ref_data, "dims")
+                    and "depth" in ref_data.dims
+                ):
+                    ref_data = ref_data.isel(depth=slice(0, 1))
         else:
             ref_data = None
 
@@ -1273,6 +1370,7 @@ class Evaluator:
         dask_cfgs_by_dataset: Optional[Dict[str, Dict[str, Any]]] = None,
         results_dir: Optional[str] = None,
         reduce_precision: bool = False,
+        surface_only: bool = False,
         restart_workers_per_batch: bool = False,
         restart_frequency: int = 1,
         max_p_memory_increase: float = 0.2, # 20% increase default
@@ -1296,6 +1394,10 @@ class Evaluator:
             results_dir (str, optional): Folder to save results. Defaults to None.
             reduce_precision (bool, optional): Reduce float precision (float32).
                 Defaults to False.
+            surface_only (bool, optional): When True, select only the surface
+                depth level immediately after opening gridded datasets.  This
+                avoids carrying the full 3-D depth dimension through all
+                subsequent transform and compute steps.  Defaults to False.
             restart_workers_per_batch (bool, optional): Restart workers after each batch.
                 Defaults to False.
             restart_frequency (int, optional): Frequency (nb of batches) cleanup/restart.
@@ -1312,6 +1414,7 @@ class Evaluator:
         self.dataloader = dataloader
         self.dask_cfgs_by_dataset = dask_cfgs_by_dataset or {}
         self.reduce_precision = reduce_precision
+        self.surface_only = surface_only
         self.restart_workers_per_batch = restart_workers_per_batch
         self.restart_frequency = restart_frequency
         self.max_p_memory_increase = max_p_memory_increase
@@ -1523,7 +1626,7 @@ class Evaluator:
         # and avoids re-downloading the same ARGO months every evaluation.
         from pathlib import Path as _PfPath
         _results_path = _PfPath(self.results_dir) if self.results_dir else _PfPath("/tmp")
-        # results_dir == data_directory/results_batches  →  parent == data_directory
+        # results_dir == data_directory/results_batches  -->  parent == data_directory
         _data_dir = _results_path.parent if _results_path.name == "results_batches" else _results_path  # noqa: E501
         self._argo_zarr_cache_dir = str(_data_dir / "argo_batch_cache")
 
@@ -1816,6 +1919,7 @@ class Evaluator:
                 argo_index=scattered_argo_index,
                 reduce_precision=self.reduce_precision,
                 results_dir=self.results_dir,
+                surface_only=self.surface_only,
             )
             fn.__name__ = "compute_metric"  # type: ignore[attr-defined]  # prevent full repr in tqdm progress bar
 
@@ -2437,6 +2541,17 @@ class Evaluator:
                             / f"batch_{_batch_idx}"
                         )
 
+                        # Extract eval_variables for NaN masking (only
+                        # discard points where evaluation targets are NaN,
+                        # not ancillary variables like mdt).
+                        _eval_vars: Optional[List[str]] = None
+                        try:
+                            _ds_obj = self.dataset_manager.datasets.get(ref_alias)
+                            if _ds_obj is not None:
+                                _eval_vars = _ds_obj.get_eval_variables() or None
+                        except Exception:
+                            pass
+
                         _shared_obs_zarr = preprocess_batch_obs_files(
                             local_paths=_local_unique,
                             alias=str(ref_alias),
@@ -2448,6 +2563,7 @@ class Evaluator:
                             ),
                             n_points_dim=_n_pts_dim,
                             output_zarr_dir=_shared_zarr_dir,
+                            eval_variables=_eval_vars,
                         )
 
                         if _shared_obs_zarr:
@@ -3102,7 +3218,7 @@ class Evaluator:
                 total_pts = sum(points)
                 avg_pp = sum(preprocs) / len(preprocs)
                 avg_mt = sum(times) / len(times)
-                logger.info(
+                logger.debug(
                     f"Batch done: {len(batch_results)}/{num_tasks} tasks "
                     f"in {batch_duration:.1f}s | "
                     f"Avg preproc={avg_pp:.1f}s  metrics={avg_mt:.1f}s | "

@@ -51,7 +51,7 @@ class TestAddTimeDim:
     """Tests for add_time_dim — lazy, eager, scalar, per-point branches."""
 
     def test_no_time_coord_fallback_to_metadata(self):
-        """time_coord=None → uses metadata mid-point to assign time.
+        """time_coord=None --> uses metadata mid-point to assign time.
 
         When n_points_dim exists in the dataset, time is assigned as a
         coordinate on that dimension. The subsequent expand_dims call
@@ -74,7 +74,7 @@ class TestAddTimeDim:
             pass
 
     def test_lazy_dask_time(self):
-        """Dask-backed time coord → assigned without .values."""
+        """Dask-backed time coord --> assigned without .values."""
         ds = _make_npoints_ds(10)
         dask_time = xr.DataArray(
             da.from_array(
@@ -89,7 +89,7 @@ class TestAddTimeDim:
         assert "time" in result.coords
 
     def test_per_point_times_multiple_unique(self):
-        """Multiple unique times → assigned as per-point coordinate."""
+        """Multiple unique times --> assigned as per-point coordinate."""
         ds = _make_npoints_ds(5)
         times = pd.date_range("2024-01-01", periods=5, freq="1h")
         time_coord = xr.DataArray(times, dims=["n_points"])
@@ -98,7 +98,7 @@ class TestAddTimeDim:
         assert "time" in result.coords
 
     def test_per_point_times_single_unique(self):
-        """All same time → expand_dims with single time."""
+        """All same time --> expand_dims with single time."""
         ds = _make_npoints_ds(5)
         t = pd.Timestamp("2024-01-01")
         times = pd.DatetimeIndex([t] * 5)
@@ -108,7 +108,7 @@ class TestAddTimeDim:
         assert "time" in result.dims or "time" in result.coords
 
     def test_scalar_time(self):
-        """Scalar time → assigned as scalar coordinate or expanded dim."""
+        """Scalar time --> assigned as scalar coordinate or expanded dim."""
         ds = xr.Dataset({"ssh": (["lat"], [1.0, 2.0])}, coords={"lat": [10, 20]})
         time_coord = xr.DataArray(np.datetime64("2024-01-01"))
         df = _make_metadata_df()
@@ -116,7 +116,7 @@ class TestAddTimeDim:
         assert "time" in result.coords
 
     def test_large_array_skips_unique_check(self):
-        """Array >100k → skips unique check (fast path)."""
+        """Array >100k --> skips unique check (fast path)."""
         n = 150_000
         ds = _make_npoints_ds(n)
         times = pd.date_range("2024-01-01", periods=n, freq="1s")
@@ -151,13 +151,13 @@ class TestDropNanPoints:
     """Tests for _drop_nan_points NaN filtering."""
 
     def test_all_valid_unchanged(self):
-        """All finite → unchanged."""
+        """All finite --> unchanged."""
         ds = _make_npoints_ds(10)
         result = _drop_nan_points(ds, "n_points")
         assert result.sizes["n_points"] == 10
 
     def test_some_nan_filtered(self):
-        """Mixed NaN/valid → NaN rows dropped."""
+        """Mixed NaN/valid --> NaN rows dropped."""
         vals = np.array([1.0, np.nan, 2.0, np.nan, 3.0])
         ds = xr.Dataset(
             {"ssh": ("n_points", vals)},
@@ -167,30 +167,30 @@ class TestDropNanPoints:
         assert result.sizes["n_points"] == 3
 
     def test_all_nan_returns_original(self):
-        """All NaN → returns original (0-check)."""
+        """All NaN --> returns original (0-check)."""
         ds = _make_npoints_ds(5, all_nan=True)
         result = _drop_nan_points(ds, "n_points")
         assert result.sizes["n_points"] == 5
 
     def test_multidim_variable(self):
-        """Multi-dim variable → correct axis reduction."""
+        """Multi-dim variable --> correct axis reduction."""
         data = np.array([[1.0, np.nan], [np.nan, np.nan], [3.0, 4.0]])
         ds = xr.Dataset(
             {"ssh": (["n_points", "depth"], data)},
             coords={"n_points": [0, 1, 2], "depth": [0, 10]},
         )
         result = _drop_nan_points(ds, "n_points")
-        # Row 1 is all NaN → dropped
+        # Row 1 is all NaN --> dropped
         assert result.sizes["n_points"] == 2
 
     def test_missing_dim_unchanged(self):
-        """n_points not in dims → returned as-is."""
+        """n_points not in dims --> returned as-is."""
         ds = xr.Dataset({"ssh": (["lat"], [1.0, 2.0])})
         result = _drop_nan_points(ds, "n_points")
         assert "lat" in result.dims
 
     def test_empty_dataset(self):
-        """Empty dataset → returned as-is."""
+        """Empty dataset --> returned as-is."""
         ds = xr.Dataset(
             {"ssh": ("n_points", np.array([], dtype=float))},
             coords={"n_points": np.array([], dtype=int)},
@@ -207,7 +207,7 @@ class TestBuildNanMask:
     """Tests for _build_nan_mask with dask/numpy arrays."""
 
     def test_dask_with_nans(self):
-        """Dask-backed array with NaNs → returns boolean mask."""
+        """Dask-backed array with NaNs --> returns boolean mask."""
         vals = da.from_array(
             np.array([1.0, np.nan, 2.0, np.nan, 3.0]), chunks=3
         )
@@ -221,7 +221,7 @@ class TestBuildNanMask:
         assert mask.sum() == 3  # 3 valid points
 
     def test_all_valid_returns_none(self):
-        """All valid → returns None (caller skips filtering)."""
+        """All valid --> returns None (caller skips filtering)."""
         vals = da.from_array(np.array([1.0, 2.0, 3.0]), chunks=2)
         ds = xr.Dataset(
             {"ssh": ("n_points", vals)},
@@ -231,7 +231,7 @@ class TestBuildNanMask:
         assert mask is None
 
     def test_numpy_array_also_works(self):
-        """Non-dask (numpy) array → also works."""
+        """Non-dask (numpy) array --> also works."""
         ds = xr.Dataset(
             {"ssh": ("n_points", np.array([1.0, np.nan, 3.0]))},
             coords={"n_points": np.arange(3)},
@@ -241,7 +241,7 @@ class TestBuildNanMask:
         assert mask.sum() == 2
 
     def test_multidim_dask(self):
-        """Multi-dim dask variable → correct axis reduction."""
+        """Multi-dim dask variable --> correct axis reduction."""
         data = da.from_array(
             np.array([[1.0, np.nan], [np.nan, np.nan], [3.0, 4.0]]),
             chunks=2,
@@ -252,16 +252,16 @@ class TestBuildNanMask:
         )
         mask = _build_nan_mask(ds, "n_points")
         assert mask is not None
-        # Row 0: [1, nan] → True; Row 1: [nan, nan] → False; Row 2: [3, 4] → True
+        # Row 0: [1, nan] --> True; Row 1: [nan, nan] --> False; Row 2: [3, 4] --> True
         np.testing.assert_array_equal(mask, [True, False, True])
 
     def test_missing_dim_returns_none(self):
-        """n_points not in dims → returns None."""
+        """n_points not in dims --> returns None."""
         ds = xr.Dataset({"ssh": (["lat"], [1.0, 2.0])})
         assert _build_nan_mask(ds, "n_points") is None
 
     def test_empty_returns_none(self):
-        """Empty dataset → returns None."""
+        """Empty dataset --> returns None."""
         ds = xr.Dataset(
             {"ssh": ("n_points", da.from_array(np.array([]), chunks=1))},
             coords={"n_points": np.array([], dtype=int)},
@@ -277,21 +277,21 @@ class TestConcatWithDim:
     """Tests for concat_with_dim eager concatenation."""
 
     def test_basic_concat(self):
-        """Two datasets → concatenated along dim."""
+        """Two datasets --> concatenated along dim."""
         ds1 = xr.Dataset({"ssh": ("time", [1.0, 2.0])}, coords={"time": [0, 1]})
         ds2 = xr.Dataset({"ssh": ("time", [3.0, 4.0])}, coords={"time": [2, 3]})
         result = concat_with_dim([ds1, ds2], "time", sort=True)
         assert result.sizes["time"] == 4
 
     def test_missing_dim_expanded(self):
-        """Dataset without concat dim → expanded automatically."""
+        """Dataset without concat dim --> expanded automatically."""
         ds1 = xr.Dataset({"ssh": ("x", [1.0, 2.0])})
         ds2 = xr.Dataset({"ssh": ("x", [3.0, 4.0])})
         result = concat_with_dim([ds1, ds2], "time", sort=False)
         assert "time" in result.dims
 
     def test_many_datasets_override_mode(self):
-        """More than 10 datasets → uses override join mode."""
+        """More than 10 datasets --> uses override join mode."""
         datasets = [
             xr.Dataset(
                 {"ssh": ("time", [float(i)])},
@@ -323,7 +323,7 @@ class TestPreprocessOneNpoints:
         return _open
 
     def test_basic_processing(self):
-        """Normal n_points dataset → processed and chunked."""
+        """Normal n_points dataset --> processed and chunked."""
         ds = xr.Dataset(
             {"ssh": ("n_points", np.random.randn(20))},
             coords={
@@ -351,7 +351,7 @@ class TestPreprocessOneNpoints:
         assert "n_points" in result.dims
 
     def test_open_returns_none(self):
-        """open_func returns None → returns None."""
+        """open_func returns None --> returns None."""
         result = preprocess_one_npoints(
             source="/f.nc",
             is_swath=False,
@@ -367,7 +367,7 @@ class TestPreprocessOneNpoints:
         assert result is None
 
     def test_exception_returns_none(self):
-        """Exception during processing → returns None."""
+        """Exception during processing --> returns None."""
         def _bad_open(source):
             raise RuntimeError("bad file")
 
