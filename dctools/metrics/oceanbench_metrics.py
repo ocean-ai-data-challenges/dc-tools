@@ -34,6 +34,7 @@ except Exception as exc:  # pragma: no cover
     OCEANBENCH_AVAILABLE = False
     _OCEANBENCH_IMPORT_ERROR = exc
 import pandas as pd  # noqa: E402
+import numpy as np   # noqa: E402
 import xarray as xr  # noqa: E402
 from loguru import logger  # noqa: E402
 
@@ -261,7 +262,11 @@ def _extract_raw_class4_per_bins(class4_results_df: pd.DataFrame) -> Dict[str, l
         per_bins = row.get("per_bins", [])
         if not variable or not isinstance(per_bins, list) or not per_bins:
             continue
-        per_bins_by_var[str(variable)] = per_bins
+        # Use extend so that multiple rows for the same variable (e.g. when
+        # the DataFrame has been built from several per-depth or per-time calls)
+        # all accumulate into the same list instead of the last row overwriting.
+        existing = per_bins_by_var.setdefault(str(variable), [])
+        existing.extend(per_bins)
 
     return per_bins_by_var
 
@@ -316,6 +321,22 @@ def _run_class4_with_raw_per_bins(
                 obs_da,
                 include_geometry=False,
             )
+            # Standardize coordinate column names so that apply_binning and
+            # interpolate_model_on_obs can always find "lat" / "lon".
+            # SWOT (and some other observation datasets) expose their position
+            # coordinates as "latitude" / "longitude" rather than the short
+            # aliases expected by the rest of the pipeline.
+            _coord_alias_map = {
+                "latitude": "lat", "nav_lat": "lat",
+                "longitude": "lon", "nav_lon": "lon",
+            }
+            _rename = {
+                k: v for k, v in _coord_alias_map.items()
+                if k in obs_df.columns and v not in obs_df.columns
+            }
+            if _rename:
+                obs_df = obs_df.rename(columns=_rename)
+
             obs_df, groupby_cols = oceanbench_class4_module.apply_binning(
                 obs_df,
                 getattr(evaluator, "bin_specs", None),
@@ -370,12 +391,23 @@ def _run_class4_with_raw_per_bins(
         else:
             raise ValueError(f"Unknown matching_type: {matching_type}")
 
+        # cos(latitude) area weighting — accounts for the convergence of
+        # meridians so that high-latitude points do not receive the same
+        # weight as equatorial ones in the global RMSD.
+        # Inject as a column so grouped slicing is automatic.
+        _weight_col: Optional[str] = None
+        if "lat" in final_df.columns:
+            _weight_col = "__cos_lat_weight__"
+            final_df[_weight_col] = np.cos(
+                np.deg2rad(final_df["lat"].values.astype(np.float64))
+            )
+
         scores_result = oceanbench_class4_module.compute_scores_xskillscore(
             df=final_df,
             y_obs_col=obs_col,
             y_pred_col=model_col,
             metrics=getattr(evaluator, "metrics", []),
-            weights=None,
+            weights=_weight_col,
             groupby=groupby_cols,
         )
 

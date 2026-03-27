@@ -71,6 +71,14 @@ def make_serializable(obj):
     """
     if isinstance(obj, pd.Timestamp):
         return obj.isoformat()
+    if isinstance(obj, pd.Interval):
+        # Numeric intervals (lat/lon/depth bins) become {left, right} dicts so
+        # that _bin_key in base.py can extract boundaries without parsing.
+        # Timestamp-endpoint intervals fall back to their string representation.
+        left, right = obj.left, obj.right
+        if isinstance(left, (int, float, np.integer, np.floating)):
+            return {"left": float(left), "right": float(right)}
+        return str(obj)
     if isinstance(obj, pd.DataFrame):
         return obj.to_dict(orient="records")
     if gpd is not None and isinstance(obj, gpd.GeoDataFrame):
@@ -257,8 +265,13 @@ def nan_to_none(obj):
     if isinstance(obj, float) and (pd.isna(obj) or obj != obj):
         return None
     if isinstance(obj, pd.Interval):
-        # Converts to string or tuple
-        return str(obj)  # or (obj.left, obj.right)
+        # Numeric intervals (lat/lon/depth bins) become {left, right} dicts so
+        # that _bin_key in base.py can extract boundaries without parsing.
+        # Timestamp-endpoint intervals fall back to their string representation.
+        left, right = obj.left, obj.right
+        if isinstance(left, (int, float, np.integer, np.floating)):
+            return {"left": float(left), "right": float(right)}
+        return str(obj)
     if isinstance(obj, pd.Timestamp) and pd.isna(obj):
         return None
     if isinstance(obj, pd.NaT.__class__):  # For NaTType

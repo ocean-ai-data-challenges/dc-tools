@@ -3571,14 +3571,14 @@ testing = ["PyYAML", "atheris (>=2.3.0,<2.4.0) ; python_version < \"3.12\"", "bs
 
 [[package]]
 name = "jsonpointer"
-version = "3.1.0"
+version = "3.1.1"
 description = "Identify specific nodes in a JSON document (RFC 6901) "
 optional = false
 python-versions = ">=3.10"
 groups = ["custom"]
 files = [
-    {file = "jsonpointer-3.1.0-py3-none-any.whl", hash = "sha256:f82aa0f745001f169b96473348370b43c3f581446889c41c807bab1db11c8e7b"},
-    {file = "jsonpointer-3.1.0.tar.gz", hash = "sha256:f9b39abd59ba8c1de8a4ff16141605d2a8dacc4dd6cf399672cf237bfe47c211"},
+    {file = "jsonpointer-3.1.1-py3-none-any.whl", hash = "sha256:8ff8b95779d071ba472cf5bc913028df06031797532f08a7d5b602d8b2a488ca"},
+    {file = "jsonpointer-3.1.1.tar.gz", hash = "sha256:0b801c7db33a904024f6004d526dcc53bbb8a4a0f4e32bfd10beadf60adf1900"},
 ]
 
 [[package]]
@@ -5649,7 +5649,7 @@ zarr = "2.18.4"
 type = "git"
 url = "https://github.com/aitmohandk/oceanbench.git"
 reference = "main"
-resolved_reference = "406f0dfb9591034ec379ead09616156a545f9d1d"
+resolved_reference = "1a4b256135554bd494abb796b23b1f6099972ea9"
 
 [[package]]
 name = "omegaconf"
@@ -8482,14 +8482,14 @@ typing = ["mypy (>=1.6,<2.0)", "traitlets (>=5.11.1)"]
 
 [[package]]
 name = "timm"
-version = "1.0.25"
+version = "1.0.26"
 description = "PyTorch Image Models"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "timm-1.0.25-py3-none-any.whl", hash = "sha256:bef7f61dd717cb2dbbb7e326f143e13d660a47ecbd84116e6fe33732bed5c484"},
-    {file = "timm-1.0.25.tar.gz", hash = "sha256:47f59fc2754725735cc81bb83bcbfce5bec4ebd5d4bb9e69da57daa92fcfa768"},
+    {file = "timm-1.0.26-py3-none-any.whl", hash = "sha256:985c330de5ccc3a2aa0224eb7272e6a336084702390bb7e3801f3c91603d3683"},
+    {file = "timm-1.0.26.tar.gz", hash = "sha256:f66f082f2f381cf68431c22714c8b70f723837fa2a185b155961eab90f2d5b10"},
 ]
 
 [package.dependencies]

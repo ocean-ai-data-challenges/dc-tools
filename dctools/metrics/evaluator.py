@@ -497,6 +497,66 @@ def compute_metric(
         if reduce_precision:
             pred_data = to_float32(pred_data)
 
+        def _required_obs_vars() -> set[str]:
+            required: set[str] = set()
+            for metric in list_metrics:
+                candidates = None
+                if hasattr(metric, "get_eval_variables"):
+                    try:
+                        candidates = metric.get_eval_variables()
+                    except Exception:
+                        candidates = None
+                if not candidates:
+                    candidates = getattr(metric, "eval_variables", None)
+                if not candidates:
+                    candidates = getattr(metric, "oceanbench_eval_variables", None)
+                if not candidates:
+                    continue
+                required.update(str(v) for v in candidates if v is not None)
+            return required
+
+        def _slim_observation_dataset(
+            ds: Optional[xr.Dataset],
+            *,
+            metadata_obj: Any,
+            ref_coords_obj: Any,
+        ) -> Optional[xr.Dataset]:
+            if ds is None or not hasattr(ds, "data_vars"):
+                return ds
+
+            coord_names: set[str] = set()
+            for coord_obj in (
+                getattr(metadata_obj, "coord_system", None),
+                ref_coords_obj,
+            ):
+                coordinates = getattr(coord_obj, "coordinates", None)
+                if isinstance(coordinates, dict):
+                    coord_names.update(
+                        str(v) for v in coordinates.values() if isinstance(v, str)
+                    )
+
+            required_vars = _required_obs_vars()
+            if not required_vars:
+                return ds
+
+            from dctools.data.coordinates import get_standardized_var_name
+
+            required_std = {get_standardized_var_name(var) for var in required_vars}
+            required_std.discard(None)
+
+            keep_data_vars: list[str] = []
+            for var_name in ds.data_vars:
+                if var_name in coord_names or var_name in required_vars:
+                    keep_data_vars.append(var_name)
+                    continue
+                std_name = get_standardized_var_name(str(var_name))
+                if std_name is not None and std_name in required_std:
+                    keep_data_vars.append(var_name)
+
+            if keep_data_vars and len(keep_data_vars) < len(ds.data_vars):
+                ds = ds[keep_data_vars]
+            return ds
+
         if ref_source is not None:
             if ref_is_observation:
                 # Observation entry is a dict with connection metadata;
@@ -794,6 +854,14 @@ def compute_metric(
                                     }
                                 )
 
+                            ref_data = _slim_observation_dataset(
+                                ref_data,
+                                metadata_obj=metadata,
+                                ref_coords_obj=ref_coords,
+                            )
+                            if reduce_precision:
+                                ref_data = to_float32(ref_data)
+
                             ref_data = ref_data.compute(
                                 scheduler="synchronous"
                             )
@@ -868,6 +936,14 @@ def compute_metric(
                         dataset_processor=None,
                     )
                     ref_data = ref_raw_data.preprocess_datasets(ref_df)
+
+                ref_data = _slim_observation_dataset(
+                    ref_data,
+                    metadata_obj=metadata,
+                    ref_coords_obj=ref_coords,
+                )
+                if reduce_precision and ref_data is not None:
+                    ref_data = to_float32(ref_data)
             else:
                 # Non-observation references are passed as a single source
                 # (typically a path string or datetime for CMEMS). Do not pass
@@ -1550,7 +1626,7 @@ class Evaluator:
         # and avoids re-downloading the same ARGO months every evaluation.
         from pathlib import Path as _PfPath
         _results_path = _PfPath(self.results_dir) if self.results_dir else _PfPath("/tmp")
-        # results_dir == data_directory/results_batches  →  parent == data_directory
+        # results_dir == data_directory/results_batches  -->  parent == data_directory
         _data_dir = _results_path.parent if _results_path.name == "results_batches" else _results_path  # noqa: E501
         self._argo_zarr_cache_dir = str(_data_dir / "argo_batch_cache")
 
@@ -2465,6 +2541,17 @@ class Evaluator:
                             / f"batch_{_batch_idx}"
                         )
 
+                        # Extract eval_variables for NaN masking (only
+                        # discard points where evaluation targets are NaN,
+                        # not ancillary variables like mdt).
+                        _eval_vars: Optional[List[str]] = None
+                        try:
+                            _ds_obj = self.dataset_manager.datasets.get(ref_alias)
+                            if _ds_obj is not None:
+                                _eval_vars = _ds_obj.get_eval_variables() or None
+                        except Exception:
+                            pass
+
                         _shared_obs_zarr = preprocess_batch_obs_files(
                             local_paths=_local_unique,
                             alias=str(ref_alias),
@@ -2476,6 +2563,7 @@ class Evaluator:
                             ),
                             n_points_dim=_n_pts_dim,
                             output_zarr_dir=_shared_zarr_dir,
+                            eval_variables=_eval_vars,
                         )
 
                         if _shared_obs_zarr:
@@ -3130,7 +3218,7 @@ class Evaluator:
                 total_pts = sum(points)
                 avg_pp = sum(preprocs) / len(preprocs)
                 avg_mt = sum(times) / len(times)
-                logger.info(
+                logger.debug(
                     f"Batch done: {len(batch_results)}/{num_tasks} tasks "
                     f"in {batch_duration:.1f}s | "
                     f"Avg preproc={avg_pp:.1f}s  metrics={avg_mt:.1f}s | "

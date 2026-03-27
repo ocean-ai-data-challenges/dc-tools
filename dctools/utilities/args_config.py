@@ -114,7 +114,7 @@ def configure_logging_from_args(args: Namespace) -> None:
             from pathlib import Path as _LogPath
             _lp = _LogPath(logfile)
             _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Insert timestamp before the extension: dc2.log → dc2_20260301_032630.log
+            # Insert timestamp before the extension: dc2.log --> dc2_20260301_032630.log
             _timed_logfile = str(_lp.parent / f"{_lp.stem}_{_ts}{_lp.suffix}")
             logger.add(
                 _timed_logfile,
@@ -243,6 +243,13 @@ def load_args_and_config(
 
         if config_filepath:
             config = load_configs(config_filepath)
+            # Auto-tune parallelism parameters based on machine capabilities.
+            # Params already set to explicit numbers are never overridden.
+            from dctools.utilities.machine_profile import auto_tune_config
+            config = auto_tune_config(
+                config,
+                data_directory=getattr(args, "data_directory", None),
+            )
             for key, value in config.items():
                 vars(args)[key] = value
 

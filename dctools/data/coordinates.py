@@ -64,6 +64,18 @@ COORD_ALIASES = {
     "n_points": {"n_points", "N_POINTS", "points", "obs"},
 }
 
+# CF standard names for coordinates (used for standard_name attribute lookup)
+COORD_STD_NAMES: Dict[str, set] = {
+    "lat": {"latitude"},
+    "lon": {"longitude"},
+    "depth": {"depth", "sea_floor_depth_below_sea_surface"},
+    "time": {"time"},
+    "x": {"projection_x_coordinate"},
+    "y": {"projection_y_coordinate"},
+    "n_points": set(),
+    "quadrant": set(),
+}
+
 # Variable of interest dictionary: {generic name -> standard_name(s), common aliases}
 VARIABLES_ALIASES = {
     # "sla": {   # TODO : check about computing sla from ssh
@@ -84,7 +96,11 @@ VARIABLES_ALIASES = {
     # },
     # TODO : check mixing sst and sst_fnd
     "sst": {
-        "standard_names": ["sea_surface_temperature", "sea_surface_foundation_temperature"],
+        "standard_names": [
+            "sea_surface_temperature",
+            "sea_surface_foundation_temperature",
+            "sea_surface_skin_temperature",
+        ],
         "aliases": [
             "sst",
             "surface_temperature",
@@ -97,10 +113,12 @@ VARIABLES_ALIASES = {
             "foundation_temperature",
             "t_surf_foundation",
             "adjusted_sea_surface_temperature",  # TODO : check this one
+            "analysed_sst",
+            "analysed_sea_surface_temperature",
         ],
     },
     "sss": {
-        "standard_names": ["sea_surface_salinity"],
+        "standard_names": ["sea_surface_salinity", "sea_water_surface_salinity"],
         "aliases": [
             "sss",
             "surface_salinity",
@@ -115,6 +133,7 @@ VARIABLES_ALIASES = {
             "sea_surface_height",
             "sea_surface_height_above_geoid",
             "sea_surface_height_above_reference_ellipsoid",
+            "sea_surface_height_above_mean_sea_level",
         ],
         "aliases": [
             "ssh",
@@ -124,29 +143,52 @@ VARIABLES_ALIASES = {
             "zos",
             "data_01__ku__ssha",
             "ssha",
+            "adt",
+            "sea_level_anomaly",
+            "sla",
         ],
     },
     "temperature": {
-        "standard_names": ["sea_water_potential_temperature", "sea_water_temperature"],
-        "aliases": ["temperature", "temp", "thetao", "temp_adjusted"],
+        "standard_names": [
+            "sea_water_potential_temperature",
+            "sea_water_temperature",
+            "sea_water_conservative_temperature",
+        ],
+        "aliases": ["temperature", "temp", "thetao", "temp_adjusted", "to", "theta"],
     },
     "salinity": {
-        "standard_names": ["sea_water_salinity"],
+        "standard_names": [
+            "sea_water_salinity",
+            "sea_water_practical_salinity",
+            "sea_water_absolute_salinity",
+        ],
         "aliases": ["salinity", "psu", "sal", "psal", "s", "salt", "so", "psal_adjusted"],
     },
     "u_current": {
-        "standard_names": ["eastward_sea_water_velocity"],
-        "aliases": ["u", "uo", "u_velocity"],
+        "standard_names": [
+            "eastward_sea_water_velocity",
+            "surface_geostrophic_eastward_sea_water_velocity",
+        ],
+        "aliases": ["u", "uo", "u_velocity", "ugos", "ugo", "u_curr", "ucur"],
     },
     "v_current": {
-        "standard_names": ["northward_sea_water_velocity"],
-        "aliases": ["v", "vo", "v_velocity"],
+        "standard_names": [
+            "northward_sea_water_velocity",
+            "surface_geostrophic_northward_sea_water_velocity",
+        ],
+        "aliases": ["v", "vo", "v_velocity", "vgos", "vgo", "v_curr", "vcur"],
     },
     "w_current": {
         "standard_names": ["upward_sea_water_velocity"],
-        "aliases": ["w", "wo", "w_velocity"],
+        "aliases": ["w", "wo", "w_velocity", "upward_velocity"],
     },
-    "mld": {"standard_names": ["mixed_layer_depth"], "aliases": ["mld", "mix_layer_depth"]},
+    "mld": {
+        "standard_names": [
+            "mixed_layer_depth",
+            "ocean_mixed_layer_thickness_defined_by_sigma_theta",
+        ],
+        "aliases": ["mld", "mix_layer_depth", "mlotst", "zmld", "mld_003"],
+    },
     "mean_dynamic_topography": {
         "standard_names": ["mean_dynamic_topography_cnes_cls", "mean_dynamic_topography"],
         "aliases": [
@@ -231,7 +273,17 @@ VARIABLES_ALIASES = {
     # DC3 (AMSR2) variables
     "siconc": {
         "standard_names": ["sea_ice_area_fraction"],
-        "aliases": ["siconc", "sea_icea_area_fraction", "z"],  # "z" used for siconc on AMSR2
+        "aliases": [
+            "siconc",
+            "sea_icea_area_fraction",
+            "z",  # "z" used for siconc on AMSR2
+            "ice_conc",
+            "ice_concentration",
+            "aice",
+            "sic",
+            "ice_area_fraction",
+            "ci",
+        ],
     },
     "n_points": {
         "standard_names": ["n_points"],
@@ -347,12 +399,46 @@ def get_target_time_values(cfg: Any) -> Optional[List[Any]]:
                    "zos": {"dtype": "float32"},"""
 
 
-def get_standardized_var_name(name: str):
+def _match_var_by_std_name(std_name: str) -> Optional[str]:
+    """Return the generic variable key whose ``standard_names`` list contains *std_name*, or None.
+
+    The comparison is case-insensitive.
     """
-    Return the standardized variable key from a known alias.
+    if not std_name:
+        return None
+    std_name_lc = std_name.lower()
+    for key, config in VARIABLES_ALIASES.items():
+        if std_name_lc in [s.lower() for s in config["standard_names"]]:
+            return key
+    return None
+
+
+def _match_coord_by_std_name(std_name: str) -> Optional[str]:
+    """Return the generic coordinate key whose ``COORD_STD_NAMES`` set contains *std_name*, or None.
+
+    The comparison is case-insensitive.
+    """
+    if not std_name:
+        return None
+    std_name_lc = std_name.lower()
+    for key, std_names in COORD_STD_NAMES.items():
+        if std_name_lc in {s.lower() for s in std_names}:
+            return key
+    return None
+
+
+def get_standardized_var_name(name: str, standard_name: Optional[str] = None) -> Optional[str]:
+    """
+    Return the standardized variable key from a CF standard_name attribute or a known alias.
+
+    Strategy (in order):
+    1. Match against CF ``standard_name`` attribute (if provided).
+    2. Match variable name against known aliases.
+    3. Match variable name against generic keys.
 
     Args:
         name (str): Original variable name.
+        standard_name (str, optional): CF ``standard_name`` attribute of the variable.
 
     Returns:
         str: Standardized key if found, else None.
@@ -369,6 +455,12 @@ def get_standardized_var_name(name: str):
     if name.lower() in _ignorable:
         logger.debug(f"Ignoring non-science variable: {name}.")
         return None
+    # Priority 1: CF standard_name attribute
+    if standard_name:
+        key = _match_var_by_std_name(standard_name)
+        if key is not None:
+            return key
+    # Priority 2: alias / generic-key name match
     for key, config in VARIABLES_ALIASES.items():
         list_aliases = config["aliases"]
         if name.lower() in list_aliases:
@@ -526,6 +618,24 @@ class CoordinateSystem:
                 for alias in COORD_ALIASES[key]:
                     if alias.lower() in var_names_lower:
                         standardized[key] = var_names_lower[alias.lower()]
+
+        # Fallback: match any still-undetected coordinate/variable by standard_name attribute
+        all_coord_keys = set(COORD_ALIASES.keys())
+        for var_name in ds.variables:
+            try:
+                std_name_attr = ds[var_name].attrs.get("standard_name", "")
+            except Exception:
+                std_name_attr = ""
+            if not std_name_attr:
+                continue
+            coord_key = _match_coord_by_std_name(std_name_attr)
+            if coord_key and coord_key not in standardized:
+                standardized[coord_key] = var_name
+                continue
+            # Also catch variables that double as coordinates (lat, lon, depth, time)
+            var_key = _match_var_by_std_name(std_name_attr)
+            if var_key in all_coord_keys and var_key not in standardized:
+                standardized[var_key] = var_name
 
         # dims = set(ds.dims)
         # has_depth_dim = "depth" in standardized and standardized["depth"] in dims
@@ -700,3 +810,48 @@ def get_dataset_geometry_light(
         from shapely.geometry import Point
 
         return Point(0, 0)
+
+def detect_variables_in_dataset(ds: xr.Dataset) -> Dict[str, str]:
+    """Detect all known oceanographic variables in an xarray Dataset.
+
+    Uses three complementary strategies, applied in order of priority:
+
+    1. Match the variable's ``standard_name`` attribute against CF standard names
+       listed in :data:`VARIABLES_ALIASES`.
+    2. Match the variable name against known aliases in :data:`VARIABLES_ALIASES`.
+    3. Match the variable name against the generic key names themselves.
+
+    Only the first variable found per generic key is kept.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset.
+
+    Returns
+    -------
+    dict
+        Mapping generic variable key -> actual variable name in the dataset.
+    """
+    found: Dict[str, str] = {}
+    for var_name in ds.data_vars:
+        try:
+            std_name_attr: str = ds[var_name].attrs.get("standard_name", "")
+        except Exception:
+            std_name_attr = ""
+        name_lc = str(var_name).lower()
+        matched_key: Optional[str] = None
+        # Strategy 1: CF standard_name attribute
+        if std_name_attr:
+            matched_key = _match_var_by_std_name(std_name_attr)
+        # Strategy 2 & 3: alias / key-name match (logs at DEBUG, not WARNING)
+        if matched_key is None:
+            for key, config in VARIABLES_ALIASES.items():
+                if name_lc in [a.lower() for a in config["aliases"]] or name_lc == key:
+                    matched_key = key
+                    break
+        if matched_key is not None and matched_key not in found:
+            found[matched_key] = str(var_name)
+        elif matched_key is None:
+            logger.debug(f"No match found for variable '{var_name}' in dataset.")
+    return found

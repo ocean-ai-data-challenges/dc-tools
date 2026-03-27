@@ -715,21 +715,24 @@ class EvaluationDataloader:
                             entry["ref_is_observation"] = False
 
                     batch.append(entry)
-                    # Adapt batch size according to observation/gridded type:
-                    # - observation datasets (SWOT, saral ...): use obs_batch_size
-                    #   to limit per-batch S3 download volume.
-                    # - gridded datasets (GLORYS ...): use gridded_batch_size
-                    #   to limit per-batch 3-D I/O and worker RAM pressure.
-                    # - fallback: global batch_size.
+                    # Adapt batch size per reference dataset.
+                    # obs_batch_size / gridded_batch_size can be:
+                    #   - a dict  {ref_alias: int}  (per-dataset sizing)
+                    #   - a plain int               (uniform sizing, legacy)
+                    #   - None                      (use global batch_size)
                     _effective_bs = self.batch_size
-                    if entry.get("ref_is_observation") and getattr(
-                        self, "obs_batch_size", None
-                    ):
-                        _effective_bs = self.obs_batch_size  # type: ignore[attr-defined]
-                    elif not entry.get("ref_is_observation") and getattr(
-                        self, "gridded_batch_size", None
-                    ):
-                        _effective_bs = self.gridded_batch_size  # type: ignore[attr-defined]
+                    _obs_bs = getattr(self, "obs_batch_size", None)
+                    _grid_bs = getattr(self, "gridded_batch_size", None)
+                    if entry.get("ref_is_observation") and _obs_bs is not None:
+                        if isinstance(_obs_bs, dict):
+                            _effective_bs = _obs_bs.get(ref_alias, self.batch_size)
+                        else:
+                            _effective_bs = _obs_bs
+                    elif not entry.get("ref_is_observation") and _grid_bs is not None:
+                        if isinstance(_grid_bs, dict):
+                            _effective_bs = _grid_bs.get(ref_alias, self.batch_size)
+                        else:
+                            _effective_bs = _grid_bs
                     if len(batch) >= _effective_bs:
                         yield batch
                         batch = []
@@ -1109,17 +1112,25 @@ def _open_local_zarr_simple(path: str, _alias: Any = None) -> Optional[xr.Datase
         raise
 
 
-def _nan_mask_numpy(ds: xr.Dataset, n_points_dim: str) -> Optional[np.ndarray]:
+def _nan_mask_numpy(ds: xr.Dataset, n_points_dim: str, eval_variables: Optional[List[str]] = None) -> Optional[np.ndarray]:
     """Build NaN mask from an already-computed (in-memory) dataset.
 
     Unlike :func:`_build_nan_mask` (which creates a dask graph and reads data
     lazily), this operates on numpy arrays directly.  Use it **after**
     ``.compute()`` to avoid the double-read penalty.
+
+    When *eval_variables* is provided, only those variables are checked for
+    NaN.  This avoids discarding points where ancillary variables (e.g.
+    ``mdt``) are NaN but the evaluation target (e.g. ``ssha_filtered``) is
+    valid.
     """
     if n_points_dim not in ds.dims or ds.sizes.get(n_points_dim, 0) == 0:
         return None
+    vars_to_check = eval_variables if eval_variables else list(ds.data_vars)
     combined: Optional[np.ndarray] = None
-    for vname in ds.data_vars:
+    for vname in vars_to_check:
+        if vname not in ds.data_vars:
+            continue
         v = ds[vname]
         if n_points_dim not in v.dims:
             continue
@@ -1144,19 +1155,20 @@ _DUMMY_TIME_DF = pd.DataFrame({
 })
 
 
-def _process_file_to_zarr(args: Tuple) -> Tuple[Optional[str], int]:
-    """Process one observation file → compute → NaN-filter → write mini zarr.
+def _process_file_to_zarr(args: Tuple) -> Tuple[Optional[str], int, Any]:
+    """Process one observation file --> compute --> NaN-filter --> write mini zarr.
 
     Designed for ``ProcessPoolExecutor``: all arguments are picklable, each
-    invocation is self-contained, and the result is just a ``(path, n_pts)``
-    tuple.
+    invocation is self-contained.  Returns ``(path, n_pts, t_start)`` where
+    *t_start* is the first time value in the file (used for sorting by the
+    caller — free since data is already in memory at that point).
 
     **Single-pass I/O** — the file is read/decompressed exactly once
     (the old code did it twice: once for the dask NaN mask, once for the
     final ``.compute()``).
     """
     (path, file_idx, is_swath, n_points_dim, alias,
-     keep_vars, coordinates, output_dir) = args
+     keep_vars, coordinates, output_dir, eval_variables) = args
     try:
         # Force synchronous dask scheduler — avoid any interaction with
         # a distributed Client that may have been inherited via fork().
@@ -1171,34 +1183,46 @@ def _process_file_to_zarr(args: Tuple) -> Tuple[Optional[str], int]:
             None, False,
         )
         if result is None:
-            return (None, 0)
+            return (None, 0, None)
 
         # ── Single-pass compute ─────────────────────────────────────
         # Read + decompress data ONCE into memory.
         result = result.compute(scheduler="synchronous")
 
         # NaN filter on in-memory numpy arrays (negligible cost).
-        _nmask = _nan_mask_numpy(result, n_points_dim)
+        _nmask = _nan_mask_numpy(result, n_points_dim, eval_variables=eval_variables)
         if _nmask is not None:
             if int(_nmask.sum()) == 0:
                 del result
-                return (None, 0)
+                return (None, 0, None)
             result = result.isel({n_points_dim: _nmask})
 
         n_pts = result.sizes.get(n_points_dim, 0)
         if n_pts == 0:
             del result
-            return (None, 0)
+            return (None, 0, None)
+
+        # Extract first time value for caller-side sorting.
+        # Data is already in memory (no extra I/O).
+        _t_start: Any = None
+        try:
+            _time_var = coordinates.get("time", "time")
+            if _time_var in result.coords or _time_var in result.data_vars:
+                _tv = result[_time_var].values
+                if len(_tv) > 0:
+                    _t_start = _tv[0]
+        except Exception:
+            pass
 
         # Write mini zarr directly from this worker process.
         zarr_path = os.path.join(output_dir, f"file_{file_idx}.zarr")
         result.to_zarr(zarr_path, mode="w")
         del result
         gc.collect()
-        return (zarr_path, n_pts)
+        return (zarr_path, n_pts, _t_start)
     except Exception as exc:
         logger.debug(f"Batch preproc ({alias}) file {file_idx}: {exc}")
-        return (None, 0)
+        return (None, 0, None)
 
 
 def concat_with_dim_delayed(
@@ -1274,13 +1298,14 @@ def preprocess_batch_obs_files(
     coordinates: Dict[str, str],
     n_points_dim: str = "n_points",
     output_zarr_dir: Optional[str] = None,
+    eval_variables: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Preprocess all unique observation files on the driver into a single zarr.
 
     Eliminates redundant per-worker preprocessing when multiple tasks share
     the same observation files (typical for SWOT/swath data with wide
     time_tolerance).  Each unique file is processed exactly once:
-    ``open → swath_to_points → NaN-mask → compute``.
+    ``open --> swath_to_points --> NaN-mask --> compute``.
 
     The resulting zarr contains all valid ocean points with a ``time``
     coordinate along *n_points_dim*, enabling per-worker time filtering.
@@ -1370,8 +1395,8 @@ def preprocess_batch_obs_files(
     # ── Per-file parallel preprocessing ──────────────────────────────
     # Architecture overview (v2 — ProcessPoolExecutor):
     #   • Each unique obs file is processed by a *separate OS process*
-    #     → open_zarr → swath_to_points → single-pass compute → NaN mask
-    #     → write mini zarr.  True CPU parallelism (no GIL).
+    #     --> open_zarr --> swath_to_points --> single-pass compute --> NaN mask
+    #     --> write mini zarr.  True CPU parallelism (no GIL).
     #   • Single-pass I/O: data is read/decompressed ONCE per file
     #     (v1 read twice: once for the dask NaN mask, once for compute).
     #   • No mini-batch accumulation or serial flush — each process
@@ -1379,30 +1404,35 @@ def preprocess_batch_obs_files(
     #   • Falls back to ThreadPoolExecutor if process creation fails
     #     (e.g. container restrictions, fork issues).
     _mini_zarr_paths: List[str] = []
+    _t_starts_phase1: List[Any] = []   # first-time-value per file, from Phase 1
     n_ok = 0
     n_pts_total = 0
 
     _cpu_count = os.cpu_count() or 4
     _env_max = int(os.environ.get("DCTOOLS_PREP_WORKERS", "0"))
 
-    # Default: use threads, not processes.
-    # ProcessPoolExecutor spawns/forks complete Python processes; each forked
-    # child accumulates ~400 MB of copied pages (interpreter + xarray/zarr
-    # imports) on Linux copy-on-write, so 16 processes = ~6 GB overhead
-    # before processing a single SWOT file.  Threads share the parent's
-    # address space and imported modules, so only the numpy arrays (a few
-    # tens of MB per file) are duplicated.  The GIL is released during zarr
-    # I/O, Blosc decompression, and numpy operations, giving near-equivalent
-    # throughput at a fraction of the memory cost.
-    # Set DCTOOLS_PREP_USE_PROCESSES=1 to restore the old process-based path
-    # (useful on pure-compute workloads with no Blosc-compressed I/O).
+    # ── Executor selection ────────────────────────────────────────────────
+    # Default: ProcessPoolExecutor (fork on Linux).
+    # Each worker process has its own GIL → swath_to_points (xr.stack +
+    # reset_index, which are pure-Python/pandas and hold the GIL) runs in
+    # true parallel.  ThreadPoolExecutor serialises all Python-heavy ops on
+    # a single CPU despite having multiple threads.
+    #
+    # Memory: each forked child adds ~150–300 MB RSS (most Python/library
+    # pages are read-only → truly shared via Linux mmap; only numpy arrays
+    # of the current file trigger copy-on-write).  With 4 workers the
+    # overhead is ~0.6–1.2 GB, acceptable on any machine running DC1.
+    #
+    # Set DCTOOLS_PREP_USE_THREADS=1 to fall back to threads
+    # (e.g. if running inside a container with restricted fork()).
     _use_processes = os.environ.get(
-        "DCTOOLS_PREP_USE_PROCESSES", ""
-    ).lower() in ("1", "true", "yes")
+        "DCTOOLS_PREP_USE_THREADS", ""
+    ).lower() not in ("1", "true", "yes")
 
-    # Default worker cap: 8 threads (plenty for I/O-bound zarr reads).
-    # When using processes, cap at 4 to limit forked-process RAM overhead.
-    _default_max = 4 if _use_processes else 8
+    # Cap at 4 processes (conservative for RAM).  With threads the GIL
+    # would bottleneck anyway, so 8 threads give no real benefit — keep
+    # the same cap for consistency when the user overrides to threads.
+    _default_max = 4
     _MAX_PREP_WORKERS = min(
         _env_max if _env_max > 0 else min(_cpu_count, _default_max),
         len(local_paths),
@@ -1411,55 +1441,51 @@ def preprocess_batch_obs_files(
     _args_list = [
         (p, idx, is_swath, n_points_dim, alias,
          keep_vars, dict(coordinates) if not isinstance(coordinates, dict) else coordinates,
-         output_zarr_dir)
+         output_zarr_dir, eval_variables)
         for idx, p in enumerate(local_paths)
     ]
 
+    _t_phase1_start = _time.perf_counter()
     logger.info(
         f"Shared batch preprocessing ({alias}): "
         f"{len(local_paths)} unique files, "
         f"{_MAX_PREP_WORKERS} {'processes' if _use_processes else 'threads'}"
     )
 
+    def _collect_phase1_result(fut: Any, fut_to_path: Dict) -> None:
+        """Unpack a Phase-1 future and append to the shared lists."""
+        try:
+            zarr_path, n_pts, t_start = fut.result()
+        except Exception as _fe:
+            _fpath = os.path.basename(str(fut_to_path.get(fut, "unknown")))
+            logger.warning(
+                f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+            )
+            return
+        if zarr_path is not None:
+            _mini_zarr_paths.append(zarr_path)
+            _t_starts_phase1.append(t_start)
+            nonlocal n_ok, n_pts_total
+            n_ok += 1
+            n_pts_total += n_pts
+
     try:
         if _use_processes:
             from concurrent.futures import ProcessPoolExecutor as _FilePool
+            from concurrent.futures import as_completed as _pool_ac
             with _FilePool(max_workers=_MAX_PREP_WORKERS) as pool:
-                from concurrent.futures import as_completed as _proc_ac
                 _futs = [pool.submit(_process_file_to_zarr, a) for a in _args_list]
                 _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
-                for fut in _proc_ac(_futs):
-                    try:
-                        zarr_path, n_pts = fut.result()
-                    except Exception as _fe:
-                        _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
-                        logger.warning(
-                            f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
-                        )
-                        continue
-                    if zarr_path is not None:
-                        _mini_zarr_paths.append(zarr_path)
-                        n_ok += 1
-                        n_pts_total += n_pts
+                for fut in _pool_ac(_futs):
+                    _collect_phase1_result(fut, _fut_to_path)
         else:
             from concurrent.futures import ThreadPoolExecutor as _ThrPool
-            from concurrent.futures import as_completed as _thr_ac
+            from concurrent.futures import as_completed as _pool_ac
             with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
                 _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
                 _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
-                for fut in _thr_ac(_futs):
-                    try:
-                        zarr_path, n_pts = fut.result()
-                    except Exception as _fe:
-                        _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
-                        logger.warning(
-                            f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
-                        )
-                        continue
-                    if zarr_path is not None:
-                        _mini_zarr_paths.append(zarr_path)
-                        n_ok += 1
-                        n_pts_total += n_pts
+                for fut in _pool_ac(_futs):
+                    _collect_phase1_result(fut, _fut_to_path)
 
     except (OSError, BrokenPipeError) as _pool_exc:
         logger.warning(
@@ -1467,169 +1493,176 @@ def preprocess_batch_obs_files(
             f"({_pool_exc!r}), retrying with ThreadPoolExecutor"
         )
         from concurrent.futures import ThreadPoolExecutor as _ThrPool
-        from concurrent.futures import as_completed as _thr_ac
-
+        from concurrent.futures import as_completed as _pool_ac
         with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
             _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
             _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
-            for fut in _thr_ac(_futs):
-                try:
-                    zarr_path, n_pts = fut.result()
-                except Exception as _fe:
-                    _fpath = os.path.basename(str(_fut_to_path.get(fut, "unknown")))
-                    logger.warning(
-                        f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
-                    )
-                    continue
-                if zarr_path is not None:
-                    _mini_zarr_paths.append(zarr_path)
-                    n_ok += 1
-                    n_pts_total += n_pts
+            for fut in _pool_ac(_futs):
+                _collect_phase1_result(fut, _fut_to_path)
+
+    _t_phase1_elapsed = _time.perf_counter() - _t_phase1_start
+    logger.info(
+        f"Shared batch ({alias}): Phase 1 done — "
+        f"{n_ok}/{len(local_paths)} files, {n_pts_total:,} pts "
+        f"in {_t_phase1_elapsed:.1f}s"
+    )
 
     if not _mini_zarr_paths:
         logger.warning(f"Shared batch preprocessing ({alias}): no valid data")
         shutil.rmtree(output_zarr_dir, ignore_errors=True)
         return None
 
-    # ── Pre-sort mini-zarrs by first time element (1 chunk read per file) ──
-    # Reading one element per file costs O(n_files × chunk_size) ≈ a few MB,
-    # versus the O(n_total_pts) = 191 M element global argsort that previously
-    # consumed ~3 GB (time array + index array) and serialised on a single CPU.
-    # For non-overlapping SWOT/SARAL passes this guarantees that the final
-    # xr.concat produces a globally time-sorted dataset without any permutation.
+    # ── Pre-sort mini-zarrs by first time element ─────────────────────────
+    # t_start was returned by _process_file_to_zarr (data was in memory →
+    # no extra I/O needed here, unlike the previous sequential re-open loop).
     _time_name = coordinates.get("time", "time")
-    if len(_mini_zarr_paths) > 1 and _time_name:
-        _t_starts: List[Any] = []
-        for _mp in _mini_zarr_paths:
-            _t0: Any = None
-            try:
-                _zt = xr.open_zarr(_mp, consolidated=False)
-                if _time_name in _zt.variables:
-                    _tv0 = np.asarray(_zt[_time_name].values[0:1])
-                    if len(_tv0) > 0:
-                        _t0 = _tv0[0]
-                _zt.close()
-            except Exception:
-                pass
-            _t_starts.append(_t0)
-
-        _valid_pairs = [
-            (t, p) for t, p in zip(_t_starts, _mini_zarr_paths) if t is not None
+    if len(_mini_zarr_paths) > 1:
+        _valid_triples = [
+            (t, p) for t, p in zip(_t_starts_phase1, _mini_zarr_paths)
+            if t is not None
         ]
         _none_paths = [
-            p for t, p in zip(_t_starts, _mini_zarr_paths) if t is None
+            p for t, p in zip(_t_starts_phase1, _mini_zarr_paths)
+            if t is None
         ]
         try:
-            _valid_pairs.sort(key=lambda x: x[0])
+            _valid_triples.sort(key=lambda x: x[0])
         except TypeError:
             pass  # mixed dtypes – keep existing order
-        _mini_zarr_paths = [p for _, p in _valid_pairs] + _none_paths
+        _mini_zarr_paths = [p for _, p in _valid_triples] + _none_paths
         logger.debug(
             f"Shared batch ({alias}): sorted {len(_mini_zarr_paths)} "
-            "mini-zarrs by time start"
+            "mini-zarrs by time start (from Phase-1 results, zero extra I/O)"
         )
 
-    # ── Final concat → shared zarr ─────────────────────────────────────
-    lazy_parts = [
-        xr.open_zarr(p, consolidated=False) for p in _mini_zarr_paths
-    ]
-    if len(lazy_parts) == 1:
-        combined = lazy_parts[0]
-    else:
-        combined = xr.concat(
-            lazy_parts, dim=n_points_dim,
-            coords="minimal", compat="override", join="override",
-        )
-
-    if n_points_dim in combined.coords:
-        combined = combined.drop_vars(n_points_dim)
-
-    # Drop inherited zarr encoding from mini-batch stores — the lazy
-    # concat produces dask chunks that don't align with the original
-    # per-file zarr chunk sizes, causing a validation error on write.
-    # IMPORTANT: preserve datetime encoding for the time coordinate
-    # so that workers can decode it correctly after open_zarr().
-    _time_encoding = None
-    if "time" in combined.variables:
-        _time_encoding = dict(combined["time"].encoding)
-    for var in combined.variables:
-        combined[var].encoding.clear()
-    if _time_encoding and "time" in combined.variables:
-        # Restore only the CF datetime keys needed for correct roundtrip
-        for _ek in ("units", "calendar", "dtype"):
-            if _ek in _time_encoding:
-                combined["time"].encoding[_ek] = _time_encoding[_ek]
-
-    # ── Sort by time so workers can use fast contiguous slicing ────────
-    # The mini-zarrs were pre-sorted by their first time element above,
-    # so xr.concat produces an already-monotone time axis for
-    # non-overlapping SWOT/SARAL passes.  The expensive global argsort
-    # (191 M timestamps → 3 GB RAM + single-threaded CPU) is no longer
-    # needed and has been eliminated.
-
-    # Rechunk to uniform sizes — xr.concat of files with varying n_points
-    # produces non-uniform dask chunks which zarr cannot store.
-    # Use a fixed chunk size; the total is n_pts_total accumulated above.
-    _target_chunk = max(1, n_pts_total // max(1, len(lazy_parts)))
-    combined = combined.chunk({n_points_dim: _target_chunk})
-
-    # Write the shared zarr (streams chunk-by-chunk from mini zarrs)
-    combined.to_zarr(output_zarr_path, mode="w")
-
-    # ── Save time index as sidecar .npy for zero-copy worker access ───
-    # Workers need the full time array for searchsorted filtering.
-    # We stream through the pre-sorted mini-zarrs reading only the time
-    # variable from each, writing directly into a memory-mapped .npy file.
-    # Peak RAM = one mini-zarr's time array (a few MB) versus the previous
-    # approach of loading all 191 M timestamps at once (~1.5 GB).
+    _t_phase2_start = _time.perf_counter()
+    # ── Parallel merge → shared zarr ────────────────────────────────────
+    # Build a lazy xr.concat of all mini-zarrs (zero data in memory) then
+    # let Dask write all output chunks in parallel.  Pre-sorted mini-zarrs
+    # guarantee the output is already time-ordered → no sortby needed.
     #
-    # Size guard: for very large swath datasets (SWOT, SARAL) a full-year
-    # batch can total hundreds of millions of points.  Each point requires
-    # 8 bytes in the time index.  Skip the sidecar when the estimated file
-    # size would exceed DCTOOLS_TIME_NPY_MAX_GB (default 1 GB) to avoid
-    # exhausting disk space and OS dirty-page RAM during the mmap write.
-    # Workers fall back to loading the time coordinate from the zarr store.
+    # Why this is safe (memory):
+    #   Each Dask task reads exactly ONE 100 K-point input chunk and writes
+    #   ONE 100 K-point output chunk.  With N merge threads, peak RAM ≈
+    #   N × chunk_size × n_vars × 4 bytes ≈ 8 × 100K × 10 × 4 = 32 MB.
+    #   This replaces the old serial-append path which was I/O-bound on
+    #   1 CPU while all other cores were idle.
+    #
+    # Why zarr writes are thread-safe here:
+    #   Each output chunk maps to a single chunk file in the directory
+    #   store.  Non-overlapping chunk files are written by different threads
+    #   without any shared state (Blosc releases the GIL during compress).
+
+    _TARGET_CHUNK = 100_000  # uniform chunk size along n_points_dim
+    _time_name_coord = coordinates.get("time", "time")
     _TIME_NPY_MAX_GB = float(os.environ.get("DCTOOLS_TIME_NPY_MAX_GB", "1.0"))
     _time_npy_size_gb = n_pts_total * 8 / 1e9
     _time_npy_path = os.path.join(output_zarr_dir, "time_index.npy")
+
+    # 1. Preserve CF time encoding from the first mini-zarr
+    _time_enc: Dict[str, Any] = {}
     try:
-        _time_name_coord = coordinates.get("time", "time")
-        if _time_npy_size_gb > _TIME_NPY_MAX_GB:
-            logger.debug(
-                f"Shared batch ({alias}): skipping time index .npy "
-                f"(estimated {_time_npy_size_gb:.2f} GB > "
-                f"limit {_TIME_NPY_MAX_GB} GB). "
-                "Workers will read time from the shared zarr."
+        _enc_probe = xr.open_zarr(_mini_zarr_paths[0], consolidated=False)
+        if "time" in _enc_probe.variables:
+            _time_enc = {
+                k: v for k, v in _enc_probe["time"].encoding.items()
+                if k in ("units", "calendar", "dtype")
+            }
+        _enc_probe.close()
+    except Exception:
+        pass
+
+    # 2. Open all mini-zarrs lazily; each is dask-backed at _TARGET_CHUNK
+    _lazy_parts: List[xr.Dataset] = []
+    for _mzp in _mini_zarr_paths:
+        try:
+            _lp = xr.open_zarr(
+                _mzp, consolidated=False,
+                chunks={n_points_dim: _TARGET_CHUNK},
             )
-        elif n_pts_total > 0 and any(
-            _time_name_coord in _lp.variables for _lp in lazy_parts
-        ):
-            _tv_mmap = np.lib.format.open_memmap(
-                _time_npy_path, mode="w+",
-                dtype="datetime64[ns]", shape=(n_pts_total,),
+            if n_points_dim in _lp.coords:
+                _lp = _lp.drop_vars(n_points_dim)
+            _lazy_parts.append(_lp)
+        except Exception as _exc_lp:
+            logger.warning(
+                f"Shared batch ({alias}): cannot open mini zarr "
+                f"{_mzp}: {_exc_lp!r}"
             )
-            _offset = 0
-            for _lp in lazy_parts:
-                if _time_name_coord not in _lp.variables:
-                    continue
-                _tv = np.asarray(_lp[_time_name_coord].values)
+
+    if not _lazy_parts:
+        logger.warning(f"Shared batch preprocessing ({alias}): no valid data after lazy open")
+        shutil.rmtree(output_zarr_dir, ignore_errors=True)
+        return None
+
+    # 3. Lazy concat (pure Python graph construction, no data loaded)
+    if len(_lazy_parts) == 1:
+        _combined = _lazy_parts[0]
+    else:
+        _combined = xr.concat(
+            _lazy_parts, dim=n_points_dim,
+            coords="minimal", compat="override", join="outer",
+        )
+
+    # 4. Uniform output chunking
+    _combined = _combined.chunk({n_points_dim: _TARGET_CHUNK})
+
+    # 5. Clear per-variable encodings; restore CF time encoding
+    for _v in list(_combined.variables):
+        _combined[_v].encoding.clear()
+    if _time_enc and "time" in _combined.variables:
+        _combined["time"].encoding.update(_time_enc)
+
+    # 6. Write using local threads (Blosc releases GIL → all cores active).
+    #    IMPORTANT: Always use a local thread pool, never the distributed
+    #    client.  When the distributed workers process the merge, zarr/blosc
+    #    internal buffers accumulate as "unmanaged memory" that the OS does
+    #    not reclaim.  For large SWATH datasets (e.g. 217 M-point SWOT) this
+    #    can consume 4+ GiB per worker — leaving no headroom for the actual
+    #    evaluation tasks that follow immediately.  Local threads keep the
+    #    distributed workers' memory pristine for evaluation.
+    import dask as _dask_merge
+    logger.debug(
+        f"Shared batch ({alias}): merging {len(_lazy_parts)} mini-zarrs "
+        f"→ {output_zarr_path} using {_MAX_PREP_WORKERS} local threads"
+    )
+    with _dask_merge.config.set(
+        scheduler="threads", num_workers=_MAX_PREP_WORKERS
+    ):
+        _combined.to_zarr(output_zarr_path, mode="w")
+
+    del _combined, _lazy_parts
+    gc.collect()
+
+    # 7. Build time sidecar (.npy) from the written zarr in one sequential pass
+    if _time_npy_size_gb <= _TIME_NPY_MAX_GB and n_pts_total > 0 and _time_name_coord:
+        try:
+            _sc_ds = xr.open_zarr(output_zarr_path, consolidated=False)
+            if _time_name_coord in _sc_ds.variables:
+                _tv = np.asarray(_sc_ds[_time_name_coord].values)
+                _sc_ds.close()
                 if np.issubdtype(_tv.dtype, np.integer):
                     _tv = _tv.astype("datetime64[ns]")
                 elif not np.issubdtype(_tv.dtype, np.datetime64):
                     _tv = pd.to_datetime(_tv).values.astype("datetime64[ns]")
                 elif _tv.dtype != np.dtype("datetime64[ns]"):
                     _tv = _tv.astype("datetime64[ns]")
-                _n = len(_tv)
-                _tv_mmap[_offset:_offset + _n] = _tv
-                _offset += _n
+                np.save(_time_npy_path, _tv)
+                logger.debug(
+                    f"Shared batch ({alias}): saved time index "
+                    f"({len(_tv):,} pts) to {_time_npy_path}"
+                )
                 del _tv
-            del _tv_mmap  # flush to disk
-            logger.debug(
-                f"Shared batch ({alias}): saved time index "
-                f"({_offset:,} pts) to {_time_npy_path}"
-            )
-    except Exception as _exc_npy:
-        logger.debug(f"Could not save time index .npy: {_exc_npy}")
+            else:
+                _sc_ds.close()
+        except Exception as _exc_sc:
+            logger.debug(f"Time sidecar build failed: {_exc_sc}")
+    elif _time_npy_size_gb > _TIME_NPY_MAX_GB:
+        logger.debug(
+            f"Shared batch ({alias}): skipping time index .npy "
+            f"(estimated {_time_npy_size_gb:.2f} GB > "
+            f"limit {_TIME_NPY_MAX_GB} GB). "
+            "Workers will read time from the shared zarr."
+        )
 
     # Consolidate metadata so worker threads don't each stat hundreds
     # of small .zarray/.zattrs files simultaneously.
@@ -1639,9 +1672,13 @@ def preprocess_batch_obs_files(
     except Exception:
         pass  # non-critical — workers fall back to consolidated=False
 
+    _t_phase2_elapsed = _time.perf_counter() - _t_phase2_start
+    logger.info(
+        f"Shared batch ({alias}): Phase 2 done — "
+        f"merged {len(_mini_zarr_paths)} mini-zarrs in {_t_phase2_elapsed:.1f}s"
+    )
+
     # Cleanup mini zarrs
-    for lp in lazy_parts:
-        lp.close()
     for p in _mini_zarr_paths:
         shutil.rmtree(p, ignore_errors=True)
 
@@ -1651,7 +1688,7 @@ def preprocess_batch_obs_files(
     elapsed = _time.perf_counter() - t_start
     logger.info(
         f"Shared batch preprocessing ({alias}): "
-        f"{n_ok}/{len(local_paths)} files → "
+        f"{n_ok}/{len(local_paths)} files --> "
         f"{n_pts_total:,} points in {elapsed:.1f}s"
     )
 

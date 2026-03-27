@@ -344,8 +344,8 @@ class MultiSourceDatasetManager:
         pred_alias: str,
         ref_aliases: Optional[Optional[List[str]]] = None,
         batch_size: Optional[int] = 8,
-        obs_batch_size: Optional[int] = None,
-        gridded_batch_size: Optional[int] = None,
+        obs_batch_size: Optional["Dict[str, int] | int"] = None,
+        gridded_batch_size: Optional["Dict[str, int] | int"] = None,
         pred_transform: Optional[Optional[CustomTransforms]] = None,
         ref_transforms: Optional[Optional[List[CustomTransforms]]] = None,
         forecast_mode: bool = False,
@@ -359,12 +359,13 @@ class MultiSourceDatasetManager:
             pred_alias (str): Alias of the prediction dataset.
             ref_aliases (Optional[List[str]]): Aliases of the reference datasets.
             batch_size (int): Batch size.
-            obs_batch_size (int, optional): Batch size for observation references.
-                Smaller batches prevent the driver from downloading thousands
-                of files at once for swath datasets (SWOT, saral, etc.).
-            gridded_batch_size (int, optional): Batch size for gridded (non-observation)
-                references such as GLORYS.  Each timestep is a full 3-D array so
-                a small value (e.g. 6) limits per-batch I/O and RAM pressure.
+            obs_batch_size (dict or int, optional): Batch size for observation
+                references.  Can be a ``{ref_alias: int}`` dict to specify
+                per-dataset sizes, or a single int applied to all observation
+                references.
+            gridded_batch_size (dict or int, optional): Batch size for gridded
+                (non-observation) references such as GLORYS.  Same formats as
+                *obs_batch_size*.
             pred_transform (Optional[CustomTransforms]): Transform for predictions.
             ref_transforms (Optional[List[CustomTransforms]]): Transforms for references.
             forecast_mode (bool): Enable forecast mode.

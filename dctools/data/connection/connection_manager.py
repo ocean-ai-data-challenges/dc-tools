@@ -1928,7 +1928,7 @@ class ArgoManager(BaseConnectionManager):
                     pass  # stale — rebuild
 
             t_start = _time_mod.time()
-            logger.info(
+            logger.debug(
                 f"ARGO monthly shared prefetch: full month {mkey} "
                 f"[{month_t0.date()} -> {month_t1.date()}]"
                 f" (batch window: {all_t0_in_month.date()} -> {all_t1_in_month.date()})"
