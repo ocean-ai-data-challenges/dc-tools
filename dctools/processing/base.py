@@ -17,6 +17,7 @@ mutualizing generic helpers:
 
 from __future__ import annotations
 
+import gc
 import gzip
 import json
 import math
@@ -54,10 +55,30 @@ from dctools.metrics.metrics import MetricComputer
 from dctools.metrics.oceanbench_metrics import get_variable_alias
 from dctools.utilities.file_utils import empty_folder
 from dctools.utilities.init_dask import configure_dask_logging, configure_dask_workers_env
-from dctools.utilities.misc_utils import make_serializable, nan_to_none, transform_in_place
+from dctools.utilities.misc_utils import make_serializable, transform_in_place
 
 import dcleaderboard as _dcleaderboard
+from rich import progress as _rich_progress
 warnings.simplefilter("ignore", UserWarning)
+
+# Fast JSON backend: orjson is 5–10× faster than stdlib json for large
+# files. Used in post-processing (batch consolidation + per-bins JSONL).
+try:
+    import orjson as _orjson
+    def _json_loads(s: Any) -> Any:
+        return _orjson.loads(s)
+    def _json_load(fp: Any) -> Any:
+        return _orjson.loads(fp.read())
+    def _json_dumps_compact(obj: Any) -> str:
+        return _orjson.dumps(obj).decode()
+except ImportError:  # graceful degradation if orjson is unavailable
+    _orjson = None  # type: ignore[assignment]
+    def _json_loads(s: Any) -> Any:  # type: ignore[misc]
+        return json.loads(s)
+    def _json_load(fp: Any) -> Any:  # type: ignore[misc]
+        return json.load(fp)
+    def _json_dumps_compact(obj: Any) -> str:  # type: ignore[misc]
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
 
 # Stable short-alias dictionaries for the compact .jsonl.gz format (v2).
@@ -82,8 +103,26 @@ _PB_COORD_ALIASES: Dict[str, str] = {
 }
 _PB_FIELD_SHORT: Dict[str, str] = {v: k for k, v in _PB_FIELD_ALIASES.items()}
 _PB_COORD_SHORT: Dict[str, str] = {v: k for k, v in _PB_COORD_ALIASES.items()}
+_PB_COORD_DP: int = 2   # decimal places for bin boundary coordinates
+_PB_METRIC_DP: int = 6  # decimal places for metric values
+_PB_SKIP: frozenset = frozenset({
+    "lat_bin", "lon_bin", "depth_bin",
+    "count", "n", "n_points", "time_bin",
+})
 
 _GEO_LABEL_PAT = re.compile(r'^(\d+(?:\.\d+)?[SNWEsnwe]|0)-(\d+(?:\.\d+)?[SNWEsnwe]|0)$')
+
+
+def _fmt_elapsed(t0: float) -> str:
+    """Return a human-readable elapsed-time string since *t0* (monotonic)."""
+    s = int(_time.monotonic() - t0)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m {s:02d}s"
 
 
 def _parse_geo_label(label: str) -> Dict[str, float]:
@@ -109,183 +148,227 @@ def _parse_geo_label(label: str) -> Dict[str, float]:
     m = _GEO_LABEL_PAT.match(label)
     if m:
         return {"left": _side(m.group(1)), "right": _side(m.group(2))}
-    # Interval-notation strings produced by str(pd.Interval), e.g. "(-10.0, -9.0]"
-    m2 = re.match(r'^[\[\(]\s*([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*[\]\)]$', label)
-    if m2:
-        return {"left": float(m2.group(1)), "right": float(m2.group(2))}
     # Fallback: return zeros rather than raising so the JSONL aggregation
     # can continue; affected bins will aggregate to (0, 0) boundaries.
     logger.warning(f"_parse_geo_label: unrecognised label {label!r}, defaulting to 0")
     return {"left": 0.0, "right": 0.0}
 
 
+def _pb_raw_to_v2_row(
+    ref_alias: str,
+    ref_type: str,
+    lead_time: Any,
+    forecast_reference_time: str,
+    per_bins_raw: Dict,
+) -> Optional[Dict]:
+    """Convert a single raw per-bins item to a v2 columnar row dict.
+
+    Input *per_bins_raw* format (row-based, one dict per bin)::
+
+        {"var": [{"lat_bin": {"left": -90, "right": -86}, "lon_bin": {…},
+                  "rmse": 0.42, …}, …], …}
+
+    Output per_bins format (columnar, short-aliased keys)::
+
+        {"var": {"yl": [-90, …], "yr": [-86, …], "xl": […], "xr": […],
+                 "rmse": [0.42, …], …}, …}
+
+    Bin boundaries are rounded to ``_PB_COORD_DP`` decimal places.
+    Metric values are rounded to ``_PB_METRIC_DP`` decimal places.
+    ``None`` metric values (after :func:`nan_to_none`) are preserved as ``None``.
+    Both the ``{"left", "right"}`` dict format and the oceanbench string-label
+    format (e.g. ``"78S-74S"``) are accepted for coordinate bins.
+
+    Returns ``None`` when *per_bins_raw* is empty or all variables have no bins,
+    so callers can skip writing that row.  Agnostic to which reference datasets
+    are present — works for any combination of gridded and observation refs.
+    """
+    per_bins_out: Dict[str, Dict] = {}
+    for var, bins in per_bins_raw.items():
+        if not bins:
+            continue
+        yl: List = []
+        yr: List = []
+        xl: List = []
+        xr: List = []
+        dl: List = []
+        dr: List = []
+        has_depth = False
+        for b in bins:
+            lb = b["lat_bin"]
+            lob = b["lon_bin"]
+            if isinstance(lb, str):
+                lb = _parse_geo_label(lb)
+            if isinstance(lob, str):
+                lob = _parse_geo_label(lob)
+            yl.append(round(lb["left"], _PB_COORD_DP))
+            yr.append(round(lb["right"], _PB_COORD_DP))
+            xl.append(round(lob["left"], _PB_COORD_DP))
+            xr.append(round(lob["right"], _PB_COORD_DP))
+            if "depth_bin" in b:
+                has_depth = True
+                db = b["depth_bin"]
+                dl.append(round(db["left"], _PB_COORD_DP))
+                dr.append(round(db["right"], _PB_COORD_DP))
+        col: Dict[str, List] = {"yl": yl, "yr": yr, "xl": xl, "xr": xr}
+        if has_depth:
+            col["dl"] = dl
+            col["dr"] = dr
+        all_metrics: set = {k for b in bins for k in b if k not in _PB_SKIP}
+        for metric in sorted(all_metrics):
+            col[metric] = [
+                round(float(b[metric]), _PB_METRIC_DP)
+                if b.get(metric) is not None
+                else None
+                for b in bins
+            ]
+        per_bins_out[var] = col
+    if not per_bins_out:
+        return None
+    return {
+        "ra": ref_alias,
+        "rt": ref_type,
+        "lt": lead_time,
+        "ft": forecast_reference_time,
+        "pb": per_bins_out,
+    }
+
+
+def _read_batch_file(path: str) -> Any:
+    """Read and JSON-parse a batch result file (gzip or plain)."""
+    if path.endswith(".gz"):
+        with gzip.open(path, "rb") as f:
+            return _json_load(f)
+    with open(path, "rb") as f:
+        return _json_load(f)
+
+
+def _prefetch_iter(paths, max_ahead: int = 2):
+    """Yield ``(path, parsed_data)`` with look-ahead parsing in background threads.
+
+    .. deprecated::
+        Replaced by :func:`_iter_batch_items` for the consolidation loop.
+        Kept for backward compatibility.
+
+    Peak extra memory: *max_ahead* × one parsed batch (~500 MB each).
+    """
+    from collections import deque as _deque
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    if not paths:
+        return
+    n_ahead = min(max_ahead, len(paths))
+    with _TPE(max_workers=n_ahead) as pool:
+        buf: _deque = _deque()
+        it = iter(paths)
+        for _ in range(min(n_ahead + 1, len(paths))):
+            p = next(it, None)
+            if p is not None:
+                buf.append((p, pool.submit(_read_batch_file, p)))
+        while buf:
+            p, fut = buf.popleft()
+            nxt = next(it, None)
+            if nxt is not None:
+                buf.append((nxt, pool.submit(_read_batch_file, nxt)))
+            yield p, fut.result()
+
+
+def _iter_batch_items(path: str):
+    """Yield individual items from a batch file (JSON array), one at a time.
+
+    Decompresses the file into a text buffer (~1 GB for large batches) and
+    uses :meth:`json.JSONDecoder.raw_decode` to parse items incrementally.
+    Only **one** parsed item exists in memory at any time (~400 MB for items
+    with large ``per_bins``).
+
+    Peak memory: decompressed text + one parsed item ≈ **1.4 GB** for the
+    largest batches, vs the previous ``_prefetch_iter`` approach that held
+    up to 3 fully-parsed batches ≈ **9–12 GB**.
+    """
+    if path.endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            text = f.read()
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+    decoder = json.JSONDecoder()
+    idx = 0
+    n = len(text)
+
+    # Skip to opening '['
+    while idx < n and text[idx] != "[":
+        idx += 1
+    if idx >= n:
+        return
+    idx += 1  # skip '['
+
+    while idx < n:
+        # Skip whitespace and commas between items
+        while idx < n and text[idx] in " \t\n\r,":
+            idx += 1
+        if idx >= n or text[idx] == "]":
+            break
+        item, end = decoder.raw_decode(text, idx)
+        idx = end
+        yield item
+
+
 def _aggregate_per_bins_jsonl(raw_path: str) -> Optional[str]:
-    """Aggregate a raw per-bins JSONL into a compact gzip JSONL (format v2).
+    """Convert a legacy raw per-bins JSONL file to compact gzip JSONL (format v2).
 
-    Reads the raw file produced during batch consolidation, where one line
-    exists per (forecast_reference_time, ref_alias, lead_time), and writes
-    a gzip JSONL where:
+    **Legacy fallback only.**  New evaluations write directly to ``.jsonl.gz`` v2
+    via :func:`_pb_raw_to_v2_row` during consolidation and never produce a raw
+    ``.jsonl`` intermediate file.  This function exists to migrate older ``.jsonl``
+    files produced by previous versions of the pipeline.
 
-    * **First line**: schema header ``{"_v": 2, "f": {…}, "c": {…}}``
-      carrying the alias dictionaries so readers can expand short keys.
-    * One data line per raw entry — the full temporal resolution is preserved.
-    * Per-bins data uses a **columnar** layout (one array per coordinate/
-      metric) to eliminate repeated JSON key overhead (~4x JSON compactness
-      vs per-bin dicts).  Coordinate/field keys use the short aliases from
-      ``_PB_COORD_ALIASES`` / ``_PB_FIELD_ALIASES``.
-    * Bin boundary coordinates are rounded to 2 decimal places to merge
-      entries whose float representations differ only in trailing digits
-      (e.g. Glorys vs Argo depth bin edges for the same nominal depth).
+    Processes one line at a time — O(1) RAM regardless of file size or temporal
+    extent of the evaluation.
 
-    This implementation is **streaming**: it processes one JSONL line at a
-    time, keeping memory usage bounded (~2× the size of the largest single
-    line) regardless of the total file size.
-
-    Returns the path to the new ``.jsonl.gz`` file, or ``None`` if the raw
-    file did not exist or contained no per-bins entries.
+    Returns the path to the new ``.jsonl.gz`` file, or ``None`` if the raw file
+    did not exist or contained no per-bins entries.
     """
     if not os.path.isfile(raw_path):
         return None
 
-    _COORD_DP = 2   # decimal places for bin boundary rounding
-    _METRIC_DP = 6  # decimal places for averaged metric values
-    # Keys that are bin coordinates / counters, not metrics to average.
-    _SKIP = frozenset({
-        "lat_bin", "lon_bin", "depth_bin",
-        "count", "n", "n_points", "time_bin",
-    })
-
-    def _bin_key(b: Dict) -> tuple:
-        """Build a hashable, rounded spatial bin key."""
-        lb = b["lat_bin"]
-        lob = b["lon_bin"]
-        if isinstance(lb, str):
-            lb = _parse_geo_label(lb)
-        if isinstance(lob, str):
-            lob = _parse_geo_label(lob)
-        lat = (round(lb["left"], _COORD_DP),
-               round(lb["right"], _COORD_DP))
-        lon = (round(lob["left"], _COORD_DP),
-               round(lob["right"], _COORD_DP))
-        if "depth_bin" in b:
-            db = b["depth_bin"]
-            if isinstance(db, str):
-                db = _parse_geo_label(db)
-            dep = (round(db["left"], _COORD_DP), round(db["right"], _COORD_DP))
-            return lat + lon + dep
-        return lat + lon
-
-    def _entry_to_columnar(entry: Dict) -> Optional[Dict]:
-        """Convert a single raw entry to the compact columnar row format.
-
-        Returns a dict ready for JSON serialization, or None if no bins.
-        """
-        ref_alias = entry.get("ref_alias", "")
-        lead_time = entry.get("lead_time")
-        ref_type = entry.get("ref_type", "gridded")
-        frt = entry.get("forecast_reference_time", "")
-
-        per_bins_out: Dict[str, Dict] = {}
-        for var, bins in entry.get("per_bins", {}).items():
-            bins_by_key: Dict[tuple, Dict] = {}
-            for b in bins:
-                bk = _bin_key(b)
-                cell = bins_by_key.setdefault(bk, {})
-                for metric, val in b.items():
-                    if metric in _SKIP or val is None:
-                        continue
-                    try:
-                        fval = float(val)
-                    except (TypeError, ValueError):
-                        continue
-                    if math.isnan(fval):
-                        continue
-                    ms = cell.setdefault(metric, [0.0, 0])
-                    ms[0] += fval
-                    ms[1] += 1
-
-            keys = list(bins_by_key.keys())
-            if not keys:
-                continue
-            has_depth = len(keys[0]) == 6
-            col: Dict[str, list] = {
-                "yl": [bk[0] for bk in keys],
-                "yr": [bk[1] for bk in keys],
-                "xl": [bk[2] for bk in keys],
-                "xr": [bk[3] for bk in keys],
-            }
-            if has_depth:
-                col["dl"] = [bk[4] for bk in keys]
-                col["dr"] = [bk[5] for bk in keys]
-
-            all_metrics: set = set()
-            for bk in keys:
-                all_metrics.update(bins_by_key[bk])
-            for metric in sorted(all_metrics):
-                col[metric] = [
-                    round(bins_by_key[bk][metric][0] / bins_by_key[bk][metric][1], _METRIC_DP)
-                    if metric in bins_by_key[bk] and bins_by_key[bk][metric][1] > 0
-                    else None
-                    for bk in keys
-                ]
-            per_bins_out[var] = col
-
-        if not per_bins_out:
-            return None
-
-        return {
-            "ra": ref_alias,
-            "rt": ref_type,
-            "lt": lead_time,
-            "ft": frt,
-            "pb": per_bins_out,
-        }
-
-    # ── Streaming single-pass: process one line at a time ──────────────
     out_path = raw_path + ".gz"
-    n_raw = 0
-    n_written = 0
-
     _schema = json.dumps(
         {"_v": 2, "f": _PB_FIELD_ALIASES, "c": _PB_COORD_ALIASES},
         separators=(",", ":"), ensure_ascii=False,
     )
-
+    n_written = 0
     with open(raw_path, encoding="utf-8") as fh, \
-         gzip.open(out_path, "wt", encoding="utf-8", compresslevel=6) as gz:
+         gzip.open(out_path, "wt", encoding="utf-8", compresslevel=1) as gz:
         gz.write(_schema + "\n")
         for raw_line in fh:
             raw_line = raw_line.strip()
             if not raw_line:
                 continue
-            n_raw += 1
-            entry = json.loads(raw_line)
-            row = _entry_to_columnar(entry)
-            # Free the parsed entry immediately to limit peak memory.
-            del entry
+            entry = _json_loads(raw_line)
+            per_bins_raw = entry.get("per_bins")
+            if not per_bins_raw:
+                continue
+            row = _pb_raw_to_v2_row(
+                ref_alias=entry.get("ref_alias", ""),
+                ref_type=entry.get("ref_type", "gridded"),
+                lead_time=entry.get("lead_time"),
+                forecast_reference_time=entry.get("forecast_reference_time", ""),
+                per_bins_raw=per_bins_raw,
+            )
             if row is not None:
-                gz.write(
-                    json.dumps(row, separators=(",", ":"), ensure_ascii=False)
-                    + "\n"
-                )
+                gz.write(_json_dumps_compact(row) + "\n")
                 n_written += 1
-                del row
-
     if n_written == 0:
-        # Nothing useful was produced — remove the empty gz.
+        logger.debug("  _aggregate_per_bins_jsonl: no entries found in {}", raw_path)
         try:
             os.remove(out_path)
         except OSError:
             pass
-        logger.debug("  _aggregate_per_bins_jsonl: no entries found in {}", raw_path)
         return None
-
-    logger.info(
-        f"  Compacting per-bins: {n_raw} raw entr"
-        f"{'y' if n_raw == 1 else 'ies'} --> {n_written} compacted line"
-        f"{'s' if n_written != 1 else ''}"
+    logger.opt(colors=True).info(
+        f"  Converted per-bins: <b>{n_written}</b> entr"
+        f"{'y' if n_written == 1 else 'ies'}  <dim>→</dim>  <cyan>{out_path}</cyan>"
     )
-
     return out_path
 
 
@@ -372,6 +455,12 @@ class BaseDCEvaluation:
             cfg["threads_per_worker"] = int(threads_per_worker)
         if memory_limit is not None:
             cfg["memory_limit"] = memory_limit
+        # Propagate optional C-library thread cap (pyinterp, BLAS, OpenMP).
+        if "c_lib_threads" in source:
+            cfg["c_lib_threads"] = int(source["c_lib_threads"])
+        # Propagate optional download concurrency cap.
+        if "download_workers" in source:
+            cfg["download_workers"] = int(source["download_workers"])
         return cfg
 
     def _build_dask_cfgs_by_dataset(self) -> Dict[str, Dict[str, Any]]:
@@ -591,7 +680,9 @@ class BaseDCEvaluation:
         if getattr(self, "_startup_summary_logged", False):
             return
 
-        logger.info(f"\n{self._build_eval_summary_banner()}")
+        logger.opt(colors=True).info(
+            f"\n<bold><magenta>{self._build_eval_summary_banner()}</magenta></bold>"
+        )
         self._startup_summary_logged = True
 
     def _log_dask_dashboard_once(self) -> None:
@@ -802,9 +893,7 @@ class BaseDCEvaluation:
                 "dataset_processor": self.dataset_processor,
                 "max_samples": self.args.max_samples,
                 "file_cache": manager.file_cache,
-                "target_depth_values": get_target_depth_values(
-                    self.args, surface=getattr(self, "surface_only", False),
-                ),
+                "target_depth_values": get_target_depth_values(self.args),
                 "filter_values": {
                     "start_time": self.args.start_time,
                     "end_time": self.args.end_time,
@@ -1160,6 +1249,7 @@ class BaseDCEvaluation:
     # ------------------------------------------------------------------
     def run_eval(self) -> None:
         """Run the full evaluation pipeline."""
+        _t0 = _time.monotonic()  # wall-clock start for elapsed-time display
         all_datasets: List[str] = getattr(self, "all_datasets", [])
         dataset_references: Dict[str, Any] = getattr(self, "dataset_references", {})
 
@@ -1177,16 +1267,37 @@ class BaseDCEvaluation:
         evaluators: Dict[str, Any] = {}
         models_results: Dict[str, Any] = {}
 
+        _resume = getattr(self.args, "resume", False)
+
         for alias in dataset_references.keys():
             dataset_json_path = os.path.join(self.results_directory, f"results_{alias}.json")
             results_files_dir = os.path.join(self.args.data_directory, "results_batches")
 
-            if os.path.isdir(results_files_dir):
+            if _resume:
+                # Resume mode: keep existing batch files, only remove stale
+                # final results (they will be re-consolidated at the end).
+                os.makedirs(results_files_dir, exist_ok=True)
+                logger.info("Resume mode: keeping existing batch result files.")
+            elif os.path.isdir(results_files_dir):
                 if os.listdir(results_files_dir):
                     logger.debug("Results dir exists. Removing old results files.")
                     empty_folder(results_files_dir, extension=".json")
+                    # Also remove compressed batch files (.json.gz) left by
+                    # previous runs — empty_folder only matches .json suffix.
+                    for _stale_gz in Path(results_files_dir).glob("*.json.gz"):
+                        _stale_gz.unlink(missing_ok=True)
             else:
                 os.makedirs(results_files_dir, exist_ok=True)
+
+            # Remove stale final results for this alias so a crash mid-run
+            # cannot leave outdated files from a previous evaluation.
+            # (Always removed — they are re-created by consolidation.)
+            _stale_final = os.path.join(self.results_directory, f"results_{alias}.json")
+            _stale_pb = os.path.join(self.results_directory, f"results_{alias}_per_bins.jsonl.gz")
+            for _sf in (_stale_final, _stale_pb):
+                if os.path.isfile(_sf):
+                    logger.debug(f"Removing stale result file: {os.path.basename(_sf)}")
+                    os.remove(_sf)
 
             dataset_manager.build_forecast_index(
                 alias,
@@ -1211,14 +1322,13 @@ class BaseDCEvaluation:
             _n_pred_total = len(dataset_references)
             _n_pred_current = list(dataset_references.keys()).index(alias) + 1
 
-            _sep_pred = "▰" * 68
-            print("")
-            print(f"┌{_sep_pred}┐")
-            print(
-                f"│    ▶  Model to evaluate ({_n_pred_current}/{_n_pred_total}) :  {str(alias).upper():<34}│"  # noqa: E501
+            _inner_model = f"  ▶  Model {_n_pred_current}/{_n_pred_total}  —  {alias.upper()}"
+            _inner_model = f"{_inner_model:<68}"
+            logger.opt(colors=True).info(
+                f"\n<yellow>┌{'─' * 68}┐\n"
+                f"│<bold>{_inner_model}</bold>│\n"
+                f"└{'─' * 68}┘</yellow>"
             )
-            print(f"└{_sep_pred}┘")
-            print("")
 
             for ref_alias in list_references:
                 if ref_alias not in dataset_manager.datasets:
@@ -1317,43 +1427,43 @@ class BaseDCEvaluation:
                 if ref_alias in ref_transforms
             }
 
-            # ── Determine per-reference obs_batch_size ─────────────────
-            # Build a dict {ref_alias: batch_size} so each reference dataset
-            # can have its own batch size.  Per-dataset YAML values take
-            # precedence over the global obs_batch_size.
-            _global_obs_bs = getattr(self.args, "obs_batch_size", None)
-            if _global_obs_bs is not None:
-                _global_obs_bs = int(_global_obs_bs)
-            _obs_batch_sizes: Dict[str, int] = {}
+            # ── Determine obs_batch_size ───────────────────────────────
+            # Look for per-dataset obs_batch_size first, then global, then default.
+            _obs_batch_size = None
             for _ref_alias in effective_references:
                 _ref_src: Dict[str, Any] = next(
                     (s for s in self.args.sources if s.get("dataset") == _ref_alias), {}
                 )
                 if _ref_src.get("obs_batch_size") is not None:
-                    _obs_batch_sizes[_ref_alias] = int(_ref_src["obs_batch_size"])
-                elif _global_obs_bs is not None:
-                    _obs_batch_sizes[_ref_alias] = _global_obs_bs
+                    _obs_batch_size = int(_ref_src["obs_batch_size"])
+                    break
+            if _obs_batch_size is None:
+                _obs_batch_size = getattr(self.args, "obs_batch_size", None)
+                if _obs_batch_size is not None:
+                    _obs_batch_size = int(_obs_batch_size)
 
-            # ── Determine per-reference gridded_batch_size ─────────────
-            # Same approach: per-dataset YAML value --> global fallback.
-            _global_grid_bs = getattr(self.args, "gridded_batch_size", None)
-            if _global_grid_bs is not None:
-                _global_grid_bs = int(_global_grid_bs)
-            _gridded_batch_sizes: Dict[str, int] = {}
+            # ── Determine gridded_batch_size ───────────────────────────
+            # Per-reference gridded_batch_size overrides the global batch_size
+            # for non-observation (gridded) reference datasets such as GLORYS.
+            # A small value (e.g. 6) limits per-batch I/O + RAM pressure.
+            _gridded_batch_size = None
             for _ref_alias in effective_references:
                 _ref_src = next(
                     (s for s in self.args.sources if s.get("dataset") == _ref_alias), {}
                 )
                 if _ref_src.get("gridded_batch_size") is not None:
-                    _gridded_batch_sizes[_ref_alias] = int(_ref_src["gridded_batch_size"])
-                elif _global_grid_bs is not None:
-                    _gridded_batch_sizes[_ref_alias] = _global_grid_bs
+                    _gridded_batch_size = int(_ref_src["gridded_batch_size"])
+                    break
+            if _gridded_batch_size is None:
+                _gridded_batch_size = getattr(self.args, "gridded_batch_size", None)
+                if _gridded_batch_size is not None:
+                    _gridded_batch_size = int(_gridded_batch_size)
 
             dataloaders[alias] = dataset_manager.get_dataloader(
                 pred_alias=alias,
                 ref_aliases=effective_references,
-                obs_batch_size=_obs_batch_sizes or None,
-                gridded_batch_size=_gridded_batch_sizes or None,
+                obs_batch_size=_obs_batch_size,
+                gridded_batch_size=_gridded_batch_size,
                 pred_transform=pred_transform,
                 ref_transforms=ref_transforms,  # type: ignore[arg-type]
                 forecast_mode=forecast_mode,
@@ -1370,11 +1480,11 @@ class BaseDCEvaluation:
                 dask_cfgs_by_dataset=self.dask_cfgs_by_dataset,
                 results_dir=results_files_dir,
                 reduce_precision=getattr(self.args, "reduce_precision", False),
-                surface_only=self.surface_only,
                 restart_workers_per_batch=getattr(self.args, "restart_workers_per_batch", False),
                 restart_frequency=getattr(self.args, "restart_frequency", 1),
                 max_p_memory_increase=getattr(self.args, "max_p_memory_increase", 0.2),
                 max_worker_memory_fraction=getattr(self.args, "max_worker_memory_fraction", 0.85),
+                resume=_resume,
             )
             _n_pred_total = len(dataset_references)
             _n_pred_current = list(dataset_references.keys()).index(alias) + 1
@@ -1395,139 +1505,183 @@ class BaseDCEvaluation:
             except Exception:
                 pass
 
+            # ── Release Dask cluster before post-processing ────────────────
+            # The cluster workers (e.g. 6 × 3 GB = 18 GB) are no longer needed
+            # after all batches are processed.  Shutting down now frees that RAM
+            # for the consolidation and leaderboard pipelines, which run on the
+            # driver only.  Without this, the combined memory pressure (idle
+            # workers + driver post-processing) exceeds available RAM and
+            # triggers SIGKILL (exit code 247).
+            try:
+                self.close()
+                gc.collect()
+                logger.debug("Dask cluster shut down — RAM freed for post-processing.")
+            except Exception as _close_exc:
+                logger.debug(f"Cluster shutdown before post-processing: {_close_exc!r}")
+
             # ── Separator: evaluation done -> post-processing ──────────────
-            _sep_post = "─" * 68
+            _inner_post = f"  📦  POST-PROCESSING  —  {alias.upper()}"
+            _inner_post = f"{_inner_post:<68}"  # pre-pad before markup
             logger.opt(colors=True).info(
-                f"\n┌{_sep_post}┐\n"
-                f"│<bold>{'  📦  POST-PROCESSING RESULTS  —  ' + alias.upper():^67}</bold>│\n"
-                f"└{_sep_post}┘"
+                f"\n<magenta>┌{'─' * 68}┐\n"
+                f"│<bold>{_inner_post}</bold>│\n"
+                f"└{'─' * 68}┘</magenta>  <dim>[+{_fmt_elapsed(_t0)}]</dim>"
             )
 
             # Aggregate batch results and write final JSON.
             try:
-                batch_files = glob(os.path.join(results_files_dir, "results_*_batch_*.json"))
-                results_dict: Dict[str, Any] = {}
+                batch_files = sorted(
+                    glob(os.path.join(results_files_dir, "results_*_batch_*.json"))
+                    + glob(os.path.join(results_files_dir, "results_*_batch_*.json.gz"))
+                )
                 n_errors = 0
+                _total_entries = 0
 
-                logger.info(
-                    f"  ┌ Consolidating {len(batch_files)} batch file(s) "
-                    f"for '{alias}' ..."
+                logger.opt(colors=True).info(
+                    f"  <dim>┌</dim> Consolidating <b>{len(batch_files)}</b> batch file(s)"
+                    f" for <cyan>'{alias}'</cyan> …"
                 )
 
-                # Per-bins are written incrementally as a JSONL file (one
-                # compact JSON object per line) so that the full list is never
-                # held in RAM.  This prevents OOM crashes on large datasets
-                # where an indented JSON dump can reach multiple gigabytes.
-                per_bins_path = os.path.join(
+                # Per-bins are written directly to gzip JSONL (format v2) via
+                # _pb_raw_to_v2_row().  No intermediate raw .jsonl is ever
+                # created: peak RAM is bounded to one batch item regardless of
+                # temporal extent or which reference datasets are evaluated.
+                per_bins_gz_path = os.path.join(
                     self.results_directory,
-                    f"results_{alias}_per_bins.jsonl",
+                    f"results_{alias}_per_bins.jsonl.gz",
                 )
                 _pb_count = 0
-                with open(per_bins_path, "w", encoding="utf-8") as pb_file:
-                    for batch_file in batch_files:
-                        with open(batch_file, "r") as f:
-                            batch_results = json.load(f)
-                        for item in batch_results:
+                _pb_schema = json.dumps(
+                    {"_v": 2, "f": _PB_FIELD_ALIASES, "c": _PB_COORD_ALIASES},
+                    separators=(",", ":"), ensure_ascii=False,
+                )
+
+                # ── Streaming JSON writer ──────────────────────────────────
+                # Items are parsed one at a time from each batch file via
+                # _iter_batch_items() + raw_decode.  Only ONE parsed item
+                # lives in memory at a time (~400 MB for large per_bins
+                # items).  The decompressed text buffer (~1 GB) is the only
+                # other significant allocation per batch file.
+                # Previous approach: _prefetch_iter loaded up to 3 full
+                # batches as Python objects — 9–12 GB peak.
+                _first_item = True
+                with open(dataset_json_path, "w", encoding="utf-8") as json_file, \
+                     gzip.open(per_bins_gz_path, "wt", encoding="utf-8", compresslevel=1) as pb_gz_file:
+                    pb_gz_file.write(_pb_schema + "\n")
+
+                    # Write JSON header
+                    json_file.write("{\n")
+                    json_file.write(f'  "dataset": {json.dumps(alias)},\n')
+                    json_file.write(f'  "results": {{\n')
+                    json_file.write(f'    {json.dumps(alias)}: [\n')
+
+                    for batch_file in _rich_progress.track(
+                        batch_files,
+                        description=f"  [{alias}] consolidating …",
+                        total=len(batch_files),
+                        transient=True,
+                    ):
+                        for item in _iter_batch_items(batch_file):
                             if isinstance(item, dict) and item.get("error"):
                                 n_errors += 1
-                            # Pop per_bins before serialization: keeps the main
-                            # results file flat and leaderboard-compatible.
-                            # Write each entry immediately – no in-RAM list.
+                            # Pop per_bins and convert to v2 columnar format
+                            # immediately.  The per_bins dict (~400 MB) is
+                            # freed as soon as _pb_raw_to_v2_row returns.
                             if isinstance(item, dict) and "per_bins" in item:
                                 _is_obs = item.get(
                                     "ref_is_observation",
                                     item.get("is_class4", False),
                                 )
-                                _pb_entry = {
-                                    "ref_alias": item.get("ref_alias", alias),
-                                    "valid_time": item.get("valid_time"),
-                                    "forecast_reference_time": item.get(
-                                        "forecast_reference_time"
+                                _v2_row = _pb_raw_to_v2_row(
+                                    ref_alias=item.get("ref_alias", alias),
+                                    ref_type="observation" if _is_obs else "gridded",
+                                    lead_time=item.get("lead_time"),
+                                    forecast_reference_time=item.get(
+                                        "forecast_reference_time", ""
                                     ),
-                                    "lead_time": item.get("lead_time"),
-                                    "ref_type": "observation" if _is_obs else "gridded",
-                                    "per_bins": item.pop("per_bins"),
-                                }
-                                # Compact JSON (no indent) -> ~4× smaller than
-                                # the previous indented format.
-                                pb_file.write(
-                                    json.dumps(
-                                        nan_to_none(make_serializable(_pb_entry)),
-                                        separators=(",", ":"),
-                                        ensure_ascii=False,
-                                    )
-                                    + "\n"
+                                    per_bins_raw=transform_in_place(
+                                        transform_in_place(
+                                            item.pop("per_bins"),
+                                            make_serializable,
+                                        ),
+                                        lambda x: None if isinstance(x, float) and x != x else x,
+                                    ),
                                 )
-                                _pb_count += 1
-                        transform_in_place(batch_results, make_serializable)
-                        serializable_result = nan_to_none(batch_results)
-                        results_dict.setdefault(alias, []).extend(serializable_result)
+                                if _v2_row is not None:
+                                    pb_gz_file.write(
+                                        _json_dumps_compact(_v2_row) + "\n"
+                                    )
+                                    _pb_count += 1
 
-                _total_entries = sum(len(v) for v in results_dict.values())
-                logger.info(
-                    f"  │  {_total_entries} result entr{'y' if _total_entries == 1 else 'ies'} "
-                    f"consolidated from {len(batch_files)} batch(es)"
+                            # Serialize and write this item immediately.
+                            # After per_bins pop the item is tiny (~a few KB).
+                            transform_in_place(item, make_serializable)
+                            transform_in_place(
+                                item,
+                                lambda x: None if isinstance(x, float) and x != x else x,
+                            )
+                            if not _first_item:
+                                json_file.write(",\n")
+                            _item_str = json.dumps(
+                                item, indent=2, ensure_ascii=False,
+                            )
+                            json_file.write(
+                                "      "
+                                + _item_str.replace("\n", "\n      ")
+                            )
+                            _first_item = False
+                            _total_entries += 1
+                        # Batch file text buffer freed when generator exhausts.
+                        gc.collect()
+
+                    # Close the results array and object, write metadata.
+                    json_file.write("\n    ]\n  },\n")
+                    _metadata = {
+                        "evaluation_date": pd.Timestamp.now().isoformat(),
+                        "total_entries": _total_entries,
+                        "n_errors": n_errors,
+                        "config": {
+                            "start_time": self.args.start_time,
+                            "end_time": self.args.end_time,
+                            "n_days_forecast": self.args.n_days_forecast,
+                            "n_days_interval": self.args.n_days_interval,
+                        },
+                    }
+                    _meta_str = json.dumps(
+                        _metadata, indent=2, ensure_ascii=False,
+                    )
+                    json_file.write(
+                        '  "metadata": '
+                        + _meta_str.replace("\n", "\n  ")
+                        + "\n}\n"
+                    )
+
+                logger.opt(colors=True).info(
+                    f"  <dim>│</dim>  <b>{_total_entries}</b> result entr"
+                    f"{'y' if _total_entries == 1 else 'ies'} from"
+                    f" <b>{len(batch_files)}</b> batch(es)"
                 )
 
                 if _pb_count == 0:
                     # Nothing was written – remove the empty placeholder file.
                     try:
-                        os.remove(per_bins_path)
+                        os.remove(per_bins_gz_path)
                     except OSError:
                         pass
-                    per_bins_path = None  # type: ignore[assignment]
-                    logger.info("  │  No per-bins spatial data produced for this dataset")
+                    per_bins_gz_path = None  # type: ignore[assignment]
+                    logger.opt(colors=True).info("  <dim>│  No per-bins spatial data produced for this dataset</dim>")
                 else:
-                    logger.info(
-                        f"  │  Per-bins spatial data  ->  {_pb_count} raw entr"
-                        f"{'y' if _pb_count == 1 else 'ies'} written; aggregating …"
+                    gz_bytes = os.path.getsize(per_bins_gz_path)
+                    logger.opt(colors=True).info(
+                        f"  <dim>│</dim>  Per-bins  <dim>→</dim>  <b>{_pb_count}</b> entr"
+                        f"{'y' if _pb_count == 1 else 'ies'} <dim>(v2 columnar, direct)</dim>"
+                        f"  <dim>→</dim>  <b>{gz_bytes / 1e6:.1f} MB</b>"
+                        f"  <cyan>({os.path.basename(per_bins_gz_path)})</cyan>"
                     )
-                    # Compact the raw JSONL (one-per-forecast-time) into a
-                    # pre-aggregated columnar gzip JSONL whose size is bounded
-                    # regardless of the temporal extent of the evaluation.
-                    gz_path = _aggregate_per_bins_jsonl(per_bins_path)
-                    if gz_path is not None:
-                        # Replace raw JSONL with the compact version.
-                        try:
-                            os.remove(per_bins_path)
-                        except OSError:
-                            pass
-                        per_bins_path = gz_path
-                        raw_kb = _pb_count * 40 * 1024  # rough raw estimate
-                        gz_bytes = os.path.getsize(gz_path)
-                        logger.info(
-                            f"  │  Per-bins compacted  ->  "
-                            f"{gz_bytes / 1e6:.1f} MB  "
-                            f"({os.path.basename(gz_path)})"
-                        )
 
-                # ── Write results JSON before checking for errors ──────────
-                # Writing first ensures partial results are never discarded
-                # even when a handful of tasks were cancelled by the watchdog.
-                with open(dataset_json_path, "w") as json_file:
-                    json_file.write("")
-                    json.dump(
-                        {
-                            "dataset": alias,
-                            "results": results_dict,
-                            "metadata": {
-                                "evaluation_date": pd.Timestamp.now().isoformat(),
-                                "total_entries": _total_entries,
-                                "n_errors": n_errors,
-                                "config": {
-                                    "start_time": self.args.start_time,
-                                    "end_time": self.args.end_time,
-                                    "n_days_forecast": self.args.n_days_forecast,
-                                    "n_days_interval": self.args.n_days_interval,
-                                },
-                            },
-                        },
-                        json_file,
-                        indent=2,
-                        ensure_ascii=False,
-                    )
-                logger.success(
-                    f"  └  Results saved  ->  {os.path.basename(dataset_json_path)}"
+                logger.opt(colors=True).success(
+                    f"  └  <green>✓</green>  Results saved  <dim>→</dim>"
+                    f"  <cyan><b>{os.path.basename(dataset_json_path)}</b></cyan>"
                 )
 
                 # ── Error threshold check ──────────────────────────────────
@@ -1545,13 +1699,15 @@ class BaseDCEvaluation:
                         f"Results were saved to {os.path.basename(dataset_json_path)}."
                     )
                 if n_errors > 0:
-                    logger.warning(
-                        f"  └  {n_errors} task error(s) tolerated "
-                        f"(max_task_errors={_max_errors}) — results saved."
+                    logger.opt(colors=True).warning(
+                        f"  └  <yellow>⚠  {n_errors} task error(s) tolerated</yellow>"
+                        f" (max_task_errors={_max_errors}) — results saved."
                     )
 
             except Exception as exc:
-                logger.error(f"  └  [ERROR] Failed to write JSON results: {exc}")
+                logger.opt(colors=True).error(
+                    f"  <red>└  ✗  Failed to write JSON results:</red>  {exc}"
+                )
                 raise
 
         dataset_manager.file_cache.clear()
@@ -1561,11 +1717,12 @@ class BaseDCEvaluation:
         # ══════════════════════════════════════════════════════════════════
         # waiting 1s for the final log messages to flush before printing the leaderboard header
         _time.sleep(1)
-        _sep_lb = "═" * 68
+        _inner_lb = f"  🏆  LEADERBOARD GENERATION"
+        _inner_lb = f"{_inner_lb:^68}"  # pre-pad before markup
         logger.opt(colors=True).info(
-            f"\n╔{_sep_lb}╗\n"
-            f"║<bold>{'  🏆  LEADERBOARD GENERATION':^67}</bold>║\n"
-            f"╚{_sep_lb}╝"
+            f"\n<green>╔{'═' * 68}╗\n"
+            f"║<bold>{_inner_lb}</bold>║\n"
+            f"╚{'═' * 68}╝</green>  <dim>[+{_fmt_elapsed(_t0)}]</dim>"
         )
 
         if not models_results:
@@ -1700,11 +1857,35 @@ class BaseDCEvaluation:
                 f"  Persisted {len(_copied)} file(s) to {_local_lb_dir} for future leaderboards"
             )
 
-            logger.info(" Rendering leaderboard site ...")
+            logger.opt(colors=True).info("  <dim>◎</dim>  Rendering leaderboard site …")
+            # Collect the union of metrics explicitly configured across all
+            # sources in the pipeline YAML (e.g. dc2_wasabi.yaml).  This
+            # becomes the allowed_metrics whitelist injected into the
+            # leaderboard config so that only intentional metrics are shown,
+            # regardless of any extra sub-statistics emitted by metric classes.
+            _pipeline_metrics: set = set()
+            for _src in getattr(self.args, "sources", []) or []:
+                if isinstance(_src, dict):
+                    for _m in _src.get("metrics", []) or []:
+                        if isinstance(_m, str):
+                            _pipeline_metrics.add(_m)
+            # Normalise metric names: the pipeline YAML uses "rmsd" but
+            # dctools per-bins data stores the key as "rmse" (Root Mean
+            # Squared Error).  Map the YAML names to the actual data keys so
+            # the allowed_metrics whitelist matches what is in the files.
+            _METRIC_ALIASES = {"rmsd": "rmse"}
+            _pipeline_metrics = {_METRIC_ALIASES.get(m, m) for m in _pipeline_metrics}
+            _lb_cfg = dict(self.leaderboard_custom_config or {})
+            if _pipeline_metrics and "allowed_metrics" not in _lb_cfg:
+                _lb_cfg["allowed_metrics"] = sorted(_pipeline_metrics)
+                logger.debug(
+                    "  Leaderboard metric whitelist from pipeline config: {}",
+                    sorted(_pipeline_metrics),
+                )
             _render_leaderboard(
                 results_dir=_leaderboard_input_dir,
                 output_site_dir=_leaderboard_dir,
-                custom_config=self.leaderboard_custom_config,
+                custom_config=_lb_cfg if _lb_cfg else None,
             )
             # Clean up the temporary input dir
             _shutil.rmtree(_leaderboard_input_dir, ignore_errors=True)
@@ -1718,14 +1899,20 @@ class BaseDCEvaluation:
                     "enabled and that at least one batch produced spatial data)."
                 )
                 self._leaderboard_warnings.append(_msg)
-                logger.warning(f"  [LEADERBOARD INCOMPLETE] {_msg}")
+                logger.opt(colors=True).warning(
+                    f"  <yellow>⚠  [INCOMPLETE]</yellow>  maps.html not generated —"
+                    " no per-bins spatial data found; check per_bins metrics are enabled."
+                )
             else:
-                logger.success(f"  Leaderboard ready  ->  {_leaderboard_dir}")
+                logger.opt(colors=True).success(
+                    f"  <green>✓</green>  Leaderboard ready  <dim>→</dim>"
+                    f"  <cyan>{_leaderboard_dir}</cyan>  <dim>[+{_fmt_elapsed(_t0)}]</dim>"
+                )
             print("")
         except Exception as _lb_exc:
             _msg = f"Leaderboard generation failed: {_lb_exc!r}"
             self._leaderboard_warnings.append(_msg)
-            logger.warning(
-                f"  └  [WARNING] Leaderboard generation failed (non-blocking):\n"
+            logger.opt(colors=True).warning(
+                f"  <yellow>└  ⚠  Leaderboard generation failed (non-blocking):</yellow>\n"
                 f"              {_lb_exc!r}"
             )

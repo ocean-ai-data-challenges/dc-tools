@@ -19,10 +19,10 @@ class BaseConnectionConfig(ABC):
         self.params = SimpleNamespace(**kwargs)
         self.params.protocol = protocol
         # For ARGO/S3, local_root may be None - only check if provided
+        # Directory will be created lazily by download_file() when needed.
         if hasattr(self.params, "local_root") and self.params.local_root is not None:
             if not os.path.exists(self.params.local_root):
-                logger.error(f"Invalid path : {self.params.local_root}")
-                # raise FileNotFoundError()
+                logger.debug(f"local_root does not exist yet (will be created on demand): {self.params.local_root}")
 
     def to_dict(self) -> SimpleNamespace:
         """Convert configuration to dictionary."""

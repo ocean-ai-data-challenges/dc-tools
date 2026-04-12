@@ -1,11 +1,34 @@
 """Metrics evaluator module for distributed evaluation."""
 
 import gc
+import gzip
 import json
 import os
 import time
 import traceback
 import ctypes
+
+# ── glibc arena cap ──────────────────────────────────────────────────────
+# Must be set BEFORE LocalCluster forks worker processes so that glibc
+# in each fresh worker honours it from the very first malloc().  Without
+# this, glibc defaults to 8×N_CORES arenas (e.g. 176 on a 22-core
+# machine), each retaining fragmented pages that malloc_trim(0) cannot
+# reclaim — manifesting as multi-GiB "unmanaged memory" in Dask workers.
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
+# ── GLIBC_TUNABLES ──────────────────────────────────────────────────────
+# Unlike mallopt() (which we call later in _configure_mallopt_once), the
+# GLIBC_TUNABLES env var is read by glibc at *process start* — before
+# any Python code runs.  This guarantees that worker processes forked by
+# LocalCluster use the correct mmap threshold from their first allocation.
+# mallopt() only affects *future* allocations and by the time our code
+# runs, glibc may have already raised its dynamic mmap threshold.
+os.environ.setdefault(
+    "GLIBC_TUNABLES",
+    "glibc.malloc.mmap_threshold=131072"
+    ":glibc.malloc.trim_threshold=131072"
+    ":glibc.malloc.arena_max=2",
+)
 from argparse import Namespace
 from typing import Any, Callable, Dict, List, Optional
 
@@ -64,13 +87,9 @@ def _open_dataset_worker_cached(
     """Open a dataset with a small per-worker LRU cache.
 
     This primarily targets remote Zarr datasets (S3/Wasabi) where repeated
-    open calls are expensive (metadata reads). Cache size can be tuned via
-    `DCTOOLS_WORKER_DATASET_CACHE_SIZE`.
+    open calls are expensive (metadata reads).
     """
-    try:
-        cache_size = int(os.environ.get("DCTOOLS_WORKER_DATASET_CACHE_SIZE", "4"))
-    except Exception:
-        cache_size = 4
+    cache_size = 4
 
     if cache_size <= 0:
         return open_func(source), False
@@ -155,12 +174,39 @@ from dctools.utilities.misc_utils import (  # noqa: E402
 )
 
 
+def _configure_mallopt_once():
+    """Set glibc malloc parameters via mallopt() — call at least once per process.
+
+    os.environ['MALLOC_MMAP_THRESHOLD_'] only works at ptmalloc init time
+    (first malloc call after process start).  For Dask workers spawned by
+    LocalCluster(processes=True), that ship has sailed by the time our code
+    runs.  mallopt() changes the thresholds for all *future* allocations.
+
+    M_MMAP_THRESHOLD = 128 KB  -->  numpy/pandas buffers ≥128 KB are allocated
+    via mmap() and released back to the OS immediately on free (munmap),
+    preventing the glibc sbrk heap fragmentation that causes Dask's
+    "Unmanaged memory use is high" warnings.
+
+    """
+    if getattr(_configure_mallopt_once, '_done', False):
+        return
+    try:
+        _libc = ctypes.CDLL('libc.so.6')
+        _libc.mallopt(-1, 131072)   # M_TRIM_THRESHOLD  = 128 KB
+        _libc.mallopt(-3, 131072)   # M_MMAP_THRESHOLD  = 128 KB
+        _libc.mallopt(-8, 2)        # M_ARENA_MAX = 2 (belt-and-suspenders)
+        _configure_mallopt_once._done = True
+    except Exception:
+        pass
+
+
 def worker_memory_cleanup():
     """
     Manual memory cleanup to be run on workers.
 
     Performs aggressive garbage collection and memory trimming.
     """
+    _configure_mallopt_once()
     # Single gc.collect() is sufficient — 3× adds overhead per call
     gc.collect()
 
@@ -191,6 +237,101 @@ def _clear_xarray_file_cache() -> bool:
         return False
 
 
+def _log_memory_status(label: str = "") -> str:
+    """Return a one-line memory summary (system + current process RSS)."""
+    import os as _os
+    try:
+        # System-level available memory
+        with open("/proc/meminfo") as _f:
+            _mi = {}
+            for _l in _f:
+                _parts = _l.split()
+                if len(_parts) >= 2:
+                    _mi[_parts[0].rstrip(":")] = int(_parts[1])
+        _total_gb = _mi.get("MemTotal", 0) / 1048576
+        _avail_gb = _mi.get("MemAvailable", 0) / 1048576
+        _swap_used_gb = (_mi.get("SwapTotal", 0) - _mi.get("SwapFree", 0)) / 1048576
+    except Exception:
+        _total_gb = _avail_gb = _swap_used_gb = -1
+    try:
+        # Current process RSS
+        with open(f"/proc/{_os.getpid()}/status") as _f:
+            _rss_kb = 0
+            for _l in _f:
+                if _l.startswith("VmRSS:"):
+                    _rss_kb = int(_l.split()[1])
+                    break
+        _rss_mb = _rss_kb / 1024
+    except Exception:
+        _rss_mb = -1
+    _msg = (
+        f"[MEM {label}] pid={_os.getpid()} RSS={_rss_mb:.0f}MB | "
+        f"System: {_avail_gb:.1f}/{_total_gb:.1f}GB avail, "
+        f"swap_used={_swap_used_gb:.1f}GB"
+    )
+    return _msg
+
+
+def _cap_openblas_via_proc_maps(n_threads: int = 1) -> None:
+    """Cap ALL OpenBLAS libraries loaded in the current process.
+
+    NumPy's pip wheel bundles its own ``libopenblas64_p*.so`` whose symbols
+    are suffixed with ``64_`` (e.g. ``openblas_set_num_threads64_``).
+    SciPy bundles ``libscipy_openblas*.so`` with ``scipy_`` prefix
+    (e.g. ``scipy_openblas_set_num_threads``).
+    The system ``libopenblas.so`` uses un-suffixed symbols.  All three may
+    be loaded simultaneously.  Scanning ``/proc/self/maps`` lets us find
+    every loaded variant and cap them all.
+    """
+    import ctypes as _ct
+    import os as _os
+
+    # All known symbol names for setting the OpenBLAS thread count.
+    _SETTER_SYMBOLS = (
+        "openblas_set_num_threads64_",    # numpy-bundled 64-bit
+        "openblas_set_num_threads",        # standard / system
+        "scipy_openblas_set_num_threads",  # scipy-bundled (prefixed)
+        "scipy_goto_set_num_threads",      # scipy goto variant
+        "goto_set_num_threads",            # GotoBLAS legacy
+    )
+
+    _seen: set = set()
+    try:
+        with open(f"/proc/{_os.getpid()}/maps") as _f:
+            for _line in _f:
+                if "openblas" not in _line.lower():
+                    continue
+                _parts = _line.split()
+                if len(_parts) < 6:
+                    continue
+                _path = _parts[-1]
+                if not _path.startswith("/") or _path in _seen:
+                    continue
+                _seen.add(_path)
+                try:
+                    _lib = _ct.CDLL(_path)
+                except Exception:
+                    continue
+                # Try every known symbol name; cap all that exist.
+                for _set_sym in _SETTER_SYMBOLS:
+                    try:
+                        _setter = getattr(_lib, _set_sym)
+                        _setter(n_threads)
+                    except AttributeError:
+                        continue
+    except Exception:
+        pass
+
+    # Last-resort: try the linker-visible name (covers cases where
+    # /proc/maps is unavailable, e.g. Docker --pid=host).
+    for _name in ("libopenblas.so", "libopenblas64.so"):
+        try:
+            _lib = _ct.CDLL(_name)
+            _lib.openblas_set_num_threads(n_threads)
+        except Exception:
+            pass
+
+
 def _worker_full_cleanup() -> bool:
     """Full cleanup routine to run on workers via client.run()."""
     import os
@@ -204,6 +345,11 @@ def _worker_full_cleanup() -> bool:
     }
     for key, value in env_vars.items():
         os.environ[key] = value
+
+    # Actually configure glibc malloc at runtime via mallopt().
+    # os.environ['MALLOC_*'] only works before ptmalloc init — useless
+    # in a Dask worker that has already called malloc thousands of times.
+    _configure_mallopt_once()
 
     # Cap library-level threads to prevent CPU oversubscription
     # (pyinterp, BLAS, OpenMP, torch, etc.)
@@ -232,17 +378,31 @@ def _worker_full_cleanup() -> bool:
     try:
         import threadpoolctl
         threadpoolctl.threadpool_limits(limits=1)
+    except ImportError:
+        pass
     except Exception:
         pass
-    # allow 2 threads for decent decompression speed on Blosc-compressed SWOT HDF5 chunks.
+
+    # ── OpenBLAS: direct C-level cap (belt-and-suspenders) ───────────
+    # The env vars above only work if set BEFORE numpy is imported.
+    # In a Dask worker the library is already loaded, so resizing the
+    # thread pool requires a direct call into the shared library.
+    # NumPy bundles its own libopenblas64_p*.so with 64-bit integer
+    # symbols (openblas_set_num_threads64_) — different from the system
+    # libopenblas.so.  We must scan /proc/self/maps to find ALL loaded
+    # OpenBLAS variants and cap them all.
+    _cap_openblas_via_proc_maps(1)
+
+    # Blosc decompression — cap to 1 thread per worker to avoid CPU
+    # oversubscription (5 workers × 2 blosc threads = 10 extra threads).
     try:
         import blosc  # type: ignore[import-not-found]
-        blosc.set_nthreads(2)
+        blosc.set_nthreads(1)
     except Exception:
         pass
     try:
         from numcodecs import blosc as _nc_blosc  # type: ignore[import-untyped]
-        _nc_blosc.set_nthreads(2)
+        _nc_blosc.set_nthreads(1)
     except Exception:
         pass
 
@@ -358,12 +518,15 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
     except Exception:
         pass
 
+    # ── OpenBLAS: direct C-level cap as fallback ─────────────────────
+    # When threadpoolctl is not installed, resize OpenBLAS manually.
+    # Must target ALL loaded variants (system + numpy-bundled 64-bit).
+    _cap_openblas_via_proc_maps(max_threads)
+
     # ── Blosc: NOT covered by threadpoolctl — cap explicitly ──────────
-    # The Blosc compression library uses its own internal thread pool
-    # (independent of OpenMP and BLAS).  SWOT NetCDF/Zarr files are
-    # typically Blosc-compressed; allow a small number of threads (2)
-    # for decent decompression throughput without oversubscribing CPUs.
-    _blosc_threads = max(2, max_threads)
+    # Blosc decompression — cap to max_threads (1 by default) to avoid
+    # CPU oversubscription (N workers × K blosc threads adds up fast).
+    _blosc_threads = max(1, max_threads)
     try:
         import blosc
         blosc.set_nthreads(_blosc_threads)
@@ -409,14 +572,12 @@ def compute_metric(
     """
     try:
         # ── Prevent CPU oversubscription ──
-        # Observation datasets (SWOT, saral, …) trigger pyinterp
-        # bilinear interpolation which is CPU-bound C++ code that
-        # releases the GIL.  With 8 workers × 2 threads × 4 pyinterp
-        # threads the machine (16 physical cores) gets massively
-        # oversubscribed -> 100 % CPU thrashing.
-        # Cap library-level threads to 1 so only the Dask thread
-        # concurrency controls parallelism.
-        _cap_worker_threads(1)
+        # Cap C-library threads (pyinterp, BLAS, OpenMP, Blosc) to the
+        # per-dataset value injected by _evaluate_batch from the YAML
+        # key ``c_lib_threads`` (default 1).
+        _c_lib_threads = int(entry.get("_c_lib_threads", 1))
+        _cap_worker_threads(_c_lib_threads)
+        logger.debug(_log_memory_status("task-start"))
         _t0_total = time.perf_counter()
         forecast_reference_time = entry.get("forecast_reference_time")
         lead_time = entry.get("lead_time")
@@ -557,6 +718,34 @@ def compute_metric(
                 ds = ds[keep_data_vars]
             return ds
 
+        # ── Slim prediction to variables the metric actually needs ─────
+        # When the reference is an observation dataset, the metric only
+        # compares variables that share a standardized name (e.g. SWOT
+        # only uses SSH --> prediction only needs 'zos').  Dropping
+        # unused 3-D fields (so, thetao, uo, vo) avoids materialising
+        # hundreds of MiB of data that would never be evaluated.
+        if ref_is_observation and hasattr(pred_data, "data_vars"):
+            _metric_vars = _required_obs_vars()
+            if _metric_vars:
+                from dctools.data.coordinates import get_standardized_var_name as _std_vname
+                _std_needed = {_std_vname(v) for v in _metric_vars}
+                _std_needed.discard(None)
+                if _std_needed:
+                    _pred_keep_for_ref = [
+                        v for v in pred_data.data_vars
+                        if _std_vname(str(v)) in _std_needed
+                    ]
+                    if (
+                        _pred_keep_for_ref
+                        and len(_pred_keep_for_ref) < len(pred_data.data_vars)
+                    ):
+                        logger.debug(
+                            f"[{ref_alias}] Slimming prediction: keeping "
+                            f"{_pred_keep_for_ref} (dropped "
+                            f"{sorted(set(pred_data.data_vars) - set(_pred_keep_for_ref))})"
+                        )
+                        pred_data = pred_data[_pred_keep_for_ref]
+
         if ref_source is not None:
             if ref_is_observation:
                 # Observation entry is a dict with connection metadata;
@@ -641,7 +830,7 @@ def compute_metric(
                             _xr_argo.open_zarr(
                                 p,
                                 consolidated=True,
-                                chunks=None,
+                                chunks={},
                             )
                             for p in _zarr_paths
                         ]
@@ -695,8 +884,8 @@ def compute_metric(
                                 _mask = (_t_vals >= _t0_np) & (_t_vals <= _t1_np)
                                 ref_data = ref_data.isel({n_points_dim: _mask})
 
-                        # With chunks=None the data is already NumPy;
-                        # .compute() is only needed if still dask-backed.
+                        # With chunks={} the data is dask-backed;
+                        # .compute() materialises only the time-filtered slice.
                         if any(
                             hasattr(ref_data[v].data, "dask")
                             for v in ref_data.variables
@@ -809,45 +998,125 @@ def compute_metric(
                                     ).astype("datetime64[ns]")
 
                             if _time_vals is None:
-                                # Fallback: load time from zarr (expensive).
+                                # Fallback: build sidecar .npy by streaming
+                                # from zarr in chunks (no full-array spike).
                                 _time_var = ref_data.coords.get("time")
                                 if _time_var is not None:
-                                    if hasattr(_time_var, "compute"):
-                                        _time_vals = _time_var.compute(
-                                            scheduler="synchronous"
-                                        ).values
-                                    else:
-                                        _time_vals = _time_var.values
-                                    _time_vals = np.asarray(_time_vals)
-                                    if np.issubdtype(
-                                        _time_vals.dtype, np.integer
-                                    ):
-                                        _time_vals = _time_vals.astype(
-                                            "datetime64[ns]"
+                                    _n_total = _time_var.sizes.get(
+                                        n_points_dim,
+                                        _time_var.size,
+                                    )
+                                    try:
+                                        _time_mmap = np.lib.format.open_memmap(
+                                            _time_npy,
+                                            mode="w+",
+                                            dtype="datetime64[ns]",
+                                            shape=(_n_total,),
                                         )
-                                    elif not np.issubdtype(
-                                        _time_vals.dtype, np.datetime64
-                                    ):
-                                        _time_vals = pd.to_datetime(
-                                            _time_vals
-                                        ).values
+                                        _CSZ = 100_000
+                                        for _s in range(0, _n_total, _CSZ):
+                                            _e = min(_s + _CSZ, _n_total)
+                                            _chunk = _time_var.isel(
+                                                {n_points_dim: slice(_s, _e)}
+                                            )
+                                            _cv = (
+                                                _chunk.compute(
+                                                    scheduler="synchronous"
+                                                ).values
+                                                if hasattr(_chunk, "compute")
+                                                else _chunk.values
+                                            )
+                                            _cv = np.asarray(_cv)
+                                            if np.issubdtype(
+                                                _cv.dtype, np.integer
+                                            ):
+                                                _cv = _cv.astype(
+                                                    "datetime64[ns]"
+                                                )
+                                            elif not np.issubdtype(
+                                                _cv.dtype, np.datetime64
+                                            ):
+                                                _cv = pd.to_datetime(
+                                                    _cv
+                                                ).values
+                                            _time_mmap[_s:_e] = _cv
+                                            del _cv, _chunk
+                                        del _time_mmap
+                                        # Now mmap the freshly-built sidecar.
+                                        _time_vals = np.load(
+                                            _time_npy, mmap_mode="r"
+                                        )
+                                        logger.info(
+                                            "Built time_index.npy sidecar "
+                                            "(%d pts) for %s",
+                                            _n_total,
+                                            _time_npy,
+                                        )
+                                    except (OSError, PermissionError):
+                                        # Cannot write sidecar (read-only FS);
+                                        # fall back to in-memory load.
+                                        logger.warning(
+                                            "Cannot write time_index.npy; "
+                                            "loading time array in memory."
+                                        )
+                                        if hasattr(_time_var, "compute"):
+                                            _time_vals = _time_var.compute(
+                                                scheduler="synchronous"
+                                            ).values
+                                        else:
+                                            _time_vals = _time_var.values
+                                        _time_vals = np.asarray(_time_vals)
+                                        if np.issubdtype(
+                                            _time_vals.dtype, np.integer
+                                        ):
+                                            _time_vals = _time_vals.astype(
+                                                "datetime64[ns]"
+                                            )
+                                        elif not np.issubdtype(
+                                            _time_vals.dtype, np.datetime64
+                                        ):
+                                            _time_vals = pd.to_datetime(
+                                                _time_vals
+                                            ).values
 
                             if _time_vals is not None:
-                                # The shared zarr is always time-sorted
-                                # (see preprocess_batch_obs_files), so
-                                # use contiguous slice indexing — reads
-                                # ONLY the relevant chunks instead of
-                                # scanning all 107 M points.
-                                _i0 = int(
-                                    np.searchsorted(
-                                        _time_vals, _t0, side="left",
-                                    )
-                                )
-                                _i1 = int(
-                                    np.searchsorted(
-                                        _time_vals, _t1, side="right",
-                                    )
-                                )
+                                # ── Binary-search time filter (O(log N)) ─
+                                # preprocess_batch_obs_files writes mini-
+                                # zarrs in time order and concatenates them
+                                # in that order --> time_index.npy is
+                                # monotonically non-decreasing.
+                                # Corrupt 1970-epoch timestamps (if any)
+                                # are datetime64 values < any valid 2024
+                                # date, so they sort first and searchsorted
+                                # for _t0 ≥ 2024 skips them correctly.
+                                #
+                                # CRITICAL: a full boolean scan
+                                #   (_time_vals >= _t0) & (_time_vals <= _t1)
+                                # forces the OS to page-in ALL N elements of
+                                # the mmap (3.64 GiB for a 455 M-point
+                                # batch).  With 5 concurrent workers each
+                                # mmapping the same file, each worker's RSS
+                                # grows by ~3.64 GiB "unmanaged" memory,
+                                # triggering 95 % worker kills before any
+                                # metric is computed.
+                                # searchsorted uses ~28 comparisons (binary
+                                # bisection) --> only ~112 KB of pages touched
+                                # per worker, eliminating the memory spike.
+                                _t0_ns = np.datetime64(_t0, "ns")
+                                _t1_ns = np.datetime64(_t1, "ns")
+                                _i0 = int(np.searchsorted(
+                                    _time_vals, _t0_ns, side="left"
+                                ))
+                                _i1 = int(np.searchsorted(
+                                    _time_vals, _t1_ns, side="right"
+                                ))
+
+                                del _time_vals
+                                _time_vals = None
+
+                                if _i0 >= _i1:
+                                    _i0, _i1 = 0, 0
+
                                 ref_data = ref_data.isel(
                                     {
                                         n_points_dim: slice(_i0, _i1)
@@ -862,9 +1131,16 @@ def compute_metric(
                             if reduce_precision:
                                 ref_data = to_float32(ref_data)
 
-                            ref_data = ref_data.compute(
-                                scheduler="synchronous"
-                            )
+                            # ── Keep ref_data lazy (dask-backed) ───────
+                            # Do NOT call .compute() here. The Class4
+                            # metric's xr_to_obs_dataframe() streams
+                            # over n_points in 500 K-point chunks when
+                            # the dataset is dask-backed — peak worker
+                            # RSS ≈ one chunk (~16 MB) instead of the
+                            # full slice (potentially several GiB).
+                            # Materialising 151 M obs points × 32 B =
+                            # 4.8 GiB would leave no headroom in a 6 GB
+                            # worker, causing OOM on large SWOT batches.
 
                             if ref_data.sizes.get(
                                 n_points_dim, 0
@@ -1054,6 +1330,37 @@ def compute_metric(
                 "lead_time": lead_time,
                 "valid_time": valid_time,
             }
+
+        # ── Surface-depth selection for surface-only observation refs ──
+        # When the reference is a surface-only observation (SWOT, SARAL,
+        # Jason3) — i.e. no "depth" dimension in ref_data — there is no
+        # point loading all 21 depth levels of the prediction.
+        #
+        # Concretely for SWOT: glonet zos has shape (10, 21, 672, 1440).
+        # After variable slimming we keep only zos, but still carry
+        # 21 depth levels --> 10 × 21 × 672 × 1440 × 4 B = 813 MB per
+        # worker call to _compute_with_timeout.  With 3 workers doing
+        # this simultaneously that is 2.4 GiB of "unmanaged" memory just
+        # from the prediction, before any metric computation starts.
+        #
+        # Slicing to depth=0 (lazy, O(1)) reduces this to 38.7 MB —
+        # a 21× reduction — without any loss of scientific accuracy
+        # because SWOT / SARAL / Jason3 only measure surface SSH.
+        #
+        # Argo-profile refs DO have a "depth" coord --> skip this path.
+        _ref_has_depth_dim = (
+            ref_data is not None
+            and hasattr(ref_data, "dims")
+            and "depth" in ref_data.dims
+        )
+        if (
+            ref_is_observation
+            and not _ref_has_depth_dim
+            and pred_data is not None
+            and "depth" in getattr(pred_data, "dims", [])
+        ):
+            pred_data = pred_data.isel(depth=0)
+
         # Compute once after transforms (safe & memory-friendlier).
         if hasattr(pred_data, 'chunks') and pred_data.chunks:
             # Use a hard Python-level timeout instead of bare .compute().
@@ -1072,8 +1379,22 @@ def compute_metric(
 
         if ref_data is not None and ref_transform is not None:
             ref_data = ref_transform(ref_data)
-            # Re-materialize if transform produced new lazy arrays
-            if hasattr(ref_data, 'chunks') and ref_data.chunks:
+            # Apply float32 reduction lazily *before* compute so the cast is
+            # fused into the single compute pass — no separate in-memory copy
+            # of the materialised arrays is needed afterwards.
+            if (
+                reduce_precision and ref_data is not None
+                and hasattr(ref_data, 'chunks') and ref_data.chunks
+                and not (ref_is_observation and _used_prefetch)
+            ):
+                ref_data = to_float32(ref_data)
+            # Re-materialize if transform produced new lazy arrays —
+            # but SKIP for observation shared-zarr refs: those must stay
+            # dask-backed so the metric's chunk streaming works.
+            if (
+                hasattr(ref_data, 'chunks') and ref_data.chunks
+                and not (ref_is_observation and _used_prefetch)
+            ):
                 _s3_timeout = int(os.environ.get("DCTOOLS_S3_COMPUTE_TIMEOUT", "90"))
                 ref_data = _compute_with_timeout(
                     ref_data, timeout_s=_s3_timeout, scheduler="synchronous"
@@ -1081,8 +1402,11 @@ def compute_metric(
 
         if reduce_precision:
             # pred_data is already float32.
+            # For ref_data: if it was dask-backed above, the cast was already
+            # applied lazily before compute (no-op here for the common path).
+            # Fallback for paths that produced a non-dask ref (e.g. CMEMS).
             if ref_data is not None:
-                ref_data = to_float32(ref_data)
+                ref_data = to_float32(ref_data)  # no-op when already float32
 
         # Force reloading if memory becomes an issue? No, trust Dask, but do explicit GC
         _clear_xarray_file_cache()
@@ -1133,7 +1457,10 @@ def compute_metric(
                 f"{n_points_raw} obs points — starting metric computation…"
             )'''
 
-            _cap_worker_threads(1)
+            # Re-cap C-library threads before metric computation using
+            # the per-dataset value from the YAML config.
+            _cap_worker_threads(_c_lib_threads)
+            logger.debug(_log_memory_status(f"pre-metric {ref_alias} {n_points_raw}pts"))
 
             with dask.config.set(scheduler='synchronous'):
                 results = list_metrics[0].compute(
@@ -1159,7 +1486,7 @@ def compute_metric(
             # results = {}
             results = {}
             # ── Re-cap thread pools before metric computation (grid path) ──
-            _cap_worker_threads(1)
+            _cap_worker_threads(_c_lib_threads)
 
             # Context manager for the loop
             with dask.config.set(scheduler='synchronous'):
@@ -1304,6 +1631,7 @@ def compute_metric(
             "ref_alias": ref_alias,
             "result": None,
             "error": repr(exc),
+            "error_traceback": traceback.format_exc(),
         }
 
     finally:
@@ -1375,6 +1703,7 @@ class Evaluator:
         restart_frequency: int = 1,
         max_p_memory_increase: float = 0.2, # 20% increase default
         max_worker_memory_fraction: float = 0.85,
+        resume: bool = False,
     ):
         """
         Initializes the evaluator.
@@ -1407,6 +1736,8 @@ class Evaluator:
             max_worker_memory_fraction (float, optional): Absolute threshold (fraction of
                 Dask memory_limit) beyond which restart is triggered.
                 Defaults to 0.85 (85%).
+            resume (bool, optional): When True, skip batches whose result file
+                already exists and passes integrity checks.  Defaults to False.
         """
         self.dataset_manager = dataset_manager
         self.dataset_processor = dataset_processor
@@ -1415,6 +1746,7 @@ class Evaluator:
         self.dask_cfgs_by_dataset = dask_cfgs_by_dataset or {}
         self.reduce_precision = reduce_precision
         self.surface_only = surface_only
+        self.resume = resume
         self.restart_workers_per_batch = restart_workers_per_batch
         self.restart_frequency = restart_frequency
         self.max_p_memory_increase = max_p_memory_increase
@@ -1424,6 +1756,7 @@ class Evaluator:
         self.results_dir = results_dir
         # Track the current cluster sizing so we know when to reconfigure.
         self._current_cluster_ref: Optional[str] = None
+        self._workers_initialized: bool = False
 
         (
             self.ref_managers,
@@ -1448,10 +1781,14 @@ class Evaluator:
         if self._current_cluster_ref == ref_alias:
             return  # already configured for this dataset
 
+        _first_call = not self._workers_initialized
+
         desired = self.dask_cfgs_by_dataset.get(ref_alias)
         if not desired:
             # No per-dataset override -> keep current cluster as-is.
             self._current_cluster_ref = ref_alias
+            if _first_call:
+                self._init_workers()
             return
 
         # Read desired sizing.
@@ -1479,6 +1816,8 @@ class Evaluator:
                 ):
                     # Already matches -> nothing to do.
                     self._current_cluster_ref = ref_alias
+                    if _first_call:
+                        self._init_workers()
                     return
             except Exception:
                 pass  # cannot query -> proceed with reconfiguration
@@ -1489,29 +1828,69 @@ class Evaluator:
         )
 
         # Tear down existing cluster.
-        # Silence distributed.worker during teardown: workers that still have
-        # an in-flight heartbeat will log a CommClosedError when the scheduler
-        # stream is closed.  This is expected and non-fatal.
-        # We suppress the logger *and* wait a short time after close() so that
-        # any in-flight async heartbeats complete while the logger is still
-        # silenced.
+        # During teardown a race exists in Dask's Tornado layer: the
+        # scheduler's TCP listener is stopped while workers still have
+        # in-flight connections, producing harmless ValueError /
+        # CommClosedError / "Scheduler unaware" warnings.  We suppress
+        # them by temporarily raising the level of the `distributed`
+        # logger (which has propagate=False and its own StreamHandler).
         import logging as _logging
         import time as _time
-        _dist_logger = _logging.getLogger("distributed")
-        _dist_worker_logger = _logging.getLogger("distributed.worker")
-        _dist_level = _dist_logger.level
-        _dist_worker_level = _dist_worker_logger.level
-        _dist_logger.setLevel(_logging.CRITICAL)
-        _dist_worker_logger.setLevel(_logging.CRITICAL)
+
+        # Raise the `distributed` tree to ERROR during teardown so
+        # INFO/WARNING chatter ("Connection closed", "Scheduler was
+        # unaware") is silenced.  Also cover `tornado.application`.
+        _loggers_to_hush = {
+            n: _logging.getLogger(n)
+            for n in ("distributed", "distributed.core",
+                      "distributed.worker", "tornado.application")
+        }
+        _saved_levels = {n: lg.level for n, lg in _loggers_to_hush.items()}
+        # Also raise handler levels (Dask adds a StreamHandler on `distributed`).
+        _saved_handler_levels: list = []
+        for lg in _loggers_to_hush.values():
+            lg.setLevel(_logging.ERROR)
+            for h in lg.handlers:
+                _saved_handler_levels.append((h, h.level))
+                h.setLevel(_logging.ERROR)
+
         try:
-            self.dataset_processor.close()
-            # Give in-flight heartbeat RPCs time to fail silently.
+            _client = getattr(self.dataset_processor, "client", None)
+            _cluster = getattr(self.dataset_processor, "cluster", None)
+            # 1. Retire workers — waits for in-flight tasks to finish.
+            if _client is not None:
+                try:
+                    _client.retire_workers(close_workers=True)
+                except Exception:
+                    pass
+            # 2. Close the Client (disconnects from scheduler).
+            if _client is not None:
+                try:
+                    _client.close()
+                except Exception:
+                    pass
+            # 3. Brief pause to let the Tornado event loop drain.
             _time.sleep(1.0)
+            # 4. Close the Cluster (stops scheduler + nannies).
+            if _cluster is not None:
+                try:
+                    _cluster.close()
+                except Exception:
+                    pass
+            # Mark as already closed so DatasetProcessor.close()
+            # doesn't try again.
+            self.dataset_processor.client = None
+            self.dataset_processor.cluster = None
+            self.dataset_processor._owns_client = False
+            # 5. Final drain for any residual async callbacks.
+            _time.sleep(0.5)
         except Exception:
             pass
         finally:
-            _dist_logger.setLevel(_dist_level)
-            _dist_worker_logger.setLevel(_dist_worker_level)
+            for n, lg in _loggers_to_hush.items():
+                lg.setLevel(_saved_levels[n])
+            for h, lvl in _saved_handler_levels:
+                h.setLevel(lvl)
 
         # Create a fresh DatasetProcessor.
         self.dataset_processor = DatasetProcessor(
@@ -1528,13 +1907,31 @@ class Evaluator:
         except Exception:
             pass
 
+        # Configure mallopt + thread caps on the new workers.
+        try:
+            self.dataset_processor.client.run(_worker_full_cleanup)
+        except Exception:
+            pass
+
+        self._workers_initialized = True
         self._current_cluster_ref = ref_alias
         # Reset baseline memory after cluster rebuild.
         self.baseline_memory = None
+        logger.debug(_log_memory_status(f"post-reconfig-{ref_alias}"))
         logger.debug(
             f"Dask cluster reconfigured for '{ref_alias}': "
             f"dashboard={getattr(self.dataset_processor.client, 'dashboard_link', 'N/A')}"
         )
+
+    def _init_workers(self) -> None:
+        """Run _worker_full_cleanup on all workers (mallopt, thread caps, env vars)."""
+        _client = getattr(self.dataset_processor, "client", None)
+        if _client is not None:
+            try:
+                _client.run(_worker_full_cleanup)
+            except Exception:
+                pass
+        self._workers_initialized = True
 
     def log_cluster_memory_usage(self, batch_idx: int):
         """Log memory usage of each Dask worker."""
@@ -1605,6 +2002,43 @@ class Evaluator:
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _validate_batch_file(
+        batch_file: str, expected_items: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Check if a batch result file exists and is valid.
+
+        Validates:
+        1. File exists
+        2. Gzip decompression succeeds
+        3. JSON parsing succeeds and yields a list
+        4. Item count matches expected batch size
+
+        Returns the parsed list of result dicts if valid, None otherwise.
+        """
+        if not os.path.isfile(batch_file):
+            return None
+        try:
+            with gzip.open(batch_file, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                logger.warning(f"Checkpoint invalid (not a list): {batch_file}")
+                return None
+            if len(data) != expected_items:
+                logger.warning(
+                    f"Checkpoint invalid (expected {expected_items} items, "
+                    f"got {len(data)}): {batch_file}"
+                )
+                return None
+            return data
+        except (gzip.BadGzipFile, json.JSONDecodeError, OSError, EOFError) as exc:
+            logger.warning(f"Checkpoint corrupt ({exc!r}): {batch_file}")
+            try:
+                os.remove(batch_file)
+            except OSError:
+                pass
+            return None
+
     def evaluate(self) -> List[Dict[str, Any]]:
         """
         Evaluates metrics on dataloader data for each reference.
@@ -1639,13 +2073,34 @@ class Evaluator:
         # error.  Deleting the directory at the start of each run forces a
         # clean rebuild from the full set of observation files.
         _obs_shared_root = _results_path / "obs_batch_shared"
-        if _obs_shared_root.exists():
+        if _obs_shared_root.exists() and not self.resume:
             import shutil as _shutil_obs
             try:
                 _shutil_obs.rmtree(_obs_shared_root, ignore_errors=True)
                 logger.debug(f"Purged stale obs_batch_shared cache: {_obs_shared_root}")
             except Exception:
                 pass
+        elif _obs_shared_root.exists() and self.resume:
+            # Resume: keep complete shared zarrs, but clean up incomplete
+            # batch dirs (mini-zarrs without a merged batch_shared.zarr).
+            import shutil as _shutil_obs
+            _cleaned_incomplete = 0
+            for _ds_dir in _obs_shared_root.iterdir():
+                if not _ds_dir.is_dir():
+                    continue
+                for _batch_dir in _ds_dir.iterdir():
+                    if not _batch_dir.is_dir():
+                        continue
+                    if not (_batch_dir / "batch_shared.zarr").is_dir():
+                        _shutil_obs.rmtree(_batch_dir, ignore_errors=True)
+                        _cleaned_incomplete += 1
+            if _cleaned_incomplete:
+                logger.info(
+                    f"Resume: cleaned {_cleaned_incomplete} incomplete "
+                    f"obs_batch_shared dir(s)."
+                )
+            else:
+                logger.debug("Resume mode: keeping obs_batch_shared cache.")
 
         try:
             # ── Pre-materialise batches to know total count ───────────
@@ -1661,12 +2116,135 @@ class Evaluator:
                 f"{sum(len(b) for b in _all_batches)} total tasks"
             )
 
+            # ── Resume: count how many batches already have valid checkpoints
+            if self.resume:
+                pred_alias_for_count = self.dataloader.pred_alias
+                _n_cached = 0
+                for _bi, _bb in enumerate(_all_batches):
+                    _bf = os.path.join(
+                        self.results_dir or ".",
+                        f"results_{pred_alias_for_count}_batch_{_bi}.json.gz",
+                    )
+                    if os.path.isfile(_bf):
+                        _n_cached += 1
+                if _n_cached:
+                    logger.info(
+                        f"Resume: {_n_cached}/{_total_batches} batch checkpoint(s) "
+                        f"found — will validate and skip completed batches."
+                    )
+                else:
+                    logger.info("Resume: no existing checkpoints found, starting fresh.")
+
             _prev_ref_alias: Optional[str] = None
             _ref_aliases_ordered: List[str] = list(
                 dict.fromkeys(
                     b[0].get("ref_alias") for b in _all_batches if b and b[0].get("ref_alias")  # type: ignore[misc]
                 )
             )
+
+            # ── Per-ref and global tracking for summary ───────────────
+            _ref_stats: Dict[str, Dict[str, Any]] = {}
+            _eval_t0 = time.time()
+
+            def _dw(s: str) -> int:
+                """Display width of *s*, counting known wide symbols as 2.
+
+                Most terminals render East Asian 'W'/'F' chars as 2 cells.
+                Ambiguous ('A') chars are generally 1 cell in Western locales,
+                except a few symbols (◆, ★, ✔, …) that many terminals and
+                mono fonts render wide. We maintain an explicit set so that
+                box-drawing chars (also 'A') are correctly counted as 1.
+                """
+                import unicodedata as _ud
+                # Symbols observed to render as 2 cells in common terminals.
+                _WIDE = frozenset()  # emoji (🏆📊⏳…) are already 'W'/'F'
+                w = 0
+                for ch in s:
+                    eaw = _ud.east_asian_width(ch)
+                    if eaw in ('W', 'F') or ch in _WIDE:
+                        w += 2
+                    else:
+                        w += 1
+                return w
+
+            def _pad(text: str, width: int) -> str:
+                """Left-align *text* in *width* display columns."""
+                return text + ' ' * max(0, width - _dw(text))
+
+            _ANSI_RE = __import__("re").compile(r"\033\[[0-9;]*m")
+
+            def _pad_ansi(text: str, width: int) -> str:
+                """Like _pad but ignores ANSI escape sequences when measuring width."""
+                visible = _ANSI_RE.sub("", text)
+                return text + ' ' * max(0, width - _dw(visible))
+
+            def _print_ref_summary(alias: str) -> None:
+                """Print a summary box for a completed reference dataset."""
+                st = _ref_stats.get(alias)
+                if st is None:
+                    return
+                elapsed = time.time() - st["t0"]
+                st["elapsed"] = elapsed  # freeze for global summary
+                m, s = divmod(int(elapsed), 60)
+                h, m = divmod(m, 60)
+                _w = 60
+                _M = "\033[1;35m"   # bold magenta – summary box
+                _Y = "\033[33m"     # yellow – warnings
+                _R0 = "\033[0m"     # reset
+
+                n_ok    = st["n_tasks"] - st["n_errors"] - st["n_skipped"]
+                n_pts   = st["n_points"]
+                n_err   = st["n_errors"]
+                n_skip  = st["n_skipped"]
+
+                # Period covered (earliest → latest valid_time seen)
+                _t_min  = st.get("t_min")
+                _t_max  = st.get("t_max")
+                if _t_min and _t_max:
+                    try:
+                        _ts_min = str(pd.Timestamp(_t_min).date())
+                        _ts_max = str(pd.Timestamp(_t_max).date())
+                        _period = f"{_ts_min}  →  {_ts_max}"
+                    except Exception:
+                        _period = f"{_t_min}  →  {_t_max}"
+                else:
+                    _period = "N/A"
+
+                # Human-readable point count
+                if n_pts >= 1_000_000:
+                    _pts_str = f"{n_pts / 1_000_000:.2f} M"
+                elif n_pts >= 1_000:
+                    _pts_str = f"{n_pts / 1_000:.1f} K"
+                else:
+                    _pts_str = str(n_pts)
+
+                _err_color  = _Y if n_err  > 0 else ""
+                _skip_color = _Y if n_skip > 0 else ""
+
+                _n_batches   = st["n_batches"]
+                _n_tasks     = st["n_tasks"]
+                _line_period  = f"   Period            : {_period}"
+                _line_points  = f"   Obs points        : {_pts_str}"
+                _line_batches = f"   Batches           : {_n_batches}"
+                _line_tasks   = f"   Tasks  ok / total : {n_ok} / {_n_tasks}"
+                _line_elapsed = f"   Elapsed           : {h}h {m:02d}m {s:02d}s"
+                _sep_w        = "─" * _w
+
+                print(f"    {_M}┌{_sep_w}┐{_R0}")
+                print(f"    {_M}│{_pad('  ✔  Summary  ─  ' + str(alias).upper(), _w)}│{_R0}")
+                print(f"    {_M}│{_sep_w}│{_R0}")
+                print(f"    {_M}│{_pad(_line_period,  _w)}│{_R0}")
+                print(f"    {_M}│{_pad(_line_points,  _w)}│{_R0}")
+                print(f"    {_M}│{_pad(_line_batches, _w)}│{_R0}")
+                print(f"    {_M}│{_pad(_line_tasks,   _w)}│{_R0}")
+                if n_err > 0:
+                    _line_err = f"   {_err_color}Errors             : {n_err}{_R0}"
+                    print(f"    {_M}│{_pad_ansi(_line_err, _w)}│{_R0}")
+                if n_skip > 0:
+                    _line_skip = f"   {_skip_color}Skipped (no data)  : {n_skip}{_R0}"
+                    print(f"    {_M}│{_pad_ansi(_line_skip, _w)}│{_R0}")
+                print(f"    {_M}│{_pad(_line_elapsed, _w)}│{_R0}")
+                print(f"    {_M}└{_sep_w}┘{_R0}")
 
             for batch_idx, batch in enumerate(_all_batches):
                 _next_raw = _all_batches[batch_idx + 1] if batch_idx + 1 < _total_batches else None
@@ -1676,6 +2254,10 @@ class Evaluator:
 
                 # Print the reference banner the first time a new reference is encountered.
                 if ref_alias != _prev_ref_alias:
+                    # ── Summary for the PREVIOUS ref dataset ──────────
+                    if _prev_ref_alias is not None:
+                        _print_ref_summary(_prev_ref_alias)
+
                     _n_ref_total = len(_ref_aliases_ordered)
                     _n_ref_current = (
                         _ref_aliases_ordered.index(ref_alias) + 1
@@ -1683,12 +2265,25 @@ class Evaluator:
                         else "?"
                     )
                     _sep_ref = "─" * 60
-                    print(f"    ┌{_sep_ref}┐")
-                    print(
-                        f"    │  ◆  Reference dataset ({_n_ref_current}/{_n_ref_total}) :  {str(ref_alias).upper():<28}│"  # noqa: E501
-                    )
-                    print(f"    └{_sep_ref}┘")
+                    _C = "\033[1;36m"   # bold cyan – reference dataset
+                    _R0 = "\033[0m"
+                    print(f"    {_C}┌{_sep_ref}┐{_R0}")
+                    _ref_line = f"  ◆  Reference dataset ({_n_ref_current}/{_n_ref_total}) :  {str(ref_alias).upper()}"
+                    print(f"    {_C}│{_pad(_ref_line, 60)}│{_R0}")
+                    print(f"    {_C}└{_sep_ref}┘{_R0}")
                     _prev_ref_alias = ref_alias
+
+                    # ── Initialise tracking for the new ref ───────────
+                    _ref_stats[ref_alias] = {
+                        "t0": time.time(),
+                        "n_batches": 0,
+                        "n_tasks": 0,
+                        "n_points": 0,
+                        "n_errors": 0,
+                        "n_skipped": 0,
+                        "t_min": None,
+                        "t_max": None,
+                    }
 
                 # ── Reconfigure cluster if this ref dataset needs
                 #    different sizing (workers / threads / memory) ──
@@ -1708,12 +2303,63 @@ class Evaluator:
                 # Build look-ahead context for the NEXT batch (if any).
                 # _evaluate_batch will launch the background download during
                 # its as_completed loop (workers busy -> driver has spare CPU).
+                # Look-ahead depth: download preds for the next N batches
+                # (not just N+1) so fast compute never stalls on S3.
                 _la_next = None
                 if _next_raw is not None:
+                    # Gather pred URLs from the next few batches (same ref only)
+                    _LA_DEPTH = 3  # look ahead up to 3 batches
+                    _la_extra_batches: List[List[Dict[str, Any]]] = []
+                    for _lk in range(1, _LA_DEPTH + 1):
+                        _fi = batch_idx + _lk
+                        if _fi < _total_batches:
+                            _fb = _all_batches[_fi]
+                            if _fb and _fb[0].get("ref_alias") == ref_alias:
+                                _la_extra_batches.append(_fb)
+                            else:
+                                break  # different ref → stop
+                        else:
+                            break
                     _la_next = {
                         'batch': _next_raw,
                         'ref_alias': _next_raw[0].get("ref_alias") if _next_raw else None,
+                        'extra_pred_batches': _la_extra_batches[1:] if len(_la_extra_batches) > 1 else [],
                     }
+
+                # ── Resume: try to load existing batch checkpoint ─────
+                batch_file = os.path.join(
+                    self.results_dir or ".", f"results_{pred_alias}_batch_{batch_idx}.json.gz"
+                )
+                if self.resume:
+                    _cached = self._validate_batch_file(batch_file, expected_items=len(batch))
+                    if _cached is not None:
+                        logger.info(
+                            f"Resume: skipping batch {batch_idx}/{_total_batches} "
+                            f"({ref_alias}, {len(batch)} tasks) — checkpoint valid"
+                        )
+                        serial_results = _cached
+                        # Accumulate stats from the cached results
+                        if ref_alias in _ref_stats:
+                            _st = _ref_stats[ref_alias]
+                            _st["n_batches"] += 1
+                            _st["n_tasks"] += len(batch)
+                            for _r in serial_results:
+                                if not isinstance(_r, dict):
+                                    continue
+                                if _r.get("error"):
+                                    _st["n_errors"] += 1
+                                elif _r.get("n_points", 0) == 0:
+                                    _st["n_skipped"] += 1
+                                else:
+                                    _st["n_points"] += int(_r.get("n_points", 0))
+                                _vt = _r.get("valid_time")
+                                if _vt is not None:
+                                    if _st["t_min"] is None or _vt < _st["t_min"]:
+                                        _st["t_min"] = _vt
+                                    if _st["t_max"] is None or _vt > _st["t_max"]:
+                                        _st["t_max"] = _vt
+                        del _cached, serial_results
+                        continue
 
                 batch_results = self._evaluate_batch(
                     batch, pred_alias, ref_alias,  # type: ignore[arg-type]
@@ -1732,17 +2378,75 @@ class Evaluator:
                     if res is not None
                 ]
 
-                # Save batch by batch
-                batch_file = os.path.join(
-                    self.results_dir or ".", f"results_{pred_alias}_batch_{batch_idx}.json"
-                )
-                with open(batch_file, "w") as f:
-                    json.dump(serial_results, f, indent=2, ensure_ascii=False)
+                # Save batch by batch (gzip: 15-20× smaller than plain JSON)
+                with gzip.open(batch_file, "wt", encoding="utf-8", compresslevel=6) as f:
+                    json.dump(serial_results, f, separators=(',', ':'), ensure_ascii=False)
+
+                # ── Accumulate per-ref stats ─────────────────────────
+                if ref_alias in _ref_stats:
+                    _st = _ref_stats[ref_alias]
+                    _st["n_batches"] += 1
+                    _st["n_tasks"] += len(batch)
+                    for _r in serial_results:
+                        if not isinstance(_r, dict):
+                            continue
+                        if _r.get("error"):
+                            _st["n_errors"] += 1
+                        elif _r.get("n_points", 0) == 0:
+                            _st["n_skipped"] += 1
+                        else:
+                            _st["n_points"] += int(_r.get("n_points", 0))
+                        # Track period via valid_time
+                        _vt = _r.get("valid_time")
+                        if _vt is not None:
+                            if _st["t_min"] is None or _vt < _st["t_min"]:
+                                _st["t_min"] = _vt
+                            if _st["t_max"] is None or _vt > _st["t_max"]:
+                                _st["t_max"] = _vt
 
                 # CRITICAL: Explicit cleanup
                 del batch_results
                 del serial_results
                 gc.collect()
+
+                # ── Disk cleanup: purge prefetch caches from this batch ───
+                # Prefetched observation zarrs are no longer needed once the
+                # batch results are saved.  Cleaning them prevents unbounded
+                # disk growth (SWOT obs alone can reach 100+ GB over a full
+                # year).  Prediction zarrs may be reused across batches for
+                # different reference datasets, so we only clean them when
+                # switching to a new reference dataset.
+                #
+                # IMPORTANT: do NOT clean obs cache when the next batch uses
+                # the same ref_alias — the look-ahead thread has already
+                # pre-downloaded observation files into the same directory.
+                # Cleaning here would wipe them, forcing a full re-download.
+                import shutil as _sh_cleanup
+                _results_dir = self.results_dir or "."
+                _next_ref = (
+                    _all_batches[batch_idx + 1][0].get("ref_alias")
+                    if batch_idx + 1 < _total_batches
+                    else None
+                )
+                # Only clean observation prefetch when switching to a
+                # different reference dataset (or on the last batch).
+                if _next_ref != ref_alias:
+                    for _obs_sub in ("obs_prefetch_cache", "ref_prefetch_cache"):
+                        _cache_alias_path = os.path.join(_results_dir, _obs_sub, str(ref_alias))
+                        if os.path.isdir(_cache_alias_path):
+                            try:
+                                _sh_cleanup.rmtree(_cache_alias_path, ignore_errors=True)
+                            except Exception:
+                                pass
+                # Clean pred prefetch when switching reference (next batch
+                # will have different time windows needing different preds)
+                if _next_ref != ref_alias:
+                    _pred_path = os.path.join(_results_dir, "pred_prefetch_cache")
+                    if os.path.isdir(_pred_path):
+                        try:
+                            _sh_cleanup.rmtree(_pred_path, ignore_errors=True)
+                        except Exception:
+                            pass
 
                 # ── Memory-triggered worker restart ───────────────────────
                 # Two criteria (either one triggers a restart):
@@ -1801,7 +2505,9 @@ class Evaluator:
                                     "distributed"
                                 ).setLevel(_log_restart.CRITICAL)
                                 try:
-                                    _client.restart()
+                                    _client.restart_workers(
+                                        list(_client.scheduler_info()["workers"]),
+                                    )
                                 except Exception as _exc_restart:
                                     logger.warning(
                                         f"Worker restart failed: {_exc_restart!r}"
@@ -1813,6 +2519,39 @@ class Evaluator:
                                 # Reset baseline after the cluster is clean.
                                 self.baseline_memory = None
                                 gc.collect()
+
+            # ── Summary for the LAST ref dataset ─────────────────
+            if _prev_ref_alias is not None:
+                _print_ref_summary(_prev_ref_alias)
+
+            # ── Global evaluation summary ─────────────────────────────
+            _eval_elapsed = time.time() - _eval_t0
+            _em, _es = divmod(int(_eval_elapsed), 60)
+            _eh, _em = divmod(_em, 60)
+            _w = 60
+            _G = "\033[1;32m"   # bold green – global summary
+            _R0 = "\033[0m"
+            print(f"\n    {_G}╔{'═' * _w}╗{_R0}")
+            print(f"    {_G}║{_pad('  ★  GLOBAL EVALUATION SUMMARY', _w)}║{_R0}")
+            print(f"    {_G}╠{'═' * _w}╣{_R0}")
+            _total_batches_done = 0
+            _total_tasks_done = 0
+            for _ra in _ref_aliases_ordered:
+                _rs = _ref_stats.get(_ra)
+                if _rs is None:
+                    continue
+                _re = _rs.get("elapsed", time.time() - _rs["t0"])
+                # Use stored elapsed for completed refs, live for last
+                _rm, _rss = divmod(int(_re), 60)
+                _rh, _rm = divmod(_rm, 60)
+                _line = f"   {str(_ra).upper():<20} {_rs['n_batches']:>4} batches  {_rs['n_tasks']:>5} tasks  {_rh}h {_rm:02d}m {_rss:02d}s"
+                print(f"    {_G}║{_pad(_line, _w)}║{_R0}")
+                _total_batches_done += _rs["n_batches"]
+                _total_tasks_done += _rs["n_tasks"]
+            print(f"    {_G}╠{'═' * _w}╣{_R0}")
+            _totline = f"   {'TOTAL':<20} {_total_batches_done:>4} batches  {_total_tasks_done:>5} tasks  {_eh}h {_em:02d}m {_es:02d}s"
+            print(f"    {_G}║{_pad(_totline, _w)}║{_R0}")
+            print(f"    {_G}╚{'═' * _w}╝{_R0}\n")
 
             # Cleanup scattered data
             self.scattered_argo_indexes.clear()
@@ -1926,6 +2665,24 @@ class Evaluator:
             batch_t0 = time.time()
             num_tasks = len(batch)
 
+            # ── Inject C-library thread cap into each entry ──────────────
+            # Datasets that override nthreads_per_worker (reducing Dask
+            # concurrency) can reclaim the freed CPU slots for internal
+            # C-library parallelism (pyinterp, BLAS, OpenMP).
+            # The YAML key ``c_lib_threads`` (default 1) controls how many
+            # threads each C-library call may use inside a single task.
+            # Workers read this from entry["_c_lib_threads"] and pass it
+            # to _cap_worker_threads().
+            _ds_cfg = self.dask_cfgs_by_dataset.get(ref_alias, {})
+            _c_lib_threads = int(_ds_cfg.get("c_lib_threads", 1))
+            _download_workers: Optional[int] = (
+                int(_ds_cfg["download_workers"])
+                if _ds_cfg.get("download_workers") is not None
+                else None
+            )
+            for _entry in batch:
+                _entry["_c_lib_threads"] = _c_lib_threads
+
             # ── Throttle observation batches to prevent CPU oversubscription ──
             # Observation datasets (satellite) trigger heavy
             # CPU-bound interpolation (pyinterp) on each worker.  Submitting
@@ -1936,9 +2693,10 @@ class Evaluator:
             # sub-batches so that at most *max_concurrent_obs* tasks run in
             # parallel, leaving headroom for the OS and driver.
             is_obs_batch = batch and batch[0].get("ref_is_observation", False)
-            # All tasks run with _cap_worker_threads(1) so internal C++
-            # libraries (pyinterp, BLAS, Blosc) create only 1 thread each.
-            # No need to throttle concurrency below n_workers.
+            # C-library threads are controlled per-dataset via the YAML key
+            # ``c_lib_threads`` (default 1), injected into each entry above.
+            # Datasets that reduce nthreads_per_worker can raise c_lib_threads
+            # to reclaim the freed CPU slots for pyinterp/BLAS parallelism.
             # max_concurrent_obs = num_tasks
 
             # with threads_per_worker set to 1, C libraries are capped to 1.
@@ -2112,6 +2870,19 @@ class Evaluator:
             #   • No concurrent S3 requests from multiple workers
             #   • Workers open local files -> fast, no bandwidth contention
             _obs_path_map: Dict[str, str] = _la_data.get('obs_map', {}) if _la_data else {}
+            # Validate look-ahead obs paths still exist on disk (the
+            # inter-batch cleanup may have deleted them).
+            if _obs_path_map:
+                _stale = [
+                    k for k, v in _obs_path_map.items()
+                    if not os.path.isdir(v)
+                ]
+                if _stale:
+                    logger.debug(
+                        f"Look-ahead obs cache: {len(_stale)}/{len(_obs_path_map)} "
+                        f"paths stale (cleaned between batches) — re-downloading"
+                    )
+                    _obs_path_map = {}
             _obs_prefetch = (
                 is_obs_batch
                 and ref_alias != "argo_profiles"
@@ -2179,6 +2950,7 @@ class Evaluator:
                                 cache_dir=_obs_cache_dir,
                                 fs=_ref_mgr.params.fs,  # type: ignore[union-attr]
                                 ref_alias=str(ref_alias),
+                                max_download_workers=_download_workers,
                             )
                             # Inject mapping into every batch entry
                             for _entry in batch:
@@ -2206,9 +2978,6 @@ class Evaluator:
                 if not batch:
                     return
                 if is_obs_batch:
-                    return
-
-                if os.environ.get("DCTOOLS_ENABLE_REF_PREFETCH", "1") not in ("1", "true", "True"):
                     return
 
                 _ref_protocol = getattr(ref_connection_params, "protocol", None)
@@ -2297,14 +3066,18 @@ class Evaluator:
                             f"Reference prefetch failed for {_fname}: {_exc_rf!r}"
                         )
 
-                # Be conservative: reference stores can be large.
-                _N_REF_DL = min(2, len(_unique_ref_paths))
+                # Reference zarrs (GLORYS) can be large; use per-dataset
+                # download_workers if configured, otherwise default to 4.
+                if _download_workers is not None and _download_workers > 0:
+                    _N_REF_DL = min(_download_workers, len(_unique_ref_paths))
+                else:
+                    _N_REF_DL = min(4, len(_unique_ref_paths))
                 with _RefPool(max_workers=_N_REF_DL) as _rp:
                     list(_rp.map(_dl_one_ref, _unique_ref_paths))
 
                 if _ref_result:
                     logger.debug(
-                        f"Reference prefetch ({ref_alias}): "
+                        f"Reference prefetch ({ref_alias}, {_N_REF_DL} threads): "
                         f"{_counters['dl']} downloaded, "
                         f"{_counters['hit']} cached "
                         f"({len(_unique_ref_paths)} unique files)"
@@ -2374,6 +3147,72 @@ class Evaluator:
                         _local_zarr
                     ):
                         if _is_valid_local_dataset_cache(_local_zarr):
+                            # ── Cache hit: ensure time_chunk == 1 ────────────
+                            # Zarrs cached before the rechunking fix (or written
+                            # with native time_chunk > 1) force workers to read
+                            # ALL lead times when selecting a single timestep —
+                            # e.g. 10 × 21 depths × 5 vars × float64 ≈ 8 GB per
+                            # task vs ~400 MB with time_chunk=1.  Rechunk once,
+                            # in-place, so all future cache hits are correct.
+                            try:
+                                _probe = xr.open_zarr(
+                                    _local_zarr, consolidated=True, chunks={}
+                                )
+                                _needs_rchk = False
+                                if _probe.sizes.get("time", 1) > 1:
+                                    for _vv in _probe.data_vars:
+                                        if "time" in _probe[_vv].dims:
+                                            _dc = dict(zip(
+                                                _probe[_vv].dims,
+                                                _probe[_vv].data.chunks,
+                                            ))
+                                            if _dc.get("time", (1,))[0] > 1:
+                                                _needs_rchk = True
+                                                break
+                                _probe.close()
+                                del _probe
+                            except Exception:
+                                _needs_rchk = False
+
+                            if _needs_rchk:
+                                logger.debug(
+                                    f"Rechunking cached pred zarr "
+                                    f"(time→1): {_fname}"
+                                )
+                                _rchk_path = _local_zarr + ".rechunking"
+                                try:
+                                    if os.path.isdir(_rchk_path):
+                                        _sh_pred.rmtree(
+                                            _rchk_path, ignore_errors=True
+                                        )
+                                    with dask.config.set(
+                                        scheduler="synchronous"
+                                    ):
+                                        _ds_hit = xr.open_zarr(
+                                            _local_zarr, chunks={}
+                                        ).drop_encoding()
+                                        _ds_hit.chunk({"time": 1}).to_zarr(
+                                            _rchk_path,
+                                            mode="w",
+                                            consolidated=True,
+                                            safe_chunks=False,
+                                        )
+                                        _ds_hit.close()
+                                        del _ds_hit
+                                    _sh_pred.rmtree(
+                                        _local_zarr, ignore_errors=True
+                                    )
+                                    os.rename(_rchk_path, _local_zarr)
+                                except Exception as _exc_rchk:
+                                    logger.warning(
+                                        f"Cache rechunk failed for "
+                                        f"{_fname}: {_exc_rchk!r}"
+                                    )
+                                    if os.path.isdir(_rchk_path):
+                                        _sh_pred.rmtree(
+                                            _rchk_path, ignore_errors=True
+                                        )
+
                             with _pred_lock:
                                 _pred_result[_rp] = _local_zarr
                                 _counters["hit"] += 1
@@ -2410,20 +3249,52 @@ class Evaluator:
                                 _tmp_zarr,
                                 recursive=True,
                             )
+                            # Rechunk the time dimension to 1 so each worker
+                            # reads only its needed timestep instead of the
+                            # full native time chunk (e.g. 10 days at once).
+                            # Uses synchronous scheduler: one depth chunk at a
+                            # time --> driver RAM stays bounded.
+                            _tmp_zarr_rchk = _tmp_zarr + ".rechunked"
+                            with dask.config.set(
+                                scheduler="synchronous"
+                            ):
+                                _ds_rchk = xr.open_zarr(
+                                    _tmp_zarr, chunks={}
+                                ).drop_encoding()
+                                if _ds_rchk.sizes.get("time", 1) > 1:
+                                    _ds_rchk.chunk({"time": 1}).to_zarr(
+                                        _tmp_zarr_rchk,
+                                        mode="w",
+                                        consolidated=True,
+                                        safe_chunks=False,
+                                    )
+                                    _ds_rchk.close()
+                                    del _ds_rchk
+                                    _sh_pred.rmtree(
+                                        _tmp_zarr,
+                                        ignore_errors=True,
+                                    )
+                                    os.rename(_tmp_zarr_rchk, _tmp_zarr)
+                                else:
+                                    _ds_rchk.close()
+                                    del _ds_rchk
                         else:
                             import xarray as _xr_prefetch
+                            # Rechunk time=1 and stream lazily to avoid a
+                            # full-zarr .compute() spike in driver RAM.
                             with dask.config.set(
                                 scheduler="synchronous"
                             ):
                                 _ds_pf = _xr_prefetch.open_zarr(
                                     _rp, chunks={}
+                                ).drop_encoding()
+                                if _ds_pf.sizes.get("time", 1) > 1:
+                                    _ds_pf = _ds_pf.chunk({"time": 1})
+                                _ds_pf.to_zarr(
+                                    _tmp_zarr, mode="w",
+                                    consolidated=True,
+                                    safe_chunks=False,
                                 )
-                                _ds_pf = _ds_pf.compute()
-                            _ds_pf.to_zarr(
-                                _tmp_zarr, mode="w",
-                                consolidated=True,
-                            )
-                            _ds_pf.close()
                             del _ds_pf
 
                         if os.path.isdir(_local_zarr):
@@ -2440,7 +3311,16 @@ class Evaluator:
                             f"{_fname}: {_exc_pf!r}"
                         )
 
-                _N_PRED_DL = min(4, len(_unique_pred_paths))
+                _pred_ds_cfg = self.dask_cfgs_by_dataset.get(pred_alias, {})
+                _pred_dl_workers: Optional[int] = (
+                    int(_pred_ds_cfg["download_workers"])
+                    if _pred_ds_cfg.get("download_workers") is not None
+                    else None
+                )
+                if _pred_dl_workers is not None and _pred_dl_workers > 0:
+                    _N_PRED_DL = min(_pred_dl_workers, len(_unique_pred_paths))
+                else:
+                    _N_PRED_DL = min(4, len(_unique_pred_paths))
                 with _PredPool(max_workers=_N_PRED_DL) as _pp:
                     list(_pp.map(_dl_one_pred, _unique_pred_paths))
 
@@ -2462,7 +3342,6 @@ class Evaluator:
             _sample_ref = batch[0].get("ref_data") if batch else None
             _need_ref_prefetch = (
                 (not is_obs_batch)
-                and (os.environ.get("DCTOOLS_ENABLE_REF_PREFETCH", "1") in ("1", "true", "True"))
                 and (_ref_protocol in ("wasabi", "s3"))
                 and isinstance(_sample_ref, str)
                 and _sample_ref.endswith(".zarr")
@@ -2564,6 +3443,7 @@ class Evaluator:
                             n_points_dim=_n_pts_dim,
                             output_zarr_dir=_shared_zarr_dir,
                             eval_variables=_eval_vars,
+                            max_workers=_N,
                         )
 
                         if _shared_obs_zarr:
@@ -2593,9 +3473,9 @@ class Evaluator:
 
             _t_prefetch_total = time.time() - _phase_t0
             logger.debug(
-                f"Prefetch done in {_t_prefetch_total:.1f}s "
+                f"Prefetch detail: {_t_prefetch_total:.1f}s "
                 f"(obs_dl={_t_obs_dl:.1f}s  obs_prep={_t_obs_prep:.1f}s  "
-                f"ref_dl={_t_ref_dl:.1f}s  pred_dl={_t_pred_dl:.1f}s) — dispatching {num_tasks} tasks"  # noqa: E501
+                f"ref_dl={_t_ref_dl:.1f}s  pred_dl={_t_pred_dl:.1f}s)"
             )
 
             # Apply reference path remapping (from current batch prefetch)
@@ -2617,6 +3497,19 @@ class Evaluator:
 
             # Apply look-ahead prediction paths (downloaded during previous batch)
             _la_pred_map = _la_data.get('pred_map', {}) if _la_data else {}
+            # Validate look-ahead pred paths still exist on disk
+            if _la_pred_map:
+                _stale_pred = [
+                    k for k, v in _la_pred_map.items()
+                    if not os.path.isdir(v)
+                ]
+                if _stale_pred:
+                    logger.debug(
+                        f"Look-ahead pred cache: {len(_stale_pred)}/{len(_la_pred_map)} "
+                        f"paths stale — discarding"
+                    )
+                    for _sp in _stale_pred:
+                        del _la_pred_map[_sp]
             if _la_pred_map:
                 for _entry in batch:
                     _pd = _entry.get("pred_data")
@@ -2632,27 +3525,26 @@ class Evaluator:
             _Y = "\033[1;33m"   # bold yellow – reference dataset name
             _D = "\033[0;90m"   # dim grey   – separator
             _R = "\033[0m"      # reset
+
+            # ── Compact date range from batch tasks ───────────────────
+            _date_tag = ""
+            _raw_dates = [e.get("forecast_reference_time") for e in batch if e.get("forecast_reference_time") is not None]
+            if _raw_dates:
+                _d0, _d1 = min(_raw_dates), max(_raw_dates)
+                _fmt = "%d/%m/%y"  # compact: DD/MM/YY
+                try:
+                    _d0s = _d0.strftime(_fmt)
+                    _d1s = _d1.strftime(_fmt)
+                except Exception:
+                    _d0s = str(_d0)[:5]
+                    _d1s = str(_d1)[:5]
+                _date_tag = f" {_D}[{_d0s}-->{_d1s}]{_R}"
+
             _batch_desc = (
                 f"{_C}⏳ Batch N°{_batch_idx+1}/{_total_batches}{_R}"
                 f" {_D}│{_R} "
                 f"{_Y}📊 {ref_alias}{_R}"
-            )
-            _overall_bar = tqdm(
-                total=num_tasks,
-                desc=_batch_desc,
-                leave=True,
-                unit="task",
-                dynamic_ncols=True,
-                colour="#36b3a0",
-                file=_sys_bars.stderr,
-                bar_format=(
-                    "{desc}: {percentage:3.0f}%|{bar}| "
-                    "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]{postfix}"
-                ),
-            )
-
-            logger.debug(
-                f"{ref_alias}: {num_tasks} tasks on {_N} workers"
+                f"{_date_tag}"
             )
 
             # ── Observation scheduling: submit heavy windows first ──
@@ -2725,9 +3617,25 @@ class Evaluator:
                 _ac.add(_f)
                 _next += 1
 
-            logger.debug(
-                f"{ref_alias}: {_n_seed}/{num_tasks} tasks submitted to "
-                f"{_N} workers — waiting for first result…"
+            logger.info(
+                f"{ref_alias}: {_n_seed}/{num_tasks} tasks → {_N} workers "
+                f"(prefetch {_t_prefetch_total:.1f}s)"
+            )
+
+            # Create the progress bar AFTER all logger.info messages so
+            # they don't interrupt the bar rendering.
+            _overall_bar = tqdm(
+                total=num_tasks,
+                desc=_batch_desc,
+                leave=True,
+                unit="task",
+                dynamic_ncols=True,
+                colour="#36b3a0",
+                file=_sys_bars.stderr,
+                bar_format=(
+                    "{desc}: {percentage:3.0f}%|{bar}| "
+                    "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]{postfix}"
+                ),
             )
             if _overall_bar is not None:
                 _overall_bar.set_postfix_str("workers busy…")
@@ -2744,6 +3652,13 @@ class Evaluator:
                 _la_is_obs = (
                     _la_batch
                     and _la_batch[0].get("ref_is_observation", False)
+                )
+                # Look-ahead may target a different dataset → fetch its own download_workers
+                _la_ds_cfg = self.dask_cfgs_by_dataset.get(_la_ref_alias, {})
+                _la_download_workers: Optional[int] = (
+                    int(_la_ds_cfg["download_workers"])
+                    if _la_ds_cfg.get("download_workers") is not None
+                    else None
                 )
 
                 def _do_lookahead():
@@ -2808,11 +3723,20 @@ class Evaluator:
                                         / "obs_prefetch_cache"
                                         / str(_la_ref_alias)
                                     )
-                                    logger.debug(
+                                    # Use tqdm.write() so the progress
+                                    # bar is not disrupted by this message
+                                    # (runs in a background thread).
+                                    _la_msg = (
                                         f"Look-ahead: downloading "
                                         f"{len(_la_uniq)} obs files "
                                         f"for {_la_ref_alias}"
                                     )
+                                    if _overall_bar is not None:
+                                        _overall_bar.write(
+                                            f"  ℹ️  {_la_msg}"
+                                        )
+                                    else:
+                                        logger.info(_la_msg)
                                     _la_obs_map = (
                                         prefetch_obs_files_to_local(
                                             remote_paths=_la_uniq,
@@ -2821,6 +3745,7 @@ class Evaluator:
                                             ref_alias=(
                                                 f"LA:{_la_ref_alias}"
                                             ),
+                                            max_download_workers=_la_download_workers,
                                         )
                                     )
                                     if _la_obs_map:
@@ -2877,8 +3802,26 @@ class Evaluator:
                                         )
                                     )
                                 )
+                                # Also collect pred URLs from deeper
+                                # look-ahead batches (N+2, N+3, …)
+                                _la_extra = _lookahead_next.get(
+                                    'extra_pred_batches', []
+                                )
+                                _la_seen = set(_la_upreds)
+                                for _xb in _la_extra:
+                                    for _xe in _xb:
+                                        _xp = _xe.get("pred_data")
+                                        if (
+                                            isinstance(_xp, str)
+                                            and _xp not in _la_seen
+                                        ):
+                                            _la_upreds.append(_xp)
+                                            _la_seen.add(_xp)
                                 _la_pred_map: Dict[str, str] = {}
-                                for _rp in _la_upreds:
+                                import threading as _la_dl_thr
+                                _la_pred_lock = _la_dl_thr.Lock()
+
+                                def _la_dl_one(_rp):
                                     _fn = _PfLA2(_rp).name
                                     _lz = os.path.join(
                                         _la_pred_cache, _fn
@@ -2887,8 +3830,9 @@ class Evaluator:
                                         os.path.isdir(_lz)
                                         and os.listdir(_lz)
                                     ):
-                                        _la_pred_map[_rp] = _lz
-                                        continue
+                                        with _la_pred_lock:
+                                            _la_pred_map[_rp] = _lz
+                                        return
                                     try:
                                         _s3k = _rp
                                         if (
@@ -2905,7 +3849,8 @@ class Evaluator:
                                         ):
                                             _s3k = _s3k[5:]
                                         _tmpz = (
-                                            _lz + ".downloading.la"
+                                            _lz
+                                            + f".downloading.la.{_la_dl_thr.current_thread().ident}"
                                         )
                                         if os.path.isdir(_tmpz):
                                             _sh_la.rmtree(
@@ -2918,15 +3863,73 @@ class Evaluator:
                                                 _tmpz,
                                                 recursive=True,
                                             )
-                                        if os.path.isdir(_lz):
+                                            # Rechunk time→1 (same as
+                                            # prefetch) so workers never
+                                            # see time_chunk>1 data.
+                                            try:
+                                                _la_ds = xr.open_zarr(
+                                                    _tmpz, chunks={}
+                                                ).drop_encoding()
+                                                if _la_ds.sizes.get(
+                                                    "time", 1
+                                                ) > 1:
+                                                    _la_rchk = (
+                                                        _tmpz
+                                                        + ".rechunked"
+                                                    )
+                                                    with dask.config.set(
+                                                        scheduler="synchronous"
+                                                    ):
+                                                        _la_ds.chunk(
+                                                            {"time": 1}
+                                                        ).to_zarr(
+                                                            _la_rchk,
+                                                            mode="w",
+                                                            consolidated=True,
+                                                            safe_chunks=False,
+                                                        )
+                                                    _la_ds.close()
+                                                    del _la_ds
+                                                    _sh_la.rmtree(
+                                                        _tmpz,
+                                                        ignore_errors=True,
+                                                    )
+                                                    os.rename(
+                                                        _la_rchk, _tmpz
+                                                    )
+                                                else:
+                                                    _la_ds.close()
+                                                    del _la_ds
+                                            except Exception:
+                                                pass
+                                        # Skip overwrite if the zarr
+                                        # was already placed by the
+                                        # current batch's prefetch.
+                                        if (
+                                            os.path.isdir(_lz)
+                                            and os.listdir(_lz)
+                                        ):
                                             _sh_la.rmtree(
-                                                _lz,
+                                                _tmpz,
                                                 ignore_errors=True,
                                             )
-                                        os.rename(_tmpz, _lz)
-                                        _la_pred_map[_rp] = _lz
+                                            with _la_pred_lock:
+                                                _la_pred_map[_rp] = _lz
+                                        else:
+                                            os.rename(_tmpz, _lz)
+                                            with _la_pred_lock:
+                                                _la_pred_map[_rp] = _lz
                                     except Exception:
                                         pass
+
+                                from concurrent.futures import (
+                                    ThreadPoolExecutor as _LaPool,
+                                )
+                                _la_n = min(4, len(_la_upreds))
+                                with _LaPool(max_workers=_la_n) as _lp:
+                                    list(_lp.map(
+                                        _la_dl_one, _la_upreds
+                                    ))
                                 if _la_pred_map:
                                     _result['pred_map'] = _la_pred_map
 
@@ -2970,6 +3973,8 @@ class Evaluator:
             _last_progress: list = [time.time()]
             # After this many seconds with zero new completions -> cancel all.
             _STALL_TIMEOUT = 1200  # 20 minutes — SWOT per-worker preprocessing can be slow
+            _MAX_WATCHDOG_RETRIES = 3  # max times a single task can be resubmitted after watchdog cancel
+            _retry_count: Dict[int, int] = {}  # task_index -> number of watchdog retries so far
 
             # Log the inevitable "tail" once: when pending tasks <= execution slots,
             # the cluster cannot keep all slots busy (under-subscription).
@@ -3014,7 +4019,7 @@ class Evaluator:
                     _pending = max(num_tasks - _n_collected, 0)
                     pct = 100.0 * (_n_collected / num_tasks) if num_tasks else 0.0
                     _overall_bar.set_postfix_str(
-                        f"{pct:.1f}% done, {_elapsed:.0f}s elapsed"
+                        f"{_elapsed:.0f}s elapsed"
                     )
 
                     if (not _tail_logged[0]) and _pending <= _total_slots:
@@ -3030,11 +4035,23 @@ class Evaluator:
                     # ── Watchdog: cancel futures if no progress ──────────
                     _stall_s = time.time() - _last_progress[0]
                     if _stall_s >= _STALL_TIMEOUT and _active:
+                        # Check which tasks are eligible for retry
+                        _retriable = []
+                        _exhausted = []
+                        for _sf, _si in list(_active.items()):
+                            _prev = _retry_count.get(_si, 0)
+                            if _prev < _MAX_WATCHDOG_RETRIES:
+                                _retriable.append((_sf, _si))
+                            else:
+                                _exhausted.append((_sf, _si))
+                        _n_retry = len(_retriable)
+                        _n_exhaust = len(_exhausted)
                         logger.error(
                             f"{ref_alias}: NO task completed in the last "
                             f"{_stall_s:.0f}s — workers appear deadlocked "
                             f"(likely S3/network timeout).  Cancelling "
-                            f"{len(_active)} stuck futures to unblock."
+                            f"{len(_active)} stuck futures "
+                            f"({_n_retry} retriable, {_n_exhaust} exhausted)."
                         )
                         for _stuck_f in list(_active.keys()):
                             try:
@@ -3064,6 +4081,88 @@ class Evaluator:
                     try:
                         _res = _done.result()
                     except Exception as _exc:
+                        # ── Retry cancelled/deadlocked tasks ─────────────
+                        _is_cancel = "CancelledError" in type(_exc).__name__
+                        _prev_retries = _retry_count.get(_idx, 0)
+                        if _is_cancel and _prev_retries < _MAX_WATCHDOG_RETRIES:
+                            _retry_count[_idx] = _prev_retries + 1
+                            logger.warning(
+                                f"Task {_idx} ({ref_alias}) cancelled by watchdog — "
+                                f"resubmitting (attempt {_prev_retries + 2}/{_MAX_WATCHDOG_RETRIES + 1})"
+                            )
+                            # Restart only the worker(s) that were processing
+                            # the stuck futures — NOT the entire cluster.
+                            # _client.restart() kills ALL workers which then
+                            # fail to reconnect within 60 s on large clusters.
+                            try:
+                                _proc = _client.processing()
+                                _stuck_key = _done.key
+                                _stuck_workers = [
+                                    w for w, keys in _proc.items()
+                                    if _stuck_key in keys
+                                ]
+                                if _stuck_workers:
+                                    _result_map = _client.restart_workers(
+                                        _stuck_workers,
+                                        timeout=120,
+                                        raise_for_error=False,
+                                    )
+                                    logger.info(
+                                        f"{ref_alias}: targeted restart of "
+                                        f"{len(_stuck_workers)} worker(s): {_result_map}"
+                                    )
+                                else:
+                                    # Future already cancelled / unassigned
+                                    # — no worker to restart.  Check whether
+                                    # ALL workers are dead; if so, restart the
+                                    # entire cluster so resubmitted tasks can
+                                    # actually be scheduled.
+                                    try:
+                                        _sched_workers = _client.scheduler_info().get("workers", {})
+                                        _live_workers = [
+                                            w for w, info in _sched_workers.items()
+                                            if info.get("status") != "closed"
+                                        ]
+                                    except Exception:
+                                        _live_workers = []
+                                    if not _live_workers:
+                                        logger.warning(
+                                            f"{ref_alias}: ALL workers are dead — "
+                                            f"restarting cluster"
+                                        )
+                                        try:
+                                            _client.restart(timeout=120)
+                                            _client.run(_worker_full_cleanup)
+                                            logger.info(
+                                                f"{ref_alias}: cluster restarted — "
+                                                f"{len(_client.scheduler_info().get('workers', {}))} "
+                                                f"worker(s) alive"
+                                            )
+                                        except Exception as _restart_all_exc:
+                                            logger.error(
+                                                f"{ref_alias}: cluster restart failed: "
+                                                f"{_restart_all_exc!r}"
+                                            )
+                                    else:
+                                        logger.info(
+                                            f"{ref_alias}: stuck task not assigned to "
+                                            f"any worker — skipping restart "
+                                            f"({len(_live_workers)} worker(s) still alive)"
+                                        )
+                            except Exception as _restart_exc:
+                                logger.warning(
+                                    f"{ref_alias}: worker restart failed: "
+                                    f"{_restart_exc!r} — resubmitting anyway"
+                                )
+                            _f_retry = _client.submit(
+                                fn, batch[_idx], retries=1, pure=False
+                            )
+                            _all_futures.append(_f_retry)
+                            _active[_f_retry] = _idx
+                            _submitted_at[_f_retry] = time.monotonic()
+                            _ac.add(_f_retry)
+                            _last_progress[0] = time.time()  # reset stall watchdog
+                            continue  # do NOT count as collected
                         logger.warning(
                             f"Task {_idx} ({ref_alias}) raised: {_exc!r}"
                         )
@@ -3114,13 +4213,23 @@ class Evaluator:
                 _hb_stop.set()
                 _hb_thread.join(timeout=2)
                 try:
+                    _final_elapsed = time.time() - _hb_t0
+                    _overall_bar.set_postfix_str(
+                        f"{_final_elapsed:.0f}s"
+                    )
                     _overall_bar.close()
                 except Exception:
                     pass
 
-            # ── Wait for look-ahead thread (non-blocking if already done) ──
+            # ── Wait for look-ahead thread ─────────────────────────────
+            # The look-ahead downloads + rechunks prediction zarrs to
+            # the same cache directory used by the *next* batch's
+            # prefetch.  If the daemon finishes AFTER the next batch
+            # starts, it can race with the prefetch and overwrite
+            # rechunked zarrs with un-rechunked S3 copies.
+            # Use a generous timeout so the thread can complete.
             if _la_thread is not None:
-                _la_thread.join(timeout=5)
+                _la_thread.join(timeout=300)
 
             # ── Explicit batch cleanup on client/workers ───────────────────
             try:
@@ -3218,7 +4327,7 @@ class Evaluator:
                 total_pts = sum(points)
                 avg_pp = sum(preprocs) / len(preprocs)
                 avg_mt = sum(times) / len(times)
-                logger.debug(
+                logger.info(
                     f"Batch done: {len(batch_results)}/{num_tasks} tasks "
                     f"in {batch_duration:.1f}s | "
                     f"Avg preproc={avg_pp:.1f}s  metrics={avg_mt:.1f}s | "

@@ -514,6 +514,7 @@ class BaseConnectionManager(ABC):
             remote_path (str): Remote path of the file.
             local_path (str): Local path to save the file.
         """
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with self.params.fs.open(remote_path, "rb") as remote_file:
             with open(local_path, "wb") as local_file:
                 local_file.write(remote_file.read())
@@ -1326,10 +1327,10 @@ class GlonetManager(BaseConnectionManager):
         # Fast path: local zarr (prefetched by the driver)
         if not path.startswith(("https://", "http://", "s3://")):
             try:
-                return xr.open_zarr(path, consolidated=True)  # type: ignore[no-any-return]
+                return xr.open_zarr(path, consolidated=True, chunks={})  # type: ignore[no-any-return]
             except Exception:
                 try:
-                    return xr.open_zarr(path, consolidated=False)  # type: ignore[no-any-return]
+                    return xr.open_zarr(path, consolidated=False, chunks={})  # type: ignore[no-any-return]
                 except Exception:
                     pass
             return self.open_local(path)
@@ -1347,7 +1348,7 @@ class GlonetManager(BaseConnectionManager):
             Optional[xr.Dataset]: Opened dataset, or None if remote opening is not supported.
         """
         try:
-            glonet_ds: xr.Dataset = xr.open_zarr(path)
+            glonet_ds: xr.Dataset = xr.open_zarr(path, chunks={})
             return glonet_ds
 
         except Exception as exc:
@@ -1928,7 +1929,7 @@ class ArgoManager(BaseConnectionManager):
                     pass  # stale — rebuild
 
             t_start = _time_mod.time()
-            logger.debug(
+            logger.info(
                 f"ARGO monthly shared prefetch: full month {mkey} "
                 f"[{month_t0.date()} -> {month_t1.date()}]"
                 f" (batch window: {all_t0_in_month.date()} -> {all_t1_in_month.date()})"
@@ -2208,6 +2209,7 @@ def prefetch_obs_files_to_local(
     fs: Any,
     ref_alias: str = "",
     show_progress_bar: bool = True,
+    max_download_workers: Optional[int] = None,
 ) -> Dict[str, str]:
     """
     Pre-download observation files to local disk before worker dispatch.
@@ -2366,10 +2368,18 @@ def prefetch_obs_files_to_local(
         with _lock:
             _bar.update(1)
 
-    # ── Parallel downloads (4 concurrent connections) ─────────────
+    # ── Parallel downloads ──────────────────────────────────────────
+    # S3/Wasabi round-trip latency dominates for small obs files
+    # (SWOT ~12 MB, jason3 ~170 KB).  More concurrent threads =
+    # more requests in flight = better bandwidth utilisation.
+    # Scale with file count: many small files benefit most from
+    # high concurrency; cap at 32 to avoid fd/socket exhaustion.
     from concurrent.futures import ThreadPoolExecutor as _DlPool
 
-    _MAX_DL_WORKERS = min(8, len(unique_paths))
+    if max_download_workers is not None and max_download_workers > 0:
+        _MAX_DL_WORKERS = min(max_download_workers, len(unique_paths))
+    else:
+        _MAX_DL_WORKERS = min(max(16, len(unique_paths) // 20), 32, len(unique_paths))
     with _DlPool(max_workers=_MAX_DL_WORKERS) as pool:
         list(pool.map(_download_one, unique_paths))
 
@@ -2383,7 +2393,7 @@ def prefetch_obs_files_to_local(
         parts.append(f"{_stats['downloaded']} downloaded")
     if _stats["failed"]:
         parts.append(f"{_stats['failed']} FAILED")
-    logger.debug(f"Prefetch {ref_alias}: {' | '.join(parts)}")
+    logger.debug(f"Prefetch {ref_alias} ({_MAX_DL_WORKERS} threads): {' | '.join(parts)}")
     if _failures:
         for detail in _failures[:5]:
             logger.warning(f"  Prefetch failure: {detail}")
