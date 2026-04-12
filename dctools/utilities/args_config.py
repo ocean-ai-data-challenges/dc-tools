@@ -22,10 +22,13 @@ TIME_VARIABLES = [
 
 LOGGER_CONFIG = {
     "log_level": "DEBUG",
+    # Format inspired by cargo / uv: dim timestamp, level badge, clean message.
+    # File/line info is omitted from the default user-facing format – it's
+    # available via --log-level DEBUG and the optional log-file sink.
     "log_format": (
-        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | "
-        "<level>{level: <8}</level> | "
-        "<yellow>Line {line: >4} ({file}):</yellow> <b>{message}</b>"
+        "<dim>{time:HH:mm:ss}</dim>"
+        "  <level>{level: <8}</level>"
+        "  {message}"
     ),
 }
 
@@ -146,6 +149,15 @@ def configure_logging_from_args(args: Namespace) -> None:
             _py_logging.getLogger("dask").setLevel(py_level_n)
         except Exception:
             pass
+
+    # Install a permanent filter on distributed.* loggers so benign INFO
+    # connection-close chatter is suppressed even when distributed resets
+    # its own log levels during cluster creation/teardown.
+    try:
+        from dctools.utilities.init_dask import _install_distributed_noise_filter
+        _install_distributed_noise_filter()
+    except Exception:
+        pass
 
 
 def parse_arguments(cli_args: Optional[List[str]] = None) -> Namespace:

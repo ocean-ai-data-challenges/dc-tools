@@ -107,7 +107,7 @@ def _should_fill(key: str, src: dict, global_auto: bool) -> bool:
     value = src[key]
     if _is_explicit(value):
         return False  # user pinned an explicit number — never override
-    # None / "auto" → always fill
+    # None / "auto" --> always fill
     return _is_auto_sentinel(value)
 
 
@@ -191,7 +191,7 @@ def _zarr_uncompressed_per_timestep_mb(
         for key, val in metadata.items():
             if not key.endswith("/.zarray"):
                 continue
-            # e.g. "ssha_filtered/.zarray" → var_name = "ssha_filtered"
+            # e.g. "ssha_filtered/.zarray" --> var_name = "ssha_filtered"
             var_name = key[:-8].lstrip("/").split("/")[-1]
             shape = val.get("shape", [])
             try:
@@ -494,12 +494,12 @@ def _obs_batch_size(driver_reserve_gb: float, *, is_swath: bool) -> int:
 
     *obs_batch_size* controls how many evaluation time-windows are batched
     together before the driver preprocesses their observation files.  More
-    windows → more unique files → more driver RAM consumed.
+    windows --> more unique files --> more driver RAM consumed.
 
-    * Swath datasets (SWOT): each file is large (~200 MB uncompressed) → a
+    * Swath datasets (SWOT): each file is large (~200 MB uncompressed) --> a
       budget of 0.5 GB per window gives conservative batches.
     * Nadir / profile datasets (SARAL, Jason-3, …): files are small (~5 MB)
-      → a budget of 0.15 GB per window allows larger batches.
+      --> a budget of 0.15 GB per window allows larger batches.
     """
     if is_swath:
         return max(5, min(15, int(driver_reserve_gb / 0.5) + 1))

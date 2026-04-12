@@ -615,8 +615,6 @@ def get_dataset_from_config(
                 logger.info(f"Using ARGO directory catalog at {path}")
                 catalog_path = path
 
-    if not os.path.exists(data_root):
-        os.mkdir(data_root)
     if not os.path.exists(root_catalog_folder):
         os.mkdir(root_catalog_folder)
 

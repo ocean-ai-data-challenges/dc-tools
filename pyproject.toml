@@ -90,7 +90,7 @@ pygments = "^2.19.1"
 
 [build-system]
 build-backend = "poetry.core.masonry.api"
-requires = ["poetry-core", "setuptools", "wheel", "cmake"]
+requires = ["poetry-core", "setuptools", "wheel"]
 
 [tool.ruff]
 line-length = 100

@@ -201,18 +201,30 @@ def serialize_structure(obj):
 
 
 def to_float32(obj: Any) -> Any:
-    """Recursively converts all float64 data to float32 in xarray objects or dicts."""
+    """Recursively converts all float64 data to float32 in xarray objects or dicts.
+
+    Copy-on-cast: only copies the Dataset/DataArray when at least one variable
+    actually needs a dtype conversion.  If every floating variable is already
+    float32 the original object is returned unchanged — avoiding a full
+    in-memory duplicate of potentially hundreds of MB of data.
+    Works on both lazy (dask-backed) and already-computed (numpy) objects.
+    """
     if isinstance(obj, xr.Dataset):
-        # Specific implementation for Dataset to be safe with types
+        # Identify variables that genuinely need a cast.
+        needs_cast = [
+            var for var in obj.data_vars
+            if np.issubdtype(obj[var].dtype, np.floating) and obj[var].dtype != np.float32
+        ]
+        if not needs_cast:
+            return obj  # All floats already float32 (or no float vars) — skip copy.
         ds = obj.copy()
-        for var in ds.data_vars:
-            if np.issubdtype(ds[var].dtype, np.floating):
-                ds[var] = ds[var].astype("float32")
+        for var in needs_cast:
+            ds[var] = ds[var].astype("float32")
         return ds
     elif isinstance(obj, xr.DataArray):
-        if np.issubdtype(obj.dtype, np.floating):
-            return obj.astype("float32")
-        return obj
+        if not np.issubdtype(obj.dtype, np.floating) or obj.dtype == np.float32:
+            return obj  # Already float32 or non-floating — no copy needed.
+        return obj.astype("float32")
     elif isinstance(obj, dict):
         return {k: to_float32(v) for k, v in obj.items()}
     elif isinstance(obj, list):

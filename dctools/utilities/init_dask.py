@@ -1,10 +1,76 @@
 """Dask initialization and configuration functions."""
 
 import logging
+import logging.config as _logging_config
 import warnings
 
 import dask
 from loguru import logger
+
+
+# ---------------------------------------------------------------------------
+# Permanent noise filter for distributed.* loggers
+# ---------------------------------------------------------------------------
+
+_DISTRIBUTED_NOISE_LOGGERS = (
+    "distributed",
+    "distributed.core",
+    "distributed.comm",
+    "distributed.nanny",
+    "distributed.scheduler",
+    "distributed.worker",
+    "distributed.utils",
+    "distributed.client",
+    "tornado.application",
+)
+
+_NOISE_SUBSTRINGS = (
+    "has been closed",
+    "Connection to tcp://",
+    "Closing dangling",
+    "Event loop was unresponsive",
+    "Worker exceeded",
+    "Scheduler is unable to accept new work",
+    "Timed out trying to connect",
+)
+
+
+class _DistributedNoiseFilter(logging.Filter):
+    """Drop benign distributed INFO chatter regardless of level changes."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        if record.levelno >= logging.WARNING:
+            return True
+        msg = record.getMessage()
+        return not any(s in msg for s in _NOISE_SUBSTRINGS)
+
+
+def _install_distributed_noise_filter() -> None:
+    """Attach _DistributedNoiseFilter to all distributed.* loggers and set ERROR level."""
+    _filter = _DistributedNoiseFilter()
+    for name in _DISTRIBUTED_NOISE_LOGGERS:
+        _lg = logging.getLogger(name)
+        _lg.setLevel(logging.WARNING)
+        if not any(isinstance(f, _DistributedNoiseFilter) for f in _lg.filters):
+            _lg.addFilter(_filter)
+
+
+# Monkey-patch logging.config.dictConfig so that whenever distributed calls it
+# (during LocalCluster creation/teardown) our filter is re-applied afterwards.
+# distributed calls dictConfig to reset log levels from dask config, which
+# wipes any filters we added.  The patch ensures they're always restored.
+_orig_dictConfig = _logging_config.dictConfig
+
+
+def _noise_aware_dictConfig(config: dict) -> None:  # type: ignore[type-arg]
+    _orig_dictConfig(config)
+    try:
+        _install_distributed_noise_filter()
+    except Exception:
+        pass
+
+
+_logging_config.dictConfig = _noise_aware_dictConfig
 
 
 def configure_dask_workers_env(client):
@@ -115,27 +181,16 @@ def configure_dask_workers_env(client):
 
 def configure_dask_logging():
     """Configure Dask logs to be quiet."""
-    # Remove noisy Dask-specific loggers
-    dask_loggers = [
-        "distributed",
-        "distributed.core",
-        "distributed.worker",
-        "distributed.scheduler",
-        "distributed.nanny",
-        "distributed.comm",
-        "distributed.utils",
-        "distributed.client",
-        "tornado.application",
-    ]
-
-    for logger_name in dask_loggers:
-        logging.getLogger(logger_name).setLevel(logging.ERROR)
+    # Set all distributed.* loggers to WARNING (filter handles the rest).
+    _install_distributed_noise_filter()
 
     # Silence Dask warnings
     warnings.filterwarnings("ignore", category=UserWarning, module="distributed")
     warnings.filterwarnings("ignore", message=".*Event loop was unresponsive.*")
 
-    # Global Dask configuration
+    # Global Dask configuration.
+    # The "logging" key is read by distributed's setup_logging() when it calls
+    # logging.config.dictConfig — use a flat {loggerName: level} mapping.
     dask.config.set(
         {
             "distributed.worker.daemon": False,
@@ -148,10 +203,15 @@ def configure_dask_logging():
             "distributed.worker.memory.pause": 0.95,
             "distributed.worker.memory.terminate": False,
             "logging": {
-                "distributed": {
-                    "": "error",  # root "distributed" logger
-                    "worker": "error",  # sub-logger: distributed.worker
-                }
+                "distributed": "error",
+                "distributed.core": "error",
+                "distributed.comm": "error",
+                "distributed.nanny": "error",
+                "distributed.scheduler": "error",
+                "distributed.worker": "error",
+                "distributed.utils": "error",
+                "distributed.client": "error",
+                "tornado.application": "error",
             },
         }
     )

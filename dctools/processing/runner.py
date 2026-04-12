@@ -64,6 +64,50 @@ def resolve_config_path(default_config_name: str, cli_args: Any) -> Path:
     return _challenge_config_dir() / f"{config_name}.yaml"
 
 
+_BANNER_STYLES = {
+    "success": {"icon": "\u2714", "border": "\u2550", "corner": ("\u2554", "\u2557", "\u255a", "\u255d"), "side": "\u2551", "color": "\033[1;32m"},
+    "warning": {"icon": "\u26a0", "border": "\u2550", "corner": ("\u2554", "\u2557", "\u255a", "\u255d"), "side": "\u2551", "color": "\033[1;33m"},
+    "error":   {"icon": "\u2718", "border": "\u2550", "corner": ("\u2554", "\u2557", "\u255a", "\u255d"), "side": "\u2551", "color": "\033[1;31m"},
+}
+_RESET = "\033[0m"
+
+
+def _print_banner(
+    message: str,
+    *,
+    details: Optional[list[str]] = None,
+    style: str = "success",
+    width: int = 60,
+) -> None:
+    """Print a prominent box-styled banner to the terminal."""
+    s = _BANNER_STYLES.get(style, _BANNER_STYLES["success"])
+    c, r = s["color"], _RESET
+    tl, tr, bl, br = s["corner"]
+    side, border, icon = s["side"], s["border"], s["icon"]
+
+    inner = width - 2  # space inside the side borders
+    top = f"{tl}{border * inner}{tr}"
+    bot = f"{bl}{border * inner}{br}"
+    empty = f"{side}{' ' * inner}{side}"
+
+    title = f" {icon}  {message}  {icon} "
+    pad = max(inner - len(title), 0)
+    left_pad = pad // 2
+    right_pad = pad - left_pad
+    title_line = f"{side}{' ' * left_pad}{title}{' ' * right_pad}{side}"
+
+    print(f"\n{c}{top}")
+    print(empty)
+    print(title_line)
+    if details:
+        print(empty)
+        for d in details:
+            d_pad = max(inner - len(d) - 4, 0)
+            print(f"{side}  {d}{' ' * (d_pad + 2)}{side}")
+    print(empty)
+    print(f"{bot}{r}\n")
+
+
 def run_from_config(
     config_path: Path,
     evaluation_cls: Optional[Type[object]] = None,
@@ -126,27 +170,40 @@ def run_from_config(
         report_path = os.path.join(args.result_dir, "dask-report.html")
         print(f"Generating Dask performance report at: {report_path}")
 
-        with performance_report(filename=report_path):
-            evaluator_instance.run_eval()  # type: ignore[attr-defined]
+        try:
+            with performance_report(filename=report_path):
+                evaluator_instance.run_eval()  # type: ignore[attr-defined]
+        except ValueError as _pr_exc:
+            # The Dask cluster is shut down inside run_eval() before
+            # post-processing to free worker RAM.  performance_report's
+            # __exit__ calls get_client() which raises ValueError when no
+            # client exists.  The evaluation itself succeeded — just skip
+            # the performance report.
+            if "No global client found" in str(_pr_exc):
+                pass  # cluster already closed during post-processing; report skipped
+            else:
+                raise
 
         lb_warnings = getattr(evaluator_instance, "_leaderboard_warnings", [])
         if lb_warnings:
-            print("Evaluation has finished, but the leaderboard is INCOMPLETE:")
-            for w in lb_warnings:
-                print(f"  [!] {w}")
+            _print_banner(
+                "Evaluation finished — leaderboard INCOMPLETE",
+                details=[f"[!] {w}" for w in lb_warnings],
+                style="warning",
+            )
             return 0
-        print("Evaluation has finished successfully.")
+        _print_banner("Evaluation has finished successfully", style="success")
         return 0
 
     except KeyboardInterrupt:
-        print("Manual abort.")
+        _print_banner("Evaluation aborted (manual interrupt)", style="error")
         return 1
     except SystemExit:
-        print("SystemExit.")
+        _print_banner("Evaluation aborted (SystemExit)", style="error")
         return 1
     except Exception as exc:
         traceback.print_exc()
-        print(f"Evaluation failed: {exc}")
+        _print_banner(f"Evaluation failed: {exc}", style="error")
         return 1
     finally:
         if evaluator_instance is not None:
