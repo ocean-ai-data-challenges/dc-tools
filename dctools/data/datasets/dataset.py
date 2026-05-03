@@ -273,7 +273,7 @@ class BaseDataset:
                 self.catalog_type = ""
 
         if not loaded_from_catalog:
-            logger.info("No catalog JSON file found. Generating metadata from the dataset.")
+            logger.info("No local catalog found. Loading metadata from remote source.")
             self._metadata = self.connection_manager.list_files_with_metadata()  # Retrieve metadata
             self._global_metadata = self.get_global_metadata()
             if self._global_metadata is None:
@@ -295,6 +295,7 @@ class BaseDataset:
             catalog = self.get_catalog()
             if catalog is not None:
                 catalog.to_json(catalog_path)
+                logger.info(f"Catalog saved to {catalog_path}")
 
         if self._global_metadata is not None:
             vars_rename_dict = self._global_metadata.get("variables_rename_dict")

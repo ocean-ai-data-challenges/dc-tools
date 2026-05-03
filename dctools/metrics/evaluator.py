@@ -60,6 +60,61 @@ from dctools.data.datasets.dataloader import (
 _WORKER_DATASET_CACHE_LOCK = threading.Lock()
 _WORKER_DATASET_CACHE: "OrderedDict[str, xr.Dataset]" = OrderedDict()
 
+# Conservative physical bounds used to mask clearly invalid observation values
+# before metric computation. This specifically protects ARGO profile metrics
+# from pathological values that can explode RMSE/MAE aggregates.
+_OBS_PHYSICAL_RANGES: Dict[str, tuple[float, float]] = {
+    "salinity": (0.0, 50.0),
+    "temperature": (-5.0, 45.0),
+}
+
+
+def _canonical_obs_var_name(var_name: str) -> Optional[str]:
+    """Map a dataset variable name to a canonical observation variable family."""
+    _name = str(var_name).strip().lower()
+    if _name in {"salinity", "psal", "so", "sss", "surface salinity"}:
+        return "salinity"
+    if _name in {"temperature", "temp", "thetao", "sst", "surface temperature"}:
+        return "temperature"
+    return None
+
+
+def _mask_invalid_obs_values(
+    ds: xr.Dataset,
+    valid_ranges: Dict[str, tuple[float, float]],
+) -> tuple[xr.Dataset, Dict[str, int]]:
+    """Mask out-of-range numeric observation values as NaN.
+
+    Returns the updated dataset and a count of masked values per variable.
+    """
+    if ds is None or not hasattr(ds, "data_vars"):
+        return ds, {}
+
+    masked_counts: Dict[str, int] = {}
+    for var_name in list(ds.data_vars):
+        canonical = _canonical_obs_var_name(var_name)
+        if canonical is None or canonical not in valid_ranges:
+            continue
+
+        var_da = ds[var_name]
+        if not np.issubdtype(var_da.dtype, np.number):
+            continue
+
+        lo, hi = valid_ranges[canonical]
+        valid_mask = xr.where(np.isfinite(var_da) & (var_da >= lo) & (var_da <= hi), True, False)
+        invalid_mask = ~valid_mask
+
+        try:
+            _n_invalid = int(invalid_mask.sum().compute()) if hasattr(invalid_mask.data, "compute") else int(invalid_mask.sum())
+        except Exception:
+            _n_invalid = 0
+
+        if _n_invalid > 0:
+            ds[var_name] = var_da.where(valid_mask)
+            masked_counts[str(var_name)] = _n_invalid
+
+    return ds, masked_counts
+
 
 def _parse_memory_limit(value: Any) -> int:
     """Parse a human-readable memory string (e.g. ``"6GB"``) into bytes.
@@ -120,6 +175,104 @@ def _open_dataset_worker_cached(
             except Exception:
                 pass
     return ds, False
+
+
+class _PredPrefetchFatalError(BaseException):
+    """Prediction prefetch failed after all retry attempts.
+
+    Inherits from BaseException (not Exception) so it bypasses the broad
+    ``except Exception`` handler in ``_evaluate_batch`` and propagates
+    directly to the top-level caller, stopping the evaluation immediately.
+    """
+
+
+def _s3_server_clock_offset(endpoint_url: str, timeout: int = 10) -> Optional[float]:
+    """Return the clock offset between the local machine and the S3 server.
+
+    Makes an unauthenticated HTTP HEAD request to *endpoint_url* and reads
+    the ``Date`` response header.  No credentials are required; S3-compatible
+    servers always include ``Date`` in unauthenticated responses.
+
+    Returns:
+        ``server_time - local_time`` in seconds, or ``None`` if the query
+        failed (network unreachable, no ``Date`` header, …).
+    """
+    import urllib.request as _url_req
+    import urllib.error as _url_err
+    import time as _t_clk
+    from email.utils import parsedate_to_datetime as _p2dt
+
+    def _parse_date_hdr(_headers) -> Optional[float]:
+        _dh = _headers.get("Date", "")
+        if _dh:
+            try:
+                return _p2dt(_dh).timestamp() - _t_clk.time()
+            except Exception:
+                pass
+        return None
+
+    try:
+        _req = _url_req.Request(endpoint_url.rstrip("/") + "/", method="HEAD")
+        _req.add_header("User-Agent", "python/dctools-clock-preflight")
+        try:
+            with _url_req.urlopen(_req, timeout=timeout) as _resp:
+                return _parse_date_hdr(_resp.headers)
+        except _url_err.HTTPError as _http_err:
+            # 4xx/5xx responses (e.g. 403 Forbidden from Wasabi on HEAD /)
+            # still carry a valid Date header — read it before discarding.
+            return _parse_date_hdr(_http_err.headers)
+    except Exception:
+        pass
+    return None
+
+
+def _fix_system_clock(info_cb=None) -> bool:
+    """Attempt to sync the system clock via available OS tools.
+
+    Tries the following commands in order (each requires sudo without
+    password, which is common in HPC/container environments):
+
+    1. ``sudo -n ntpdate -u pool.ntp.org``
+    2. ``sudo -n ntpdate -u time.cloudflare.com``
+    3. ``sudo -n chronyc makestep``
+    4. ``sudo -n timedatectl set-ntp true``  (enables NTP, then waits 5 s
+       for the first sync to complete)
+
+    Args:
+        info_cb: Optional callable that receives a human-readable status
+            string (used to write the result to the evaluation log).
+
+    Returns:
+        ``True`` if at least one command succeeded (return code 0),
+        ``False`` otherwise (sudo not available, no NTP tool installed, …).
+    """
+    import subprocess as _sp
+
+    _log = info_cb or (lambda _msg: None)
+    _candidates = [
+        (["sudo", "-n", "ntpdate", "-u", "pool.ntp.org"],
+         "ntpdate pool.ntp.org"),
+        (["sudo", "-n", "ntpdate", "-u", "time.cloudflare.com"],
+         "ntpdate time.cloudflare.com"),
+        (["sudo", "-n", "ntpdate", "-u", "time.google.com"],
+         "ntpdate time.google.com"),
+        (["sudo", "-n", "chronyc", "makestep"],
+         "chronyc makestep"),
+        (["sudo", "-n", "timedatectl", "set-ntp", "true"],
+         "timedatectl set-ntp true"),
+    ]
+    for _cmd, _label in _candidates:
+        try:
+            _r = _sp.run(_cmd, timeout=30, capture_output=True)
+            if _r.returncode == 0:
+                if _label.startswith("timedatectl"):
+                    import time as _t_w
+                    _t_w.sleep(5)   # give NTP daemon a moment to apply the step
+                _log(f"System clock synced via '{_label}'")
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def _compute_with_timeout(
@@ -210,11 +363,6 @@ def worker_memory_cleanup():
     # Single gc.collect() is sufficient — 3× adds overhead per call
     gc.collect()
 
-    # Linux-specific memory trimming (release to OS)
-    try:
-        ctypes.CDLL('libc.so.6').malloc_trim(0)
-    except Exception:
-        pass
 
 
 def _clear_xarray_file_cache() -> bool:
@@ -364,24 +512,30 @@ def _worker_full_cleanup() -> bool:
         "TORCH_NUM_THREADS", "TORCH_NUM_INTEROP_THREADS",
     ):
         os.environ[tvar] = "1"
-    # Torch inter-op threads at runtime (env var only works at import time)
-    try:
-        import torch as _torch_init
-        _torch_init.set_num_threads(1)
-        _torch_init.set_num_interop_threads(1)
-    except RuntimeError:
-        pass  # set_num_interop_threads already called — safe
-    except Exception:
-        pass
+    # Torch inter-op threads at runtime (env var only works at import time).
+    # IMPORTANT: Do NOT ``import torch`` here — that adds ~380 MB RSS per
+    # worker (~1.9 GB for 5 workers) even when no task has used torch yet.
+    # Only cap threads if torch was already imported by a previous task.
+    import sys as _sys_wfc
+    _torch_init = _sys_wfc.modules.get("torch")
+    if _torch_init is not None:
+        try:
+            _torch_init.set_num_threads(1)
+            _torch_init.set_num_interop_threads(1)
+        except RuntimeError:
+            pass  # set_num_interop_threads already called — safe
+        except Exception:
+            pass
 
     # threadpoolctl: resize already-running BLAS/OpenMP pools.
-    try:
-        import threadpoolctl
-        threadpoolctl.threadpool_limits(limits=1)
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    # Only if already imported (avoids ~2 MB per worker for no benefit
+    # when pools haven't been instantiated yet).
+    _threadpoolctl = _sys_wfc.modules.get("threadpoolctl")
+    if _threadpoolctl is not None:
+        try:
+            _threadpoolctl.threadpool_limits(limits=1)
+        except Exception:
+            pass
 
     # ── OpenBLAS: direct C-level cap (belt-and-suspenders) ───────────
     # The env vars above only work if set BEFORE numpy is imported.
@@ -395,16 +549,19 @@ def _worker_full_cleanup() -> bool:
 
     # Blosc decompression — cap to 1 thread per worker to avoid CPU
     # oversubscription (5 workers × 2 blosc threads = 10 extra threads).
-    try:
-        import blosc  # type: ignore[import-not-found]
-        blosc.set_nthreads(1)
-    except Exception:
-        pass
-    try:
-        from numcodecs import blosc as _nc_blosc  # type: ignore[import-untyped]
-        _nc_blosc.set_nthreads(1)
-    except Exception:
-        pass
+    # Only if already imported (avoids ~29 MB per worker).
+    _blosc_mod = _sys_wfc.modules.get("blosc")
+    if _blosc_mod is not None:
+        try:
+            _blosc_mod.set_nthreads(1)
+        except Exception:
+            pass
+    _nc_blosc_mod = _sys_wfc.modules.get("numcodecs.blosc")
+    if _nc_blosc_mod is not None:
+        try:
+            _nc_blosc_mod.set_nthreads(1)
+        except Exception:
+            pass
 
     # Clear the per-worker dataset LRU cache so the next batch always opens
     # fresh S3 connections.  Stale connections (closed by the S3 server after
@@ -496,27 +653,33 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
     # The env vars above work only if torch hasn't been imported yet.
     # set_num_interop_threads() can only be called once (before any forward
     # pass); subsequent calls raise RuntimeError — absorb silently.
-    try:
-        import torch as _torch_rt
-        _torch_rt.set_num_threads(max_threads)
-        _torch_rt.set_num_interop_threads(max_threads)
-    except RuntimeError:
-        pass  # already set
-    except Exception:
-        pass
+    # IMPORTANT: Do NOT ``import torch`` here — it adds ~380 MB RSS.
+    # Only cap threads if torch was already imported by a previous task.
+    # The env vars ensure torch will start with the right thread count
+    # when it IS eventually imported.
+    import sys as _sys_cwt
+    _torch_rt = _sys_cwt.modules.get("torch")
+    if _torch_rt is not None:
+        try:
+            _torch_rt.set_num_threads(max_threads)
+            _torch_rt.set_num_interop_threads(max_threads)
+        except RuntimeError:
+            pass  # already set
+        except Exception:
+            pass
 
     # ── C-level thread pool cap (belt-and-suspenders) ──
     # threadpoolctl talks directly to the shared libraries already loaded
     # in the process (libopenblas, libgomp, libiomp5, …) and resizes
     # their internal pools.  This works even if the env vars were set
     # *after* the library created its default thread pool.
-    try:
-        import threadpoolctl
-        threadpoolctl.threadpool_limits(limits=max_threads)
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    # Only if already imported — avoids unnecessary import overhead.
+    _threadpoolctl_rt = _sys_cwt.modules.get("threadpoolctl")
+    if _threadpoolctl_rt is not None:
+        try:
+            _threadpoolctl_rt.threadpool_limits(limits=max_threads)
+        except Exception:
+            pass
 
     # ── OpenBLAS: direct C-level cap as fallback ─────────────────────
     # When threadpoolctl is not installed, resize OpenBLAS manually.
@@ -526,17 +689,20 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
     # ── Blosc: NOT covered by threadpoolctl — cap explicitly ──────────
     # Blosc decompression — cap to max_threads (1 by default) to avoid
     # CPU oversubscription (N workers × K blosc threads adds up fast).
+    # Only if already imported — avoids ~29 MB per worker.
     _blosc_threads = max(1, max_threads)
-    try:
-        import blosc
-        blosc.set_nthreads(_blosc_threads)
-    except Exception:
-        pass
-    try:
-        from numcodecs import blosc as _nc_blosc
-        _nc_blosc.set_nthreads(_blosc_threads)
-    except Exception:
-        pass
+    _blosc_rt = _sys_cwt.modules.get("blosc")
+    if _blosc_rt is not None:
+        try:
+            _blosc_rt.set_nthreads(_blosc_threads)
+        except Exception:
+            pass
+    _nc_blosc_rt = _sys_cwt.modules.get("numcodecs.blosc")
+    if _nc_blosc_rt is not None:
+        try:
+            _nc_blosc_rt.set_nthreads(_blosc_threads)
+        except Exception:
+            pass
 
 
 def compute_metric(
@@ -586,6 +752,7 @@ def compute_metric(
         ref_coords = entry.get("ref_coords")
         ref_alias = entry.get("ref_alias")
         ref_is_observation = entry.get("ref_is_observation")
+        _apply_obs_physical_qc = bool(entry.get("_apply_obs_physical_qc", True))
 
         # Logging debug: Confirm task start on worker
         # logger.debug(
@@ -618,6 +785,23 @@ def compute_metric(
             pred_data = pred_data_base
         else:
             pred_data = pred_source
+
+        if pred_data is None:
+            logger.debug(
+                f"[{ref_alias}] valid_time={valid_time}: prediction dataset "
+                f"could not be opened (S3/network error?) "
+                f"— skipping metric computation (result=null)."
+            )
+            return {
+                "ref_alias": ref_alias,
+                "result": None,
+                "n_points": 0,
+                "duration_s": 0.0,
+                "preprocess_s": 0.0,
+                "forecast_reference_time": forecast_reference_time,
+                "lead_time": lead_time,
+                "valid_time": valid_time,
+            }
 
         # Simple nearest-neighbor time selection (original, fast approach)
         pred_data_selected = pred_data.sel(time=valid_time, method="nearest")  # type: ignore[union-attr]
@@ -835,66 +1019,139 @@ def compute_metric(
                             for p in _zarr_paths
                         ]
 
-                        if len(_ds_parts) == 1:
-                            ref_data = _ds_parts[0]
-                        else:
-                            # Concatenate in time order (paths injected already sorted)
-                            ref_data = _xr_argo.concat(_ds_parts, dim="obs")
+                        _t0_np = np.datetime64(pd.Timestamp(time_bounds[0]))
+                        _t1_np = np.datetime64(pd.Timestamp(time_bounds[1]))
 
-                        # Normalise dimension name
-                        _obs_dim = "obs"
-                        if _obs_dim in ref_data.dims and n_points_dim not in ref_data.dims:
-                            ref_data = ref_data.rename({_obs_dim: n_points_dim})
-                        elif _obs_dim not in ref_data.dims and n_points_dim in ref_data.dims:
-                            pass  # already named correctly
-                        else:
-                            _obs_dim = n_points_dim  # no rename needed
+                        def _filter_argo_zarr_part(_ds_part):
+                            """Filter a single monthly zarr to the task time_bounds.
 
-                        # Detect time coordinate name (ARGO uses uppercase TIME)
-                        _time_name = None
-                        for _tc in ("TIME", "time", "JULD"):
-                            if _tc in ref_data.coords or _tc in ref_data.data_vars:
-                                _time_name = _tc
-                                break
-
-                        if _time_name is not None:
-                            if _time_name in ref_data.coords:
-                                _t_vals = np.asarray(ref_data.coords[_time_name].values)
-                            else:
-                                _t_vals = np.asarray(ref_data[_time_name].values)
-                            if not np.issubdtype(_t_vals.dtype, np.datetime64):
+                            Filtering BEFORE concatenation is critical for month-boundary
+                            tasks: each monthly zarr contains ~13 000 profiles, but only
+                            ~50–200 fall inside the ±12 h task window.  Materialising a
+                            filtered slice (~50 profiles) is orders of magnitude cheaper
+                            than first concatenating two full zarrs (~26 000 profiles) and
+                            then slicing — which was the previous behaviour.
+                            """
+                            # Normalise obs dimension name for this part
+                            _dim = "obs" if "obs" in _ds_part.dims else n_points_dim
+                            if _dim not in _ds_part.dims:
+                                return None
+                            # Detect time variable
+                            _tn_part = None
+                            for _tc in ("TIME", "time", "JULD"):
+                                if _tc in _ds_part.coords or _tc in _ds_part.data_vars:
+                                    _tn_part = _tc
+                                    break
+                            if _tn_part is None:
+                                return _ds_part  # no time coord — return as-is
+                            _tv = np.asarray(
+                                _ds_part.coords[_tn_part].values
+                                if _tn_part in _ds_part.coords
+                                else _ds_part[_tn_part].values
+                            )
+                            if not np.issubdtype(_tv.dtype, np.datetime64):
                                 try:
-                                    _t_vals = pd.to_datetime(_t_vals).values
+                                    _tv = pd.to_datetime(_tv).values
                                 except Exception:
-                                    _t_vals = _t_vals.astype("datetime64[ns]")
-
-                            _t0_np = np.datetime64(pd.Timestamp(time_bounds[0]))
-                            _t1_np = np.datetime64(pd.Timestamp(time_bounds[1]))
-
-                            # Fast path: data is sorted -> contiguous slice
-                            _is_sorted = (
-                                len(_t_vals) <= 1
-                                or bool(np.all(_t_vals[:-1] <= _t_vals[1:]))
-                            )
-                            if _is_sorted:
-                                _i0 = int(np.searchsorted(_t_vals, _t0_np, side="left"))
-                                _i1 = int(np.searchsorted(_t_vals, _t1_np, side="right"))
-                                ref_data = ref_data.isel({n_points_dim: slice(_i0, _i1)})
+                                    _tv = _tv.astype("datetime64[ns]")
+                            # Prefer searchsorted (O(log n)) when sorted
+                            if len(_tv) <= 1 or bool(np.all(_tv[:-1] <= _tv[1:])):
+                                _i0 = int(np.searchsorted(_tv, _t0_np, side="left"))
+                                _i1 = int(np.searchsorted(_tv, _t1_np, side="right"))
+                                _ds_part = _ds_part.isel({_dim: slice(_i0, _i1)})
                             else:
-                                _mask = (_t_vals >= _t0_np) & (_t_vals <= _t1_np)
-                                ref_data = ref_data.isel({n_points_dim: _mask})
+                                _ds_part = _ds_part.isel(
+                                    {_dim: (_tv >= _t0_np) & (_tv <= _t1_np)}
+                                )
+                            if _ds_part.sizes.get(_dim, 0) == 0:
+                                return None
+                            # Materialise the small filtered slice immediately to free
+                            # the lazy zarr reference and avoid graph accumulation.
+                            if any(hasattr(_ds_part[v].data, "dask") for v in _ds_part.variables):
+                                _ds_part = _ds_part.compute(scheduler="synchronous")
+                            return _ds_part
 
-                        # With chunks={} the data is dask-backed;
-                        # .compute() materialises only the time-filtered slice.
-                        if any(
-                            hasattr(ref_data[v].data, "dask")
-                            for v in ref_data.variables
-                        ):
-                            ref_data = ref_data.compute(
-                                scheduler="synchronous"
-                            )
+                        if len(_ds_parts) == 1:
+                            _filtered = _filter_argo_zarr_part(_ds_parts[0])
+                            ref_data = _filtered
+                        else:
+                            # Month-boundary task: filter each zarr independently
+                            # BEFORE concatenating so that only the tiny already-
+                            # filtered slices (few dozen profiles) are concatenated
+                            # rather than the full ~13 000-profile monthly datasets.
+                            _filtered_parts = [
+                                _f for _f in (
+                                    _filter_argo_zarr_part(_dp) for _dp in _ds_parts
+                                ) if _f is not None
+                            ]
+                            if not _filtered_parts:
+                                ref_data = None
+                            elif len(_filtered_parts) == 1:
+                                ref_data = _filtered_parts[0]
+                            else:
+                                # Ensure compatible obs-dim name before concat
+                                _norm = []
+                                for _fp in _filtered_parts:
+                                    _d = "obs" if "obs" in _fp.dims else n_points_dim
+                                    if _d != n_points_dim and n_points_dim not in _fp.dims:
+                                        _fp = _fp.rename({_d: n_points_dim})
+                                    _norm.append(_fp)
+                                ref_data = _xr_argo.concat(_norm, dim=n_points_dim)
 
-                        if ref_data.sizes.get(n_points_dim, 0) == 0:
+                        # Normalise dimension name on the final (possibly single-zarr) result
+                        if ref_data is not None:
+                            _obs_dim = "obs"
+                            if _obs_dim in ref_data.dims and n_points_dim not in ref_data.dims:
+                                ref_data = ref_data.rename({_obs_dim: n_points_dim})
+                            elif _obs_dim not in ref_data.dims and n_points_dim in ref_data.dims:
+                                pass  # already named correctly
+                            else:
+                                _obs_dim = n_points_dim  # no rename needed
+
+                            # Detect time coordinate name (ARGO uses uppercase TIME)
+                            _time_name = None
+                            for _tc in ("TIME", "time", "JULD"):
+                                if _tc in ref_data.coords or _tc in ref_data.data_vars:
+                                    _time_name = _tc
+                                    break
+
+                            # For single-zarr path the filtering was done in
+                            # _filter_argo_zarr_part; apply it here only when no
+                            # time variable was found there (rare fallback).
+                            if _time_name is not None and len(_ds_parts) == 1:
+                                if _time_name in ref_data.coords:
+                                    _t_vals = np.asarray(ref_data.coords[_time_name].values)
+                                else:
+                                    _t_vals = np.asarray(ref_data[_time_name].values)
+                                if not np.issubdtype(_t_vals.dtype, np.datetime64):
+                                    try:
+                                        _t_vals = pd.to_datetime(_t_vals).values
+                                    except Exception:
+                                        _t_vals = _t_vals.astype("datetime64[ns]")
+                                _is_sorted = (
+                                    len(_t_vals) <= 1
+                                    or bool(np.all(_t_vals[:-1] <= _t_vals[1:]))
+                                )
+                                if _is_sorted:
+                                    _i0 = int(np.searchsorted(_t_vals, _t0_np, side="left"))
+                                    _i1 = int(np.searchsorted(_t_vals, _t1_np, side="right"))
+                                    ref_data = ref_data.isel({n_points_dim: slice(_i0, _i1)})
+                                else:
+                                    _mask = (_t_vals >= _t0_np) & (_t_vals <= _t1_np)
+                                    ref_data = ref_data.isel({n_points_dim: _mask})
+
+                            # With chunks={} the data may still be dask-backed
+                            # (single-zarr path where _filter_argo_zarr_part
+                            # returned without computing, e.g. no time coord).
+                            if any(
+                                hasattr(ref_data[v].data, "dask")
+                                for v in ref_data.variables
+                            ):
+                                ref_data = ref_data.compute(
+                                    scheduler="synchronous"
+                                )
+
+                        if ref_data is not None and ref_data.sizes.get(n_points_dim, 0) == 0:
                             ref_data = None
 
                         _used_prefetch = True
@@ -1407,6 +1664,35 @@ def compute_metric(
             # Fallback for paths that produced a non-dask ref (e.g. CMEMS).
             if ref_data is not None:
                 ref_data = to_float32(ref_data)  # no-op when already float32
+
+        # Optional physical-range filtering for observation references.
+        # Enabled by default; especially important for ARGO where occasional
+        # invalid salinity values can dominate RMSE/MAE aggregates.
+        if ref_is_observation and _apply_obs_physical_qc and ref_alias == "argo_profiles":
+            if isinstance(ref_data, list):
+                _total_masked: Dict[str, int] = {}
+                _new_ref_data = []
+                for _ds in ref_data:
+                    if _ds is None:
+                        _new_ref_data.append(_ds)
+                        continue
+                    _clean_ds, _masked = _mask_invalid_obs_values(_ds, _OBS_PHYSICAL_RANGES)
+                    _new_ref_data.append(_clean_ds)
+                    for _k, _v in _masked.items():
+                        _total_masked[_k] = _total_masked.get(_k, 0) + _v
+                ref_data = _new_ref_data
+                if _total_masked:
+                    logger.warning(
+                        f"[{ref_alias}] Masked invalid observation values before metrics: "
+                        f"{_total_masked}"
+                    )
+            elif ref_data is not None:
+                ref_data, _masked = _mask_invalid_obs_values(ref_data, _OBS_PHYSICAL_RANGES)
+                if _masked:
+                    logger.warning(
+                        f"[{ref_alias}] Masked invalid observation values before metrics: "
+                        f"{_masked}"
+                    )
 
         # Force reloading if memory becomes an issue? No, trust Dask, but do explicit GC
         _clear_xarray_file_cache()
@@ -2004,7 +2290,7 @@ class Evaluator:
 
     @staticmethod
     def _validate_batch_file(
-        batch_file: str, expected_items: int,
+        batch_file: str, expected_items: int, max_task_errors: int = 0,
     ) -> Optional[List[Dict[str, Any]]]:
         """Check if a batch result file exists and is valid.
 
@@ -2015,10 +2301,200 @@ class Evaluator:
         4. Item count matches expected batch size
 
         Returns the parsed list of result dicts if valid, None otherwise.
+
+        Fast path: for large checkpoint files (> 1 MB compressed), item
+        count is confirmed by counting ``"ref_alias":`` occurrences in the
+        raw decompressed bytes rather than full JSON parsing.  If the count
+        matches, a lightweight list of stub dicts carrying only the fields
+        needed for summary stats is returned, avoiding the 10-s JSON parse
+        cost for large glorys/per-bins checkpoints.
         """
         if not os.path.isfile(batch_file):
             return None
         try:
+            _file_size = os.path.getsize(batch_file)
+
+            # ── Ultra-fast path for very large checkpoint files ───────────
+            # Files > 32 MB (e.g. glorys per-bins batches at ~73 MB) would take
+            # 2+ seconds EACH for the chunk-scan below, totalling 4+ minutes
+            # across 125 files on resume — blocking the main thread and causing
+            # Dask watchdog timeouts.  For these files we trust atomicity of the
+            # checkpoint write (temp-file + rename) and only verify:
+            #  1. Gzip magic bytes (file was fully written, not truncated to 0)
+            #  2. File size is plausible given expected_items
+            # If both pass, return minimal stubs immediately.
+            if _file_size > 32_000_000:
+                with open(batch_file, "rb") as _fh:
+                    _magic = _fh.read(2)
+                if _magic != b"\x1f\x8b":
+                    logger.warning(
+                        f"Checkpoint invalid (bad gzip magic): {batch_file}"
+                    )
+                    return None
+                # Minimum plausible size per item: 2 000 bytes compressed.
+                # A valid result containing even a handful of metric values
+                # compresses to several KB; items×100 was far too permissive
+                # and accepted nearly-empty files (all errors, result=null).
+                if _file_size < expected_items * 2_000:
+                    logger.warning(
+                        f"Checkpoint suspicious (too small for {expected_items} "
+                        f"items, {_file_size} bytes): {batch_file}"
+                    )
+                    return None
+                # Quick content scan: decompress first 256 KB and look for
+                # 'result': null patterns and error keys to detect all-failed batches.
+                _uf_error_pat = b'"error":'
+                _uf_null_pat = b'"result": null'
+                _uf_null_pat2 = b'"result":null'
+                _uf_err_cnt = 0
+                _uf_null_cnt = 0
+                _uf_bytes_read = 0
+                _uf_scan_limit = 256 * 1024
+                try:
+                    with gzip.open(batch_file, "rb") as _uf_fh:
+                        _uf_buf = _uf_fh.read(_uf_scan_limit)
+                    _uf_err_cnt = _uf_buf.count(_uf_error_pat)
+                    _uf_null_cnt = _uf_buf.count(_uf_null_pat) + _uf_buf.count(_uf_null_pat2)
+                except Exception:
+                    pass
+                if _uf_err_cnt >= expected_items:
+                    logger.warning(
+                        f"Checkpoint invalid (all {expected_items} items errored): {batch_file}"
+                    )
+                    return None
+                if max_task_errors == 0 and _uf_err_cnt > 0:
+                    logger.warning(
+                        f"Checkpoint invalid ({_uf_err_cnt} error(s), max_task_errors=0): {batch_file}"
+                    )
+                    return None
+                if _uf_null_cnt >= expected_items:
+                    logger.warning(
+                        f"Checkpoint invalid (all {expected_items} items have null result): {batch_file}"
+                    )
+                    return None
+                return [{}] * expected_items
+
+            # ── Fast path for medium checkpoint files ─────────────────────
+            # Files > 1 MB compressed (typically glorys batches with per-bins
+            # data) expand to ~850 MB of JSON which takes 10+ seconds to parse.
+            # Scan the decompressed gzip stream in chunks instead of reading the
+            # whole payload into RAM at once.  The scan exits early once
+            # expected_items occurrences have been found.
+            if _file_size > 1_000_000:
+                import re as _re_val
+                _pat_ref = b'"ref_alias":'
+                _re_n_points = _re_val.compile(rb'"n_points"\s*:\s*(\d+)')
+                _re_valid_time = _re_val.compile(rb'"valid_time"\s*:\s*"([^"]+)"')
+                _re_error = _re_val.compile(rb'"error"\s*:')
+                _re_null_result = _re_val.compile(rb'"result"\s*:\s*null')
+                _null_result_count = 0
+                _chunk_size = 4 * 1024 * 1024
+                _carry_keep = 256
+                _prefix_checked = False
+                _prefix = bytearray()
+                _ref_count = 0
+                _n_points_list: List[int] = []
+                _vt_list: List[str] = []
+                _error_count = 0
+                _carry = b""
+
+                with gzip.open(batch_file, "rb") as _fb:
+                    while True:
+                        _chunk = _fb.read(_chunk_size)
+                        if not _chunk:
+                            break
+                        if not _prefix_checked:
+                            _prefix.extend(_chunk[:64])
+                            _stripped = bytes(_prefix).lstrip()
+                            if len(_stripped) >= 1:
+                                _prefix_checked = True
+                                if not _stripped.startswith(b"["):
+                                    logger.warning(
+                                        f"Checkpoint invalid (not a list): {batch_file}"
+                                    )
+                                    return None
+
+                        _data = _carry + _chunk
+                        if len(_data) > _carry_keep:
+                            _scan = _data[:-_carry_keep]
+                            _carry = _data[-_carry_keep:]
+                        else:
+                            _scan = b""
+                            _carry = _data
+
+                        if _scan:
+                            _ref_count += _scan.count(_pat_ref)
+                            _n_points_list.extend(
+                                int(m.group(1))
+                                for m in _re_n_points.finditer(_scan)
+                            )
+                            _vt_list.extend(
+                                m.group(1).decode("ascii", errors="replace")
+                                for m in _re_valid_time.finditer(_scan)
+                            )
+                            _error_count += len(_re_error.findall(_scan))
+                            _null_result_count += len(_re_null_result.findall(_scan))
+                        # Early exit: found enough items — no need to read more
+                        if _ref_count >= expected_items:
+                            break
+
+                if not _prefix_checked:
+                    logger.warning(
+                        f"Checkpoint invalid (not a list): {batch_file}"
+                    )
+                    return None
+
+                if _carry:
+                    _ref_count += _carry.count(_pat_ref)
+                    _n_points_list.extend(
+                        int(m.group(1))
+                        for m in _re_n_points.finditer(_carry)
+                    )
+                    _vt_list.extend(
+                        m.group(1).decode("ascii", errors="replace")
+                        for m in _re_valid_time.finditer(_carry)
+                    )
+                    _error_count += len(_re_error.findall(_carry))
+                    _null_result_count += len(_re_null_result.findall(_carry))
+
+                if _ref_count != expected_items:
+                    logger.warning(
+                        f"Checkpoint invalid (expected {expected_items} items, "
+                        f"got {_ref_count} by fast-scan): {batch_file}"
+                    )
+                    return None
+                # Content-quality check: reject batches where computation
+                # clearly failed for all (or too many) items.
+                if _error_count >= expected_items:
+                    logger.warning(
+                        f"Checkpoint invalid (all {expected_items} items errored): {batch_file}"
+                    )
+                    return None
+                if max_task_errors == 0 and _error_count > 0:
+                    logger.warning(
+                        f"Checkpoint invalid ({_error_count} error(s), max_task_errors=0): {batch_file}"
+                    )
+                    return None
+                if _null_result_count >= expected_items:
+                    logger.warning(
+                        f"Checkpoint invalid (all {expected_items} items have null result): {batch_file}"
+                    )
+                    return None
+                # Build minimal stub dicts for stats accumulation.
+                _stubs: List[Dict[str, Any]] = []
+                for _i in range(expected_items):
+                    _stub: Dict[str, Any] = {}
+                    if _i < len(_n_points_list):
+                        _stub["n_points"] = _n_points_list[_i]
+                    if _i < len(_vt_list):
+                        _stub["valid_time"] = _vt_list[_i]
+                    _stubs.append(_stub)
+                # Spread error flag across first N stubs.
+                for _i in range(min(_error_count, expected_items)):
+                    _stubs[_i]["error"] = "resumed"
+                return _stubs
+
+            # ── Normal path for small files ───────────────────────────────
             with gzip.open(batch_file, "rt", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, list):
@@ -2028,6 +2504,26 @@ class Evaluator:
                 logger.warning(
                     f"Checkpoint invalid (expected {expected_items} items, "
                     f"got {len(data)}): {batch_file}"
+                )
+                return None
+            # Content-quality checks: reject all-error or all-null-result batches.
+            _n_errors_np = sum(1 for x in data if x.get("error"))
+            _n_null_np = sum(
+                1 for x in data if x.get("result") in (None, [], {})
+            )
+            if _n_errors_np >= len(data):
+                logger.warning(
+                    f"Checkpoint invalid (all {len(data)} items errored): {batch_file}"
+                )
+                return None
+            if max_task_errors == 0 and _n_errors_np > 0:
+                logger.warning(
+                    f"Checkpoint invalid ({_n_errors_np} error(s), max_task_errors=0): {batch_file}"
+                )
+                return None
+            if _n_null_np >= len(data):
+                logger.warning(
+                    f"Checkpoint invalid (all {len(data)} items have null/empty result): {batch_file}"
                 )
                 return None
             return data
@@ -2128,12 +2624,16 @@ class Evaluator:
                     if os.path.isfile(_bf):
                         _n_cached += 1
                 if _n_cached:
-                    logger.info(
-                        f"Resume: {_n_cached}/{_total_batches} batch checkpoint(s) "
-                        f"found — will validate and skip completed batches."
+                    logger.opt(colors=True).info(
+                        f"<cyan>Resume mode</cyan> | found <bold>{_n_cached}</bold> saved "
+                        f"batch file(s) out of <bold>{_total_batches}</bold>. "
+                        "Each one will be checked and reused when valid."
                     )
                 else:
-                    logger.info("Resume: no existing checkpoints found, starting fresh.")
+                    logger.opt(colors=True).info(
+                        "<cyan>Resume mode</cyan> | no saved batch files found. "
+                        "Starting a full run."
+                    )
 
             _prev_ref_alias: Optional[str] = None
             _ref_aliases_ordered: List[str] = list(
@@ -2177,6 +2677,18 @@ class Evaluator:
                 """Like _pad but ignores ANSI escape sequences when measuring width."""
                 visible = _ANSI_RE.sub("", text)
                 return text + ' ' * max(0, width - _dw(visible))
+
+            def _pretty_alias(alias: Any) -> str:
+                """Return a user-facing dataset label."""
+                return str(alias).replace("_", " ").upper()
+
+            def _batch_label(batch_idx: int, total_batches: int) -> str:
+                """Return a 1-based human-friendly batch label."""
+                return f"Batch {batch_idx + 1}/{total_batches}"
+
+            def _task_label(task_count: int) -> str:
+                """Return a human-friendly task count label."""
+                return f"{task_count} task" + ("" if task_count == 1 else "s")
 
             def _print_ref_summary(alias: str) -> None:
                 """Print a summary box for a completed reference dataset."""
@@ -2285,10 +2797,6 @@ class Evaluator:
                         "t_max": None,
                     }
 
-                # ── Reconfigure cluster if this ref dataset needs
-                #    different sizing (workers / threads / memory) ──
-                self._reconfigure_cluster_for_ref(ref_alias)  # type: ignore[arg-type]
-
                 # Extract necessary information
                 pred_connection_params = self.dataloader.pred_connection_params
                 ref_connection_params = self.dataloader.ref_connection_params[ref_alias]  # type: ignore[index]
@@ -2303,39 +2811,55 @@ class Evaluator:
                 # Build look-ahead context for the NEXT batch (if any).
                 # _evaluate_batch will launch the background download during
                 # its as_completed loop (workers busy -> driver has spare CPU).
-                # Look-ahead depth: download preds for the next N batches
-                # (not just N+1) so fast compute never stalls on S3.
                 _la_next = None
                 if _next_raw is not None:
+                    # ARGO batches are memory- and I/O-intensive already;
+                    # keep execution single-path (no background look-ahead)
+                    # to avoid concurrent Zarr/Blosc activity in the driver,
+                    # which has triggered intermittent segfaults.
+                    if str(ref_alias).lower() == "argo_profiles":
+                        _la_depth = 0
+                    else:
+                        _batch_dask_cfg = self.dask_cfgs_by_dataset.get(ref_alias, {})
+                        _la_depth = max(
+                            int(_batch_dask_cfg.get("lookahead_depth", 1) or 0),
+                            0,
+                        )
                     # Gather pred URLs from the next few batches (same ref only)
-                    _LA_DEPTH = 3  # look ahead up to 3 batches
                     _la_extra_batches: List[List[Dict[str, Any]]] = []
-                    for _lk in range(1, _LA_DEPTH + 1):
-                        _fi = batch_idx + _lk
-                        if _fi < _total_batches:
-                            _fb = _all_batches[_fi]
-                            if _fb and _fb[0].get("ref_alias") == ref_alias:
-                                _la_extra_batches.append(_fb)
+                    if _la_depth > 0:
+                        for _lk in range(1, _la_depth + 1):
+                            _fi = batch_idx + _lk
+                            if _fi < _total_batches:
+                                _fb = _all_batches[_fi]
+                                if _fb and _fb[0].get("ref_alias") == ref_alias:
+                                    _la_extra_batches.append(_fb)
+                                else:
+                                    break  # different ref → stop
                             else:
-                                break  # different ref → stop
-                        else:
-                            break
-                    _la_next = {
-                        'batch': _next_raw,
-                        'ref_alias': _next_raw[0].get("ref_alias") if _next_raw else None,
-                        'extra_pred_batches': _la_extra_batches[1:] if len(_la_extra_batches) > 1 else [],
-                    }
+                                break
+                        _la_next = {
+                            'batch': _next_raw,
+                            'ref_alias': _next_raw[0].get("ref_alias") if _next_raw else None,
+                            'extra_pred_batches': _la_extra_batches[1:] if len(_la_extra_batches) > 1 else [],
+                        }
 
                 # ── Resume: try to load existing batch checkpoint ─────
                 batch_file = os.path.join(
                     self.results_dir or ".", f"results_{pred_alias}_batch_{batch_idx}.json.gz"
                 )
                 if self.resume:
-                    _cached = self._validate_batch_file(batch_file, expected_items=len(batch))
+                    _cached = self._validate_batch_file(
+                        batch_file,
+                        expected_items=len(batch),
+                        max_task_errors=int(getattr(self, "max_task_errors", 0) or 0),
+                    )
                     if _cached is not None:
-                        logger.info(
-                            f"Resume: skipping batch {batch_idx}/{_total_batches} "
-                            f"({ref_alias}, {len(batch)} tasks) — checkpoint valid"
+                        logger.opt(colors=True).info(
+                            f"<green>{_batch_label(batch_idx, _total_batches)}</green> | "
+                            f"<magenta>{_pretty_alias(ref_alias)}</magenta> | "
+                            "saved results already available, skipping this batch "
+                            f"(<bold>{_task_label(len(batch))}</bold>)"
                         )
                         serial_results = _cached
                         # Accumulate stats from the cached results
@@ -2361,6 +2885,86 @@ class Evaluator:
                         del _cached, serial_results
                         continue
 
+                # ── Reconfigure cluster if this ref dataset needs
+                #    different sizing (workers / threads / memory) ──
+                logger.opt(colors=True).debug(
+                    f"<cyan>{_batch_label(batch_idx, _total_batches)}</cyan> | "
+                    f"<magenta>{_pretty_alias(ref_alias)}</magenta> | "
+                    "preparing workers for this dataset"
+                )
+                self._reconfigure_cluster_for_ref(ref_alias)  # type: ignore[arg-type]
+                logger.opt(colors=True).debug(
+                    f"<cyan>{_batch_label(batch_idx, _total_batches)}</cyan> | "
+                    f"<magenta>{_pretty_alias(ref_alias)}</magenta> | "
+                    "workers are ready"
+                )
+
+                # ── Purge pred cache entries with wrong time_chunk ────────
+                # Previous crashed runs may have left zarrs with
+                # time_chunk > 1 in pred_prefetch_cache.  Attempting to
+                # rechunk them inside _do_pred_prefetch (daemon thread)
+                # triggers a blosc SIGSEGV.  Scan and remove them here,
+                # on the driver, before the batch starts.
+                import shutil as _sh_pre
+                _pred_cache_pre = os.path.join(
+                    self.results_dir or ".",
+                    "pred_prefetch_cache",
+                    str(pred_alias),
+                )
+                if os.path.isdir(_pred_cache_pre):
+                    for _entry in os.scandir(_pred_cache_pre):
+                        if not _entry.is_dir():
+                            continue
+                        # Skip temp files from in-progress or crashed downloads
+                        if (
+                            ".downloading" in _entry.name
+                            or _entry.name.endswith(".rechunking")
+                            or _entry.name.endswith(".rechunked")
+                        ):
+                            # Look-ahead temp dirs (.downloading.la.*) may still be
+                            # actively written by the previous batch's lookahead thread
+                            # if the 300 s join timed out.  Deleting them mid-write
+                            # causes FileNotFoundError inside s3fs._get_file.
+                            # Only delete them if they have not been touched recently
+                            # (>10 min old → definitely stale from a previous crash).
+                            if ".downloading.la." in _entry.name:
+                                try:
+                                    _la_age = time.time() - _entry.stat().st_mtime
+                                    if _la_age < 600:
+                                        continue  # still fresh – leave for active thread
+                                except Exception:
+                                    pass
+                            # Clean up stale temp dirs from crashed runs
+                            try:
+                                _sh_pre.rmtree(_entry.path, ignore_errors=True)
+                            except Exception:
+                                pass
+                            continue
+                        try:
+                            _pz = xr.open_zarr(_entry.path, consolidated=True, chunks={})
+                            _bad = False
+                            if _pz.sizes.get("time", 1) > 1:
+                                for _vv in _pz.data_vars:
+                                    if "time" in _pz[_vv].dims:
+                                        _dc = dict(zip(
+                                            _pz[_vv].dims,
+                                            _pz[_vv].data.chunks,
+                                        ))
+                                        if _dc.get("time", (1,))[0] > 1:
+                                            _bad = True
+                                            break
+                            _pz.close()
+                            del _pz
+                            if _bad:
+                                logger.debug(
+                                    f"Pre-batch: removing cached pred zarr "
+                                    f"with time_chunk>1: {_entry.name}"
+                                )
+                                _sh_pre.rmtree(_entry.path, ignore_errors=True)
+                        except Exception:
+                            # Cannot open → likely corrupted, remove it
+                            _sh_pre.rmtree(_entry.path, ignore_errors=True)
+
                 batch_results = self._evaluate_batch(
                     batch, pred_alias, ref_alias,  # type: ignore[arg-type]
                     pred_connection_params, ref_connection_params,
@@ -2381,6 +2985,7 @@ class Evaluator:
                 # Save batch by batch (gzip: 15-20× smaller than plain JSON)
                 with gzip.open(batch_file, "wt", encoding="utf-8", compresslevel=6) as f:
                     json.dump(serial_results, f, separators=(',', ':'), ensure_ascii=False)
+                logger.debug(f"[batch {batch_idx}] checkpoint written")
 
                 # ── Accumulate per-ref stats ─────────────────────────
                 if ref_alias in _ref_stats:
@@ -2408,6 +3013,19 @@ class Evaluator:
                 del batch_results
                 del serial_results
                 gc.collect()
+                # Log current RSS after batch cleanup
+                try:
+                    with open("/proc/self/status") as _f_st:
+                        for _l_st in _f_st:
+                            if _l_st.startswith("VmRSS:"):
+                                logger.debug(
+                                    f"[batch {batch_idx}] driver VmRSS = "
+                                    f"{int(_l_st.split()[1]) // 1024} MB"
+                                )
+                                break
+                except Exception:
+                    pass
+                logger.debug(f"[batch {batch_idx}] gc done")
 
                 # ── Disk cleanup: purge prefetch caches from this batch ───
                 # Prefetched observation zarrs are no longer needed once the
@@ -2438,15 +3056,41 @@ class Evaluator:
                                 _sh_cleanup.rmtree(_cache_alias_path, ignore_errors=True)
                             except Exception:
                                 pass
-                # Clean pred prefetch when switching reference (next batch
-                # will have different time windows needing different preds)
-                if _next_ref != ref_alias:
-                    _pred_path = os.path.join(_results_dir, "pred_prefetch_cache")
-                    if os.path.isdir(_pred_path):
-                        try:
-                            _sh_cleanup.rmtree(_pred_path, ignore_errors=True)
-                        except Exception:
-                            pass
+                # Clean pred prefetch: remove only zarrs that are not needed
+                # by any future batch.  Pred zarrs (glonet) are valid for all
+                # reference datasets that cover the same time window, so
+                # deleting them on every ref_alias switch causes a full
+                # re-download for each reference dataset — very wasteful.
+                # Instead: compute the set of pred file *names* still required
+                # by remaining batches, and delete only the others.
+                _future_pred_names: set = set()
+                from pathlib import Path as _PfCleanPred
+                for _fb in _all_batches[batch_idx + 1:]:
+                    for _fe in _fb:
+                        _fp = _fe.get("pred_data")
+                        if isinstance(_fp, str):
+                            _future_pred_names.add(_PfCleanPred(_fp).name)
+                _pred_alias_cache = os.path.join(
+                    _results_dir, "pred_prefetch_cache", str(pred_alias)
+                )
+                if os.path.isdir(_pred_alias_cache):
+                    for _pred_entry in os.scandir(_pred_alias_cache):
+                        if not _pred_entry.is_dir():
+                            continue
+                        # Never touch in-progress or temp dirs
+                        if (
+                            ".downloading" in _pred_entry.name
+                            or _pred_entry.name.endswith(".rechunking")
+                            or _pred_entry.name.endswith(".rechunked")
+                        ):
+                            continue
+                        if _pred_entry.name not in _future_pred_names:
+                            try:
+                                _sh_cleanup.rmtree(
+                                    _pred_entry.path, ignore_errors=True
+                                )
+                            except Exception:
+                                pass
 
                 # ── Memory-triggered worker restart ───────────────────────
                 # Two criteria (either one triggers a restart):
@@ -2457,10 +3101,12 @@ class Evaluator:
                 #      of its Dask memory_limit.
                 # restart_frequency controls how often the memory check runs
                 # (every N batches).  A value of 1 checks after every batch.
+                logger.debug(f"[batch {batch_idx}] entering restart_workers_per_batch block")
                 _freq = int(self.restart_frequency or 1)
                 if self.restart_workers_per_batch and (batch_idx % _freq == 0):
                     _client = getattr(self.dataset_processor, "client", None)
                     if _client is not None:
+                        logger.debug(f"[batch {batch_idx}] calling get_max_memory_fraction")
                         _cur_frac = self.get_max_memory_fraction()
 
                         # Initialise baseline on the very first batch.
@@ -2519,6 +3165,7 @@ class Evaluator:
                                 # Reset baseline after the cluster is clean.
                                 self.baseline_memory = None
                                 gc.collect()
+                logger.debug(f"[batch {batch_idx}] restart_workers_per_batch block done")
 
             # ── Summary for the LAST ref dataset ─────────────────
             if _prev_ref_alias is not None:
@@ -2680,8 +3327,10 @@ class Evaluator:
                 if _ds_cfg.get("download_workers") is not None
                 else None
             )
+            _apply_obs_physical_qc = bool(_ds_cfg.get("apply_obs_physical_qc", True))
             for _entry in batch:
                 _entry["_c_lib_threads"] = _c_lib_threads
+                _entry["_apply_obs_physical_qc"] = _apply_obs_physical_qc
 
             # ── Throttle observation batches to prevent CPU oversubscription ──
             # Observation datasets (satellite) trigger heavy
@@ -2734,11 +3383,12 @@ class Evaluator:
                     f"per-worker memory pressure"
                 )
             elif is_obs_batch:
-                # With shared zarr, each task still .compute()s its
-                # slice + prediction data.  With 2 threads/worker,
-                # concurrent tasks on the same worker double memory.
-                # Cap to n_workers so at most 1 obs task per worker.
-                max_concurrent_obs = max(_N, 2)
+                # With shared zarr the obs data is already on local disk —
+                # no re-download, lower per-task memory pressure.  Use all
+                # available Dask slots (n_workers × threads_per_worker) so
+                # that multi-threaded workers (nthreads_per_worker=2) can
+                # run two tasks concurrently without leaving slots idle.
+                max_concurrent_obs = max(_total_slots, 4)
             else:
                 max_concurrent_obs = max(_total_slots, 4)
 
@@ -2807,6 +3457,14 @@ class Evaluator:
                         # Prefer partitioned monthly prefetch when available.
                         _partitions = None
                         if hasattr(_mgr, "prefetch_batch_shared_zarr_partitioned"):
+                            # ── GC before prefetch to reduce peak RSS ──────
+                            # Workers remain alive (scale(0) previously used
+                            # here caused SIGSEGV in C-extension teardown
+                            # during worker shutdown on some dependency
+                            # versions). A simple GC pass is sufficient on
+                            # machines with adequate free RAM.
+                            import gc as _gc_pre
+                            _gc_pre.collect()
                             try:
                                 _partitions = _mgr.prefetch_batch_shared_zarr_partitioned(
                                     time_bounds_list=_all_time_bounds,
@@ -2847,6 +3505,14 @@ class Evaluator:
                                     _ref_d["prefetched_argo_shared_zarr"] = _paths_sorted[0]
                                 elif len(_paths_sorted) > 1:
                                     _ref_d["prefetched_argo_shared_zarr"] = _paths_sorted
+                                # Set LPT cost proxy for ARGO: window width (hours) ×
+                                # n_zarrs so that month-boundary windows (2 zarrs,
+                                # open+concat+filter twice as slow) are scheduled first.
+                                _win_h = max(
+                                    1,
+                                    int((_t1_e - _t0_e).total_seconds() / 3600),
+                                )
+                                _entry["_obs_cost"] = _win_h * max(1, len(_paths_sorted))
                         else:
                             _shared_argo_zarr = _mgr.prefetch_batch_shared_zarr(
                                 time_bounds_list=_all_time_bounds,
@@ -2859,6 +3525,20 @@ class Evaluator:
                                     _ref_d = _entry.get("ref_data")
                                     if isinstance(_ref_d, dict):
                                         _ref_d["prefetched_argo_shared_zarr"] = _shared_argo_zarr
+                                    # LPT cost proxy: window width in hours
+                                    _tb_e = _ref_d.get("time_bounds") if isinstance(_ref_d, dict) else None
+                                    if _tb_e is not None:
+                                        try:
+                                            _t0_fb = pd.Timestamp(_tb_e[0])
+                                            _t1_fb = pd.Timestamp(_tb_e[1])
+                                            if _t1_fb < _t0_fb:
+                                                _t0_fb, _t1_fb = _t1_fb, _t0_fb
+                                            _entry["_obs_cost"] = max(
+                                                1,
+                                                int((_t1_fb - _t0_fb).total_seconds() / 3600),
+                                            )
+                                        except Exception:
+                                            pass
 
             # ── Use look-ahead prefetched data if available ────────────
             _la_cache = getattr(self, '_lookahead_cache', {})
@@ -2941,16 +3621,28 @@ class Evaluator:
                                     getattr(self, "results_dir", None) or "/tmp"
                                 ) / "obs_prefetch_cache" / str(ref_alias)
                             )
-                            logger.debug(
-                                f"Observation prefetch ({ref_alias}): "
-                                f"{len(_unique_remote)} files to download/verify"
+                            logger.info(
+                                f"{ref_alias}: downloading {len(_unique_remote)} "
+                                f"obs file(s) → obs_prefetch_cache …"
                             )
+                            _t_obs_dl_start = time.time()
                             _obs_path_map = prefetch_obs_files_to_local(
                                 remote_paths=_unique_remote,
                                 cache_dir=_obs_cache_dir,
                                 fs=_ref_mgr.params.fs,  # type: ignore[union-attr]
                                 ref_alias=str(ref_alias),
                                 max_download_workers=_download_workers,
+                            )
+                            _n_dl = len(_obs_path_map)
+                            _n_cached = _n_dl - sum(
+                                1 for p in _obs_path_map.values()
+                                if not os.path.isfile(p + "/.zmetadata")
+                                and not os.path.isfile(p)
+                            )
+                            logger.info(
+                                f"{ref_alias}: obs prefetch done — "
+                                f"{_n_dl}/{len(_unique_remote)} file(s) ready "
+                                f"in {time.time() - _t_obs_dl_start:.1f}s"
                             )
                             # Inject mapping into every batch entry
                             for _entry in batch:
@@ -3072,8 +3764,13 @@ class Evaluator:
                     _N_REF_DL = min(_download_workers, len(_unique_ref_paths))
                 else:
                     _N_REF_DL = min(4, len(_unique_ref_paths))
-                with _RefPool(max_workers=_N_REF_DL) as _rp:
-                    list(_rp.map(_dl_one_ref, _unique_ref_paths))
+                try:
+                    with _RefPool(max_workers=_N_REF_DL) as _rp:
+                        list(_rp.map(_dl_one_ref, _unique_ref_paths))
+                except Exception as _exc_ref_pool:
+                    logger.error(
+                        f"Ref prefetch pool crashed ({ref_alias}): {_exc_ref_pool!r}"
+                    )
 
                 if _ref_result:
                     logger.debug(
@@ -3086,6 +3783,10 @@ class Evaluator:
 
             _pred_prefetched = False
             _pred_result: Dict[str, str] = {}
+            # Shared flag: set to True by _dl_one_pred when a
+            # RequestTimeTooSkewed error is detected.  Clock skew cannot
+            # be fixed by retrying — the evaluation must stop immediately.
+            _pred_clock_skew: List[bool] = [False]
 
             def _do_pred_prefetch():
                 """Download prediction zarr stores in parallel (background thread)."""
@@ -3129,6 +3830,36 @@ class Evaluator:
                     _pred_fs, "endpoint_url", ""
                 ) or ""
 
+                # ── Preflight: detect S3 clock skew before any download ─
+                # aiobotocore retries RequestTimeTooSkewed up to 5 times
+                # with exponential backoff (~600 s total) before surfacing
+                # a PermissionError.  Checking the server clock HERE, via
+                # a cheap unauthenticated HEAD request, lets us exit the
+                # thread immediately (< 1 s) when skew > 14 min instead of
+                # hanging for the full JOIN_TIMEOUT.  The main-thread retry
+                # loop will then fix the clock and start a fresh thread.
+                _preflight_ep = (
+                    _pred_endpoint
+                    if _pred_endpoint.startswith(("http://", "https://"))
+                    else "https://s3.amazonaws.com"
+                )
+                _preflight_offset = _s3_server_clock_offset(
+                    _preflight_ep, timeout=10
+                )
+                if (
+                    _preflight_offset is not None
+                    and abs(_preflight_offset) > 840   # 14 min margin
+                ):
+                    logger.warning(
+                        f"Pred prefetch preflight: local clock is "
+                        f"{_preflight_offset:+.0f}s vs S3 server "
+                        f"(>{840}s threshold). "
+                        f"Aborting this attempt to avoid a 600 s aiobotocore "
+                        f"retry stall. Auto-sync will run before the next retry."
+                    )
+                    _pred_clock_skew[0] = True
+                    return   # thread exits in < 1 s; main thread will handle it
+
                 _unique_pred_paths = list(dict.fromkeys(
                     e["pred_data"]
                     for e in batch
@@ -3147,18 +3878,18 @@ class Evaluator:
                         _local_zarr
                     ):
                         if _is_valid_local_dataset_cache(_local_zarr):
-                            # ── Cache hit: ensure time_chunk == 1 ────────────
-                            # Zarrs cached before the rechunking fix (or written
-                            # with native time_chunk > 1) force workers to read
-                            # ALL lead times when selecting a single timestep —
-                            # e.g. 10 × 21 depths × 5 vars × float64 ≈ 8 GB per
-                            # task vs ~400 MB with time_chunk=1.  Rechunk once,
-                            # in-place, so all future cache hits are correct.
+                            # ── Cache hit: verify time_chunk == 1 ────────────
+                            # Do NOT rechunk in-place inside this background
+                            # thread: blosc decompression+recompression in a
+                            # daemon thread is not safe (SIGSEGV if the zarr
+                            # has corrupted chunks from a previous crash).
+                            # Instead, invalidate any zarr with time_chunk > 1
+                            # so it gets re-downloaded with correct chunking.
+                            _needs_rchk = False
                             try:
                                 _probe = xr.open_zarr(
                                     _local_zarr, consolidated=True, chunks={}
                                 )
-                                _needs_rchk = False
                                 if _probe.sizes.get("time", 1) > 1:
                                     for _vv in _probe.data_vars:
                                         if "time" in _probe[_vv].dims:
@@ -3172,51 +3903,23 @@ class Evaluator:
                                 _probe.close()
                                 del _probe
                             except Exception:
-                                _needs_rchk = False
+                                # Cannot probe → treat as invalid, re-download
+                                _needs_rchk = True
 
                             if _needs_rchk:
-                                logger.debug(
-                                    f"Rechunking cached pred zarr "
-                                    f"(time→1): {_fname}"
+                                logger.warning(
+                                    f"Cached pred zarr has time_chunk>1 "
+                                    f"({_fname}) — invalidating and "
+                                    f"re-downloading to avoid blosc crash"
                                 )
-                                _rchk_path = _local_zarr + ".rechunking"
-                                try:
-                                    if os.path.isdir(_rchk_path):
-                                        _sh_pred.rmtree(
-                                            _rchk_path, ignore_errors=True
-                                        )
-                                    with dask.config.set(
-                                        scheduler="synchronous"
-                                    ):
-                                        _ds_hit = xr.open_zarr(
-                                            _local_zarr, chunks={}
-                                        ).drop_encoding()
-                                        _ds_hit.chunk({"time": 1}).to_zarr(
-                                            _rchk_path,
-                                            mode="w",
-                                            consolidated=True,
-                                            safe_chunks=False,
-                                        )
-                                        _ds_hit.close()
-                                        del _ds_hit
-                                    _sh_pred.rmtree(
-                                        _local_zarr, ignore_errors=True
-                                    )
-                                    os.rename(_rchk_path, _local_zarr)
-                                except Exception as _exc_rchk:
-                                    logger.warning(
-                                        f"Cache rechunk failed for "
-                                        f"{_fname}: {_exc_rchk!r}"
-                                    )
-                                    if os.path.isdir(_rchk_path):
-                                        _sh_pred.rmtree(
-                                            _rchk_path, ignore_errors=True
-                                        )
-
-                            with _pred_lock:
-                                _pred_result[_rp] = _local_zarr
-                                _counters["hit"] += 1
-                            return
+                                _invalidate_local_dataset_cache(_local_zarr)
+                                # fall through to re-download below
+                            else:
+                                with _pred_lock:
+                                    _pred_result[_rp] = _local_zarr
+                                    _counters["hit"] += 1
+                                return
+                            # cache invalidated → fall through
                         logger.warning(
                             f"Invalid cached prediction store detected for {_fname}; "
                             "removing and re-downloading."
@@ -3306,6 +4009,13 @@ class Evaluator:
                             _pred_result[_rp] = _local_zarr
                             _counters["dl"] += 1
                     except Exception as _exc_pf:
+                        _exc_str = str(_exc_pf)
+                        if (
+                            "RequestTimeTooSkewed" in _exc_str
+                            or "request time" in _exc_str.lower()
+                            and "too large" in _exc_str.lower()
+                        ):
+                            _pred_clock_skew[0] = True
                         logger.warning(
                             f"Prediction prefetch failed for "
                             f"{_fname}: {_exc_pf!r}"
@@ -3321,8 +4031,29 @@ class Evaluator:
                     _N_PRED_DL = min(_pred_dl_workers, len(_unique_pred_paths))
                 else:
                     _N_PRED_DL = min(4, len(_unique_pred_paths))
-                with _PredPool(max_workers=_N_PRED_DL) as _pp:
-                    list(_pp.map(_dl_one_pred, _unique_pred_paths))
+                # Ensure blosc uses a single internal thread before
+                # launching concurrent _dl_one_pred workers.  Each
+                # worker calls numcodecs.Blosc.encode() via to_zarr();
+                # blosc's default of 8 C threads is NOT thread-safe
+                # across concurrent Python threads sharing the same
+                # global blosc thread pool → SIGSEGV.
+                try:
+                    import sys as _sys_blosc_pre
+                    _nc_b = _sys_blosc_pre.modules.get("numcodecs.blosc")
+                    if _nc_b is not None:
+                        _nc_b.set_nthreads(1)
+                    _b = _sys_blosc_pre.modules.get("blosc")
+                    if _b is not None:
+                        _b.set_nthreads(1)
+                except Exception:
+                    pass
+                try:
+                    with _PredPool(max_workers=_N_PRED_DL) as _pp:
+                        list(_pp.map(_dl_one_pred, _unique_pred_paths))
+                except Exception as _exc_pred_pool:
+                    logger.error(
+                        f"Pred prefetch pool crashed ({ref_alias}): {_exc_pred_pool!r}"
+                    )
 
                 if _pred_result:
                     logger.debug(
@@ -3465,10 +4196,159 @@ class Evaluator:
             _t_obs_prep = time.time() - _t_obs_prep
 
             # ── Wait for prediction prefetch thread ──────────────────
+            _JOIN_TIMEOUT = 600
             if _ref_thread is not None:
-                _ref_thread.join()
+                _ref_thread.join(timeout=_JOIN_TIMEOUT)
+                if _ref_thread.is_alive():
+                    logger.warning(
+                        f"{ref_alias}: ref prefetch thread still running after "
+                        f"{_JOIN_TIMEOUT}s — likely S3 stall; continuing without ref prefetch."
+                    )
                 _t_ref_dl = time.time() - _t_ref_dl
-            _pred_thread.join()
+            # ── Pred prefetch retry loop ──────────────────────────────
+            # If the S3 endpoint stalls, we wait and retry up to
+            # DCTOOLS_PRED_PREFETCH_MAX_RETRIES times (default 3) before
+            # raising a fatal error that stops the entire evaluation run.
+            # Each retry starts a fresh daemon thread (new asyncio event
+            # loop → new connection pool) and uses exponential backoff
+            # (60 s, 120 s, 240 s, …) to give the endpoint time to recover.
+            # A successful attempt at any retry breaks out immediately.
+            _MAX_PRED_RETRIES = int(
+                os.environ.get("DCTOOLS_PRED_PREFETCH_MAX_RETRIES", "3")
+            )
+            _PRED_RETRY_BASE_DELAY = int(
+                os.environ.get("DCTOOLS_PRED_PREFETCH_RETRY_DELAY", "60")
+            )
+            _pred_stalled = False
+            for _pred_attempt in range(_MAX_PRED_RETRIES + 1):
+                if _pred_attempt > 0:
+                    # ── Clock-skew auto-correction before each retry ───────
+                    # The preflight check in _do_pred_prefetch exits the thread
+                    # immediately when skew > 14 min (prevents the 600 s
+                    # aiobotocore stall).  _pred_clock_skew[0] is then True.
+                    # We must fix the clock here, in the main thread, before
+                    # starting the next thread — which will redo the preflight
+                    # with the corrected clock and proceed normally.
+                    _skew_flag = _pred_clock_skew[0]
+                    if not _skew_flag:
+                        # Explicit check: the flag may not be set yet if the
+                        # thread timed out but wasn't clock-skewed.
+                        _preflight_ep_retry = (
+                            getattr(
+                                getattr(
+                                    getattr(self.dataloader, "pred_manager", None),
+                                    "params", None,
+                                ),
+                                "endpoint_url", "",
+                            ) or "https://s3.amazonaws.com"
+                        )
+                        _cur_offset = _s3_server_clock_offset(
+                            _preflight_ep_retry, timeout=10
+                        )
+                        if _cur_offset is not None and abs(_cur_offset) > 840:
+                            logger.warning(
+                                f"{ref_alias}: clock skew confirmed in retry "
+                                f"loop ({_cur_offset:+.0f}s vs S3 server)"
+                            )
+                            _skew_flag = True
+
+                    if _skew_flag:
+                        logger.warning(
+                            f"{ref_alias}: clock skew detected — "
+                            f"attempting automatic system clock sync "
+                            f"(attempt {_pred_attempt}/{_MAX_PRED_RETRIES})"
+                        )
+                        _synced = _fix_system_clock(
+                            info_cb=lambda _m: logger.info(_m)
+                        )
+                        if _synced:
+                            # Verify the fix actually worked
+                            _pfx_ep = (
+                                getattr(
+                                    getattr(
+                                        getattr(
+                                            self.dataloader, "pred_manager", None
+                                        ),
+                                        "params", None,
+                                    ),
+                                    "endpoint_url", "",
+                                ) or "https://s3.amazonaws.com"
+                            )
+                            _post_offset = _s3_server_clock_offset(
+                                _pfx_ep, timeout=10
+                            )
+                            if _post_offset is not None and abs(_post_offset) < 60:
+                                logger.info(
+                                    f"{ref_alias}: clock synced — offset now "
+                                    f"{_post_offset:+.1f}s. Retrying pred download."
+                                )
+                                _pred_clock_skew[0] = False
+                            else:
+                                logger.warning(
+                                    f"{ref_alias}: clock sync ran but offset "
+                                    f"is still {_post_offset:+.0f}s"
+                                )
+                        else:
+                            # No sudo access — clock sync impossible.
+                            # If we still have retry budget, give the
+                            # clock a chance to self-correct (NTP daemon
+                            # may be running without sudo); otherwise fail.
+                            if _pred_attempt >= _MAX_PRED_RETRIES:
+                                raise _PredPrefetchFatalError(
+                                    f"{ref_alias}: pred prefetch failed due to "
+                                    f"system clock skew (RequestTimeTooSkewed) "
+                                    f"and automatic clock sync is not available "
+                                    f"(sudo access required). "
+                                    f"Fix the clock manually before restarting: "
+                                    f"  sudo ntpdate -u pool.ntp.org\n"
+                                    f"  or: sudo chronyc makestep\n"
+                                    f"  or: sudo systemctl restart "
+                                    f"systemd-timesyncd"
+                                )
+                            logger.warning(
+                                f"{ref_alias}: cannot sync clock automatically "
+                                f"(no sudo) — waiting for NTP daemon "
+                                f"to self-correct before retry "
+                                f"{_pred_attempt}/{_MAX_PRED_RETRIES}"
+                            )
+
+                    _delay = _PRED_RETRY_BASE_DELAY * (2 ** (_pred_attempt - 1))
+                    logger.warning(
+                        f"{ref_alias}: pred prefetch stalled "
+                        f"(retry {_pred_attempt}/{_MAX_PRED_RETRIES}) "
+                        f"— waiting {_delay}s before retrying…"
+                    )
+                    time.sleep(_delay)
+                    _pred_thread = _pred_thr.Thread(
+                        target=_do_pred_prefetch,
+                        daemon=True,
+                        name=f"pred-prefetch-retry{_pred_attempt}",
+                    )
+                    _pred_thread.start()
+                _pred_thread.join(timeout=_JOIN_TIMEOUT)
+                _pred_stalled = _pred_thread.is_alive()
+                if not _pred_stalled:
+                    break
+                logger.warning(
+                    f"{ref_alias}: pred prefetch attempt {_pred_attempt + 1}/"
+                    f"{_MAX_PRED_RETRIES + 1} stalled after {_JOIN_TIMEOUT}s."
+                )
+            if _pred_stalled:
+                _total_wait_min = (
+                    (_MAX_PRED_RETRIES + 1) * _JOIN_TIMEOUT
+                    + sum(
+                        _PRED_RETRY_BASE_DELAY * (2 ** i)
+                        for i in range(_MAX_PRED_RETRIES)
+                    )
+                ) // 60
+                raise _PredPrefetchFatalError(
+                    f"{ref_alias}: pred prefetch failed after "
+                    f"{_MAX_PRED_RETRIES + 1} attempt(s) "
+                    f"(~{_total_wait_min} min total). "
+                    f"The S3 endpoint appears to be persistently unresponsive. "
+                    f"Set DCTOOLS_PRED_PREFETCH_MAX_RETRIES to increase the "
+                    f"retry limit or check the S3 service status."
+                )
             _t_pred_dl = time.time() - _t_pred_dl
 
             _t_prefetch_total = time.time() - _phase_t0
@@ -3660,6 +4540,10 @@ class Evaluator:
                     if _la_ds_cfg.get("download_workers") is not None
                     else None
                 )
+                _la_pred_workers = max(
+                    int(_la_ds_cfg.get("lookahead_pred_workers", 1) or 1),
+                    1,
+                )
 
                 def _do_lookahead():
                     """Download obs+pred files for the next batch."""
@@ -3737,6 +4621,7 @@ class Evaluator:
                                         )
                                     else:
                                         logger.info(_la_msg)
+                                    _la_t_obs = time.time()
                                     _la_obs_map = (
                                         prefetch_obs_files_to_local(
                                             remote_paths=_la_uniq,
@@ -3748,6 +4633,19 @@ class Evaluator:
                                             max_download_workers=_la_download_workers,
                                         )
                                     )
+                                    _la_obs_dur = time.time() - _la_t_obs
+                                    _la_done_msg = (
+                                        f"Look-ahead: {len(_la_obs_map)}/"
+                                        f"{len(_la_uniq)} obs file(s) ready "
+                                        f"for {_la_ref_alias} "
+                                        f"({_la_obs_dur:.1f}s)"
+                                    )
+                                    if _overall_bar is not None:
+                                        _overall_bar.write(
+                                            f"  ✅  {_la_done_msg}"
+                                        )
+                                    else:
+                                        logger.info(_la_done_msg)
                                     if _la_obs_map:
                                         _result['obs_map'] = _la_obs_map
 
@@ -3759,7 +4657,12 @@ class Evaluator:
                                 or _sample.startswith("http://")
                                 or _sample.startswith("s3://")
                             )
-                            if _is_remote:
+                            if _is_remote and _pred_stalled:
+                                logger.debug(
+                                    "Look-ahead: skipping pred download "
+                                    "(pred prefetch S3 stall detected)"
+                                )
+                            elif _is_remote:
                                 from pathlib import Path as _PfLA2
                                 import shutil as _sh_la
                                 _la_pred_cache = str(
@@ -3866,6 +4769,7 @@ class Evaluator:
                                             # Rechunk time→1 (same as
                                             # prefetch) so workers never
                                             # see time_chunk>1 data.
+                                            _la_rechunk_ok = True
                                             try:
                                                 _la_ds = xr.open_zarr(
                                                     _tmpz, chunks={}
@@ -3900,12 +4804,30 @@ class Evaluator:
                                                 else:
                                                     _la_ds.close()
                                                     del _la_ds
-                                            except Exception:
-                                                pass
+                                            except Exception as _exc_la_rchk:
+                                                logger.warning(
+                                                    f"Look-ahead rechunk "
+                                                    f"failed for {_lz}: "
+                                                    f"{_exc_la_rchk!r} — "
+                                                    f"discarding download"
+                                                )
+                                                # Zarr has wrong chunk
+                                                # size → must NOT be
+                                                # placed in cache.
+                                                _sh_la.rmtree(
+                                                    _tmpz,
+                                                    ignore_errors=True,
+                                                )
+                                                _la_rechunk_ok = False
                                         # Skip overwrite if the zarr
                                         # was already placed by the
                                         # current batch's prefetch.
-                                        if (
+                                        # Also skip if rechunking failed
+                                        # (_la_rechunk_ok=False means
+                                        # _tmpz was already deleted).
+                                        if not _la_rechunk_ok:
+                                            pass  # _tmpz already cleaned up
+                                        elif (
                                             os.path.isdir(_lz)
                                             and os.listdir(_lz)
                                         ):
@@ -3925,7 +4847,7 @@ class Evaluator:
                                 from concurrent.futures import (
                                     ThreadPoolExecutor as _LaPool,
                                 )
-                                _la_n = min(4, len(_la_upreds))
+                                _la_n = min(_la_pred_workers, len(_la_upreds))
                                 with _LaPool(max_workers=_la_n) as _lp:
                                     list(_lp.map(
                                         _la_dl_one, _la_upreds
@@ -4012,54 +4934,60 @@ class Evaluator:
 
             def _heartbeat_fn():
                 while not _hb_stop.is_set():
-                    _hb_stop.wait(30)
-                    if _hb_stop.is_set():
-                        break
-                    _elapsed = time.time() - _hb_t0
-                    _pending = max(num_tasks - _n_collected, 0)
-                    pct = 100.0 * (_n_collected / num_tasks) if num_tasks else 0.0
-                    _overall_bar.set_postfix_str(
-                        f"{_elapsed:.0f}s elapsed"
-                    )
+                    try:
+                        _hb_stop.wait(30)
+                        if _hb_stop.is_set():
+                            break
+                        _elapsed = time.time() - _hb_t0
+                        _pending = max(num_tasks - _n_collected, 0)
+                        pct = 100.0 * (_n_collected / num_tasks) if num_tasks else 0.0
+                        try:
+                            _overall_bar.set_postfix_str(
+                                f"{_elapsed:.0f}s elapsed"
+                            )
+                        except Exception:
+                            pass
 
-                    if (not _tail_logged[0]) and _pending <= _total_slots:
-                        _tail_logged[0] = True
-                        logger.debug(
-                            f"{ref_alias}: entering end-of-batch tail: "
-                            f"pending={_pending} <= slots={_total_slots}. "
-                            "CPU drop is expected here; remaining time is dominated by the slowest tasks."  # noqa: E501
-                        )
+                        if (not _tail_logged[0]) and _pending <= _total_slots:
+                            _tail_logged[0] = True
+                            logger.debug(
+                                f"{ref_alias}: entering end-of-batch tail: "
+                                f"pending={_pending} <= slots={_total_slots}. "
+                                "CPU drop is expected here; remaining time is dominated by the slowest tasks."  # noqa: E501
+                            )
 
-                    _maybe_log_cluster_state(_elapsed, _pending)
+                        _maybe_log_cluster_state(_elapsed, _pending)
 
-                    # ── Watchdog: cancel futures if no progress ──────────
-                    _stall_s = time.time() - _last_progress[0]
-                    if _stall_s >= _STALL_TIMEOUT and _active:
-                        # Check which tasks are eligible for retry
-                        _retriable = []
-                        _exhausted = []
-                        for _sf, _si in list(_active.items()):
-                            _prev = _retry_count.get(_si, 0)
-                            if _prev < _MAX_WATCHDOG_RETRIES:
-                                _retriable.append((_sf, _si))
-                            else:
-                                _exhausted.append((_sf, _si))
-                        _n_retry = len(_retriable)
-                        _n_exhaust = len(_exhausted)
-                        logger.error(
-                            f"{ref_alias}: NO task completed in the last "
-                            f"{_stall_s:.0f}s — workers appear deadlocked "
-                            f"(likely S3/network timeout).  Cancelling "
-                            f"{len(_active)} stuck futures "
-                            f"({_n_retry} retriable, {_n_exhaust} exhausted)."
-                        )
-                        for _stuck_f in list(_active.keys()):
-                            try:
-                                _stuck_f.cancel()
-                            except Exception:
-                                pass
-                        # Reset timer so we don't cancel again immediately.
-                        _last_progress[0] = time.time()
+                        # ── Watchdog: cancel futures if no progress ──────────
+                        _stall_s = time.time() - _last_progress[0]
+                        if _stall_s >= _STALL_TIMEOUT and _active:
+                            # Check which tasks are eligible for retry
+                            _retriable = []
+                            _exhausted = []
+                            for _sf, _si in list(_active.items()):
+                                _prev = _retry_count.get(_si, 0)
+                                if _prev < _MAX_WATCHDOG_RETRIES:
+                                    _retriable.append((_sf, _si))
+                                else:
+                                    _exhausted.append((_sf, _si))
+                            _n_retry = len(_retriable)
+                            _n_exhaust = len(_exhausted)
+                            logger.error(
+                                f"{ref_alias}: NO task completed in the last "
+                                f"{_stall_s:.0f}s — workers appear deadlocked "
+                                f"(likely S3/network timeout).  Cancelling "
+                                f"{len(_active)} stuck futures "
+                                f"({_n_retry} retriable, {_n_exhaust} exhausted)."
+                            )
+                            for _stuck_f in list(_active.keys()):
+                                try:
+                                    _stuck_f.cancel()
+                                except Exception:
+                                    pass
+                            # Reset timer so we don't cancel again immediately.
+                            _last_progress[0] = time.time()
+                    except Exception as _exc_hb:
+                        logger.error(f"Heartbeat/watchdog thread error: {_exc_hb!r}")
 
             _hb_thread = _threading_hb.Thread(
                 target=_heartbeat_fn, daemon=True
@@ -4154,9 +5082,26 @@ class Evaluator:
                                     f"{ref_alias}: worker restart failed: "
                                     f"{_restart_exc!r} — resubmitting anyway"
                                 )
-                            _f_retry = _client.submit(
-                                fn, batch[_idx], retries=1, pure=False
-                            )
+                            try:
+                                _f_retry = _client.submit(
+                                    fn, batch[_idx], retries=1, pure=False
+                                )
+                            except Exception as _submit_exc:
+                                logger.error(
+                                    f"{ref_alias}: task {_idx} resubmit failed "
+                                    f"({_submit_exc!r}) — marking as error"
+                                )
+                                _res = {
+                                    "ref_alias": ref_alias,
+                                    "result": None,
+                                    "n_points": 0,
+                                    "duration_s": 0.0,
+                                    "error": repr(_submit_exc),
+                                }
+                                _results[_idx] = _res
+                                _n_collected += 1
+                                _last_progress[0] = time.time()
+                                continue
                             _all_futures.append(_f_retry)
                             _active[_f_retry] = _idx
                             _submitted_at[_f_retry] = time.monotonic()

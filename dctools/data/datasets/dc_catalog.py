@@ -529,7 +529,7 @@ class DatasetCatalog:
 
             logger.debug("Applying spatial filter using intersects method")
             if isinstance(region, (gpd.GeoSeries, gpd.GeoDataFrame)):
-                region = region.union_all
+                region = region.union_all()
 
             mask = self.gdf.intersects(region)
             self.gdf = self.gdf[mask]
