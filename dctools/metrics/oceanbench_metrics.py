@@ -379,45 +379,6 @@ def _run_class4_with_raw_per_bins(
 
             _chunk_count = 0
 
-            # ── Pre-build pyinterp Grid2D from model (once) ──────────
-            # model_da is already an in-memory numpy-backed DataArray
-            # (pred_data was .compute()'d earlier in compute_metric).
-            _grid2d = None
-            try:
-                import pyinterp
-
-                # Find lat/lon dimension names in the model
-                _lat_dim = next(
-                    (d for d in model_da.dims if d in ("latitude", "lat", "nav_lat")),
-                    None,
-                )
-                _lon_dim = next(
-                    (d for d in model_da.dims if d in ("longitude", "lon", "nav_lon")),
-                    None,
-                )
-                if _lat_dim and _lon_dim:
-                    _src_lat = model_da[_lat_dim].values.astype(np.float64)
-                    _src_lon = model_da[_lon_dim].values.astype(np.float64)
-                    _model_vals = np.asarray(model_da.values, dtype=np.float64)
-                    # Remove leading singleton dims (e.g. time=1, depth=1)
-                    _model_vals = _model_vals.squeeze()
-                    # pyinterp Grid2D expects (lon, lat) C-order
-                    if _model_vals.shape == (len(_src_lat), len(_src_lon)):
-                        _model_vals = _model_vals.T  # (lon, lat)
-                    _x_axis = pyinterp.Axis(_src_lon)
-                    _y_axis = pyinterp.Axis(_src_lat)
-                    _grid2d = pyinterp.Grid2D(_x_axis, _y_axis, _model_vals)
-                    del _model_vals  # Grid2D holds its own copy
-                    logger.debug(
-                        f"[perf] Pre-built pyinterp Grid2D for '{var}': "
-                        f"lat={len(_src_lat)} lon={len(_src_lon)}"
-                    )
-            except Exception as _grid_exc:
-                logger.debug(
-                    f"[perf] Cannot pre-build Grid2D: {_grid_exc!r} "
-                    f"— falling back to interpolate_model_on_obs"
-                )
-
             # ── Direct zarr chunk iterator ─────────────────────────
             # We bypass oceanbench's xr_to_obs_dataframe generator to
             # get full control over the memory lifecycle.  The generator
@@ -444,142 +405,255 @@ def _run_class4_with_raw_per_bins(
                 # Fallback: largest dimension
                 _n_pts_dim = max(obs_da.dims, key=lambda d: obs_da.sizes[d])
 
-            _n_total = obs_da.sizes[_n_pts_dim]
+            # Detect depth dimension for profile observations (e.g. ARGO).
+            # When present, we iterate depth levels one at a time so that
+            # pyinterp.Grid2D is always fed a 2-D (lat × lon) model slice
+            # and obs values at a single depth — enabling correct horizontal
+            # interpolation at each level.
+            _obs_depth_dim = next(
+                (d for d in obs_da.dims if d != _n_pts_dim and "depth" in d.lower()),
+                None,
+            )
+            _model_depth_dim = next(
+                (d for d in model_da.dims if "depth" in d.lower()),
+                None,
+            ) if _obs_depth_dim is not None else None
+            _n_depth_levels = obs_da.sizes[_obs_depth_dim] if _obs_depth_dim is not None else 1
+            if _obs_depth_dim is not None:
+                logger.debug(
+                    f"[perf] Profile obs detected for '{var}': "
+                    f"depth_dim='{_obs_depth_dim}' ({_n_depth_levels} levels), "
+                    f"model_depth_dim='{_model_depth_dim}'"
+                )
 
-            # Detect coordinate names in the observation dataset
-            _all_coords = set(obs_da.coords) | set(obs_ds.coords)
+            # Detect coordinate names in the observation dataset.
+            # Include data_vars as well as coords: ARGO stores LATITUDE,
+            # LONGITUDE, TIME as data variables (not xarray coordinates).
+            _all_candidates = (
+                set(obs_da.coords) | set(obs_ds.coords) | set(obs_ds.data_vars)
+            )
             _lat_coord = next(
-                (c for c in _all_coords
+                (c for c in _all_candidates
                  if c.lower() in ("lat", "latitude", "nav_lat")),
                 None,
             )
             _lon_coord = next(
-                (c for c in _all_coords
+                (c for c in _all_candidates
                  if c.lower() in ("lon", "longitude", "nav_lon")),
                 None,
             )
             _time_coord = next(
-                (c for c in _all_coords if c.lower() == "time"), None,
+                (c for c in _all_candidates if c.lower() == "time"), None,
             )
             _depth_coord = next(
-                (c for c in _all_coords if c.lower() == "depth"), None,
+                (c for c in _all_candidates if c.lower() == "depth"), None,
             )
-
-            # Keep a legacy interp_cache only if we need the fallback
-            interp_cache: Dict = {} if _grid2d is None else {}
 
             _CHUNK_SZ = 500_000
-            logger.debug(
-                f"[perf] Direct zarr streaming: {_n_total} points, "
-                f"{(_n_total + _CHUNK_SZ - 1) // _CHUNK_SZ} chunks, "
-                f"grid2d={'yes' if _grid2d else 'no'}"
-            )
 
-            for _start in range(0, _n_total, _CHUNK_SZ):
-                _end = min(_start + _CHUNK_SZ, _n_total)
-                _sl = {_n_pts_dim: slice(_start, _end)}
-
-                # Read observation arrays from dask → numpy (one at a time)
-                with _dask.config.set(scheduler="synchronous"):
-                    _val_arr = obs_da.isel(_sl).values.ravel()
-                    _lat_raw = (
-                        obs_ds[_lat_coord].isel(_sl).values.ravel()
-                        if _lat_coord and _lat_coord in obs_ds
-                        else (obs_da.coords[_lat_coord].isel(_sl).values.ravel()
-                              if _lat_coord and _lat_coord in obs_da.coords
-                              else None)
-                    )
-                    _lon_raw = (
-                        obs_ds[_lon_coord].isel(_sl).values.ravel()
-                        if _lon_coord and _lon_coord in obs_ds
-                        else (obs_da.coords[_lon_coord].isel(_sl).values.ravel()
-                              if _lon_coord and _lon_coord in obs_da.coords
-                              else None)
-                    )
-                    _time_raw = (
-                        obs_ds[_time_coord].isel(_sl).values.ravel()
-                        if _time_coord and _time_coord in obs_ds
-                        else (obs_da.coords[_time_coord].isel(_sl).values.ravel()
-                              if _time_coord and _time_coord in obs_da.coords
-                              else None)
-                    )
-
-                if len(_val_arr) == 0:
-                    del _val_arr, _lat_raw, _lon_raw, _time_raw
-                    continue
-
-                # Build minimal DataFrame for apply_binning
-                _data: Dict[str, Any] = {}
-                if _lat_raw is not None:
-                    _data["lat"] = _lat_raw
-                if _lon_raw is not None:
-                    _data["lon"] = _lon_raw
-                if _time_raw is not None:
-                    _data["time"] = _time_raw
-                _data[var] = _val_arr
-                chunk_df = pd.DataFrame(_data)
-                del _data, _val_arr, _lat_raw, _lon_raw, _time_raw
-
-                # Spatial/temporal binning
-                chunk_df, groupby_cols = oceanbench_class4_module.apply_binning(
-                    chunk_df,
-                    getattr(evaluator, "bin_specs", None),
-                )
-                if _groupby_cols_resolved is None:
-                    _groupby_cols_resolved = list(groupby_cols)
-
-                if chunk_df.empty:
-                    continue
-
-                # Resolve variable column name
-                if var not in chunk_df.columns:
-                    for candidate in ("value", "variable"):
-                        if candidate in chunk_df.columns:
-                            chunk_df = chunk_df.rename(columns={candidate: var})
-                            break
-                if var not in chunk_df.columns:
-                    continue
-
-                chunk_df = chunk_df.dropna(subset=[var])
-                if chunk_df.empty:
-                    continue
-
-                obs_col = f"{var}_obs"
-                model_col = f"{var}_model"
-
-                # ── Interpolate model → observation locations ─────────
-                if _grid2d is not None:
-                    # Fast path: direct pyinterp call (no xarray overhead)
-                    _obs_lon = chunk_df["lon"].values.astype(np.float64)
-                    _obs_lat = chunk_df["lat"].values.astype(np.float64)
-                    _interp_vals = pyinterp.bivariate(
-                        _grid2d, _obs_lon, _obs_lat,
-                        interpolator="bilinear",
-                        num_threads=1,
-                    )
-                    # Build minimal arrays for error computation
-                    obs_vals = chunk_df[var].values.astype(np.float64)
-                    mod_vals = _interp_vals
-
-                    # NaN mask (from interpolation boundary or missing obs)
-                    _valid = np.isfinite(obs_vals) & np.isfinite(mod_vals)
-                    if not _valid.all():
-                        obs_vals = obs_vals[_valid]
-                        mod_vals = mod_vals[_valid]
-                        # Need lat for weights and bin cols for grouping
-                        _lat_arr = (
-                            chunk_df["lat"].values[_valid]
-                            if "lat" in chunk_df.columns
-                            else None
-                        )
-                        _bin_df = (
-                            chunk_df[_groupby_cols_resolved].iloc[
-                                np.where(_valid)[0]
-                            ]
-                            if _groupby_cols_resolved
-                            else None
-                        )
+            # ── Outer loop: one iteration per depth level (1 for surface obs) ──
+            for _d_idx in range(_n_depth_levels):
+                if _obs_depth_dim is not None:
+                    obs_da_active = obs_da.isel({_obs_depth_dim: _d_idx})
+                    if (
+                        _model_depth_dim is not None
+                        and _d_idx < model_da.sizes.get(_model_depth_dim, 0)
+                    ):
+                        model_da_active = model_da.isel({_model_depth_dim: _d_idx})
                     else:
+                        model_da_active = model_da
+                else:
+                    obs_da_active = obs_da
+                    model_da_active = model_da
+
+                _n_total = obs_da_active.sizes[_n_pts_dim]
+
+                # ── Pre-build pyinterp Grid2D from 2-D model slice ──────
+                # model_da_active is (lat, lon) after depth slicing — Grid2D
+                # can always be built successfully here.
+                _grid2d = None
+                try:
+                    import pyinterp
+
+                    _lat_dim = next(
+                        (d for d in model_da_active.dims if d in ("latitude", "lat", "nav_lat")),
+                        None,
+                    )
+                    _lon_dim = next(
+                        (d for d in model_da_active.dims if d in ("longitude", "lon", "nav_lon")),
+                        None,
+                    )
+                    if _lat_dim and _lon_dim:
+                        _src_lat = model_da_active[_lat_dim].values.astype(np.float64)
+                        _src_lon = model_da_active[_lon_dim].values.astype(np.float64)
+                        _model_vals = np.asarray(model_da_active.values, dtype=np.float64)
+                        # Remove any remaining singleton dims (e.g. time=1)
+                        _model_vals = _model_vals.squeeze()
+                        # pyinterp Grid2D expects (lon, lat) C-order
+                        if _model_vals.shape == (len(_src_lat), len(_src_lon)):
+                            _model_vals = _model_vals.T  # (lon, lat)
+                        _x_axis = pyinterp.Axis(_src_lon)
+                        _y_axis = pyinterp.Axis(_src_lat)
+                        _grid2d = pyinterp.Grid2D(_x_axis, _y_axis, _model_vals)
+                        del _model_vals  # Grid2D holds its own copy
+                        logger.debug(
+                            f"[perf] Pre-built Grid2D for '{var}' d_idx={_d_idx}: "
+                            f"lat={len(_src_lat)} lon={len(_src_lon)}"
+                        )
+                except Exception as _grid_exc:
+                    logger.debug(
+                        f"[perf] Cannot pre-build Grid2D (d_idx={_d_idx}): {_grid_exc!r} "
+                        f"— falling back to interpolate_model_on_obs"
+                    )
+
+                # Keep a legacy interp_cache only if we need the fallback
+                interp_cache: Dict = {} if _grid2d is None else {}
+
+                logger.debug(
+                    f"[perf] Direct zarr streaming: {_n_total} points, "
+                    f"{(_n_total + _CHUNK_SZ - 1) // _CHUNK_SZ} chunks, "
+                    f"grid2d={'yes' if _grid2d else 'no'}"
+                    + (f", depth_idx={_d_idx}/{_n_depth_levels}" if _obs_depth_dim else "")
+                )
+
+                for _start in range(0, _n_total, _CHUNK_SZ):
+                    _end = min(_start + _CHUNK_SZ, _n_total)
+                    _sl = {_n_pts_dim: slice(_start, _end)}
+
+                    # Read observation arrays from dask → numpy (one at a time).
+                    # obs_da_active is always 1-D here (depth already sliced out).
+                    with _dask.config.set(scheduler="synchronous"):
+                        _val_arr = obs_da_active.isel(_sl).values.ravel()
+                        _lat_raw = (
+                            obs_ds[_lat_coord].isel(_sl).values.ravel()
+                            if _lat_coord and _lat_coord in obs_ds
+                            and _n_pts_dim in obs_ds[_lat_coord].dims
+                            else (obs_da_active.coords[_lat_coord].isel(_sl).values.ravel()
+                                  if _lat_coord and _lat_coord in obs_da_active.coords
+                                  else None)
+                        )
+                        _lon_raw = (
+                            obs_ds[_lon_coord].isel(_sl).values.ravel()
+                            if _lon_coord and _lon_coord in obs_ds
+                            and _n_pts_dim in obs_ds[_lon_coord].dims
+                            else (obs_da_active.coords[_lon_coord].isel(_sl).values.ravel()
+                                  if _lon_coord and _lon_coord in obs_da_active.coords
+                                  else None)
+                        )
+                        _time_raw = (
+                            obs_ds[_time_coord].isel(_sl).values.ravel()
+                            if _time_coord and _time_coord in obs_ds
+                            and _n_pts_dim in obs_ds[_time_coord].dims
+                            else (obs_da_active.coords[_time_coord].isel(_sl).values.ravel()
+                                  if _time_coord and _time_coord in obs_da_active.coords
+                                  else None)
+                        )
+
+                    if len(_val_arr) == 0:
+                        del _val_arr, _lat_raw, _lon_raw, _time_raw
+                        continue
+
+                    # Build minimal DataFrame for apply_binning
+                    _data: Dict[str, Any] = {}
+                    if _lat_raw is not None:
+                        _data["lat"] = _lat_raw
+                    if _lon_raw is not None:
+                        _data["lon"] = _lon_raw
+                    if _time_raw is not None:
+                        _data["time"] = _time_raw
+                    _data[var] = _val_arr
+                    chunk_df = pd.DataFrame(_data)
+                    del _data, _val_arr, _lat_raw, _lon_raw, _time_raw
+
+                    # Spatial/temporal binning
+                    chunk_df, groupby_cols = oceanbench_class4_module.apply_binning(
+                        chunk_df,
+                        getattr(evaluator, "bin_specs", None),
+                    )
+                    if _groupby_cols_resolved is None:
+                        _groupby_cols_resolved = list(groupby_cols)
+
+                    if chunk_df.empty:
+                        continue
+
+                    # Resolve variable column name
+                    if var not in chunk_df.columns:
+                        for candidate in ("value", "variable"):
+                            if candidate in chunk_df.columns:
+                                chunk_df = chunk_df.rename(columns={candidate: var})
+                                break
+                    if var not in chunk_df.columns:
+                        continue
+
+                    chunk_df = chunk_df.dropna(subset=[var])
+                    if chunk_df.empty:
+                        continue
+
+                    obs_col = f"{var}_obs"
+                    model_col = f"{var}_model"
+
+                    # ── Interpolate model → observation locations ─────────
+                    if _grid2d is not None:
+                        # Fast path: direct pyinterp call (no xarray overhead)
+                        _obs_lon = chunk_df["lon"].values.astype(np.float64)
+                        _obs_lat = chunk_df["lat"].values.astype(np.float64)
+                        _interp_vals = pyinterp.bivariate(
+                            _grid2d, _obs_lon, _obs_lat,
+                            interpolator="bilinear",
+                            num_threads=1,
+                        )
+                        # Build minimal arrays for error computation
+                        obs_vals = chunk_df[var].values.astype(np.float64)
+                        mod_vals = _interp_vals
+
+                        # NaN mask (from interpolation boundary or missing obs)
+                        _valid = np.isfinite(obs_vals) & np.isfinite(mod_vals)
+                        if not _valid.all():
+                            obs_vals = obs_vals[_valid]
+                            mod_vals = mod_vals[_valid]
+                            # Need lat for weights and bin cols for grouping
+                            _lat_arr = (
+                                chunk_df["lat"].values[_valid]
+                                if "lat" in chunk_df.columns
+                                else None
+                            )
+                            _bin_df = (
+                                chunk_df[_groupby_cols_resolved].iloc[
+                                    np.where(_valid)[0]
+                                ]
+                                if _groupby_cols_resolved
+                                else None
+                            )
+                        else:
+                            _lat_arr = (
+                                chunk_df["lat"].values
+                                if "lat" in chunk_df.columns
+                                else None
+                            )
+                            _bin_df = (
+                                chunk_df[_groupby_cols_resolved]
+                                if _groupby_cols_resolved
+                                else None
+                            )
+                        del _obs_lon, _obs_lat, _interp_vals, _valid
+                    else:
+                        # Fallback: original xarray-based interpolation
+                        chunk_df = chunk_df.rename(columns={var: obs_col})
+                        chunk_df = oceanbench_class4_module.interpolate_model_on_obs(
+                            model_da_active,
+                            chunk_df,
+                            var,
+                            method=getattr(evaluator, "interp_method", "nearest"),
+                            cache=interp_cache,
+                        )
+                        if len(interp_cache) > 2:
+                            interp_cache.clear()
+                        chunk_df = chunk_df.dropna(subset=[obs_col, model_col])
+                        if chunk_df.empty:
+                            del chunk_df
+                            continue
+                        obs_vals = chunk_df[obs_col].values
+                        mod_vals = chunk_df[model_col].values
                         _lat_arr = (
                             chunk_df["lat"].values
                             if "lat" in chunk_df.columns
@@ -590,107 +664,78 @@ def _run_class4_with_raw_per_bins(
                             if _groupby_cols_resolved
                             else None
                         )
-                    del _obs_lon, _obs_lat, _interp_vals, _valid
-                else:
-                    # Fallback: original xarray-based interpolation
-                    chunk_df = chunk_df.rename(columns={var: obs_col})
-                    chunk_df = oceanbench_class4_module.interpolate_model_on_obs(
-                        model_da,
-                        chunk_df,
-                        var,
-                        method=getattr(evaluator, "interp_method", "nearest"),
-                        cache=interp_cache,
-                    )
-                    if len(interp_cache) > 2:
-                        interp_cache.clear()
-                    chunk_df = chunk_df.dropna(subset=[obs_col, model_col])
-                    if chunk_df.empty:
-                        del chunk_df
+
+                    # ── Free the chunk DataFrame ASAP ─────────────────────
+                    del chunk_df
+
+                    if len(obs_vals) == 0:
+                        del obs_vals, mod_vals
                         continue
-                    obs_vals = chunk_df[obs_col].values
-                    mod_vals = chunk_df[model_col].values
-                    _lat_arr = (
-                        chunk_df["lat"].values
-                        if "lat" in chunk_df.columns
-                        else None
-                    )
-                    _bin_df = (
-                        chunk_df[_groupby_cols_resolved]
-                        if _groupby_cols_resolved
-                        else None
-                    )
 
-                # ── Free the chunk DataFrame ASAP ─────────────────────
-                del chunk_df
+                    diff = mod_vals - obs_vals
 
-                if len(obs_vals) == 0:
-                    del obs_vals, mod_vals
-                    continue
+                    if _lat_arr is not None:
+                        w = np.cos(np.deg2rad(_lat_arr.astype(np.float64)))
+                    else:
+                        w = np.ones(len(diff), dtype=np.float64)
 
-                diff = mod_vals - obs_vals
+                    # Accumulate weighted partial stats per bin
+                    agg_cols = list(_groupby_cols_resolved) if _groupby_cols_resolved else []
 
-                if _lat_arr is not None:
-                    w = np.cos(np.deg2rad(_lat_arr.astype(np.float64)))
-                else:
-                    w = np.ones(len(diff), dtype=np.float64)
+                    if agg_cols and _bin_df is not None:
+                        df_agg = _bin_df.copy()
+                        df_agg["w_sq_err"] = w * diff ** 2
+                        df_agg["w_abs_err"] = w * np.abs(diff)
+                        df_agg["w_err"] = w * diff
+                        df_agg["w_sum"] = w
+                        df_agg["count"] = 1.0
 
-                # Accumulate weighted partial stats per bin
-                agg_cols = list(_groupby_cols_resolved) if _groupby_cols_resolved else []
+                        grouped = df_agg.groupby(
+                            agg_cols, observed=True, dropna=True,
+                        ).sum(numeric_only=True)
 
-                if agg_cols and _bin_df is not None:
-                    df_agg = _bin_df.copy()
-                    df_agg["w_sq_err"] = w * diff ** 2
-                    df_agg["w_abs_err"] = w * np.abs(diff)
-                    df_agg["w_err"] = w * diff
-                    df_agg["w_sum"] = w
-                    df_agg["count"] = 1.0
+                        for name, row in grouped.iterrows():
+                            if name not in bin_stats:
+                                bin_stats[name] = {
+                                    "count": 0.0, "w_sum": 0.0,
+                                    "w_sq": 0.0, "w_abs": 0.0, "w_err": 0.0,
+                                }
+                            s = bin_stats[name]
+                            s["count"] += row["count"]
+                            s["w_sum"] += row["w_sum"]
+                            s["w_sq"] += row["w_sq_err"]
+                            s["w_abs"] += row["w_abs_err"]
+                            s["w_err"] += row["w_err"]
 
-                    grouped = df_agg.groupby(
-                        agg_cols, observed=True, dropna=True,
-                    ).sum(numeric_only=True)
-
-                    for name, row in grouped.iterrows():
+                        del df_agg, grouped
+                    else:
+                        name = "global"
                         if name not in bin_stats:
                             bin_stats[name] = {
                                 "count": 0.0, "w_sum": 0.0,
                                 "w_sq": 0.0, "w_abs": 0.0, "w_err": 0.0,
                             }
                         s = bin_stats[name]
-                        s["count"] += row["count"]
-                        s["w_sum"] += row["w_sum"]
-                        s["w_sq"] += row["w_sq_err"]
-                        s["w_abs"] += row["w_abs_err"]
-                        s["w_err"] += row["w_err"]
+                        s["count"] += len(diff)
+                        s["w_sum"] += float(w.sum())
+                        s["w_sq"] += float((w * diff ** 2).sum())
+                        s["w_abs"] += float((w * np.abs(diff)).sum())
+                        s["w_err"] += float((w * diff).sum())
 
-                    del df_agg, grouped
-                else:
-                    name = "global"
-                    if name not in bin_stats:
-                        bin_stats[name] = {
-                            "count": 0.0, "w_sum": 0.0,
-                            "w_sq": 0.0, "w_abs": 0.0, "w_err": 0.0,
-                        }
-                    s = bin_stats[name]
-                    s["count"] += len(diff)
-                    s["w_sum"] += float(w.sum())
-                    s["w_sq"] += float((w * diff ** 2).sum())
-                    s["w_abs"] += float((w * np.abs(diff)).sum())
-                    s["w_err"] += float((w * diff).sum())
+                    del obs_vals, mod_vals, diff, w, _lat_arr, _bin_df
+                    _chunk_count += 1
+                    gc.collect()
+                    # Release glibc malloc arenas back to the OS after every
+                    # chunk.  malloc_trim(0) is cheap (~1 ms) and essential
+                    # to avoid accumulating GiB of "unmanaged memory".
+                    if _malloc_trim is not None:
+                        _malloc_trim(0)
 
-                del obs_vals, mod_vals, diff, w, _lat_arr, _bin_df
-                _chunk_count += 1
-                gc.collect()
-                # Release glibc malloc arenas back to the OS after every
-                # chunk.  malloc_trim(0) is cheap (~1 ms) and essential
-                # to avoid accumulating GiB of "unmanaged memory".
-                if _malloc_trim is not None:
-                    _malloc_trim(0)
-
-            # Clean up
-            del _grid2d
-            if interp_cache:
-                interp_cache.clear()
-            del interp_cache
+                # Clean up this depth level
+                del _grid2d
+                if interp_cache:
+                    interp_cache.clear()
+                del interp_cache
 
             # ── Reconstitute metrics from accumulated stats ──────────
             groupby_cols = _groupby_cols_resolved or []
@@ -986,7 +1031,9 @@ class OceanbenchMetrics(DCMetric):
                 # over to the DataArray.  Without this promotion, the
                 # resulting DataFrame has no spatial/temporal columns and
                 # interpolation cannot match observations to model grid.
-                coord_candidates = ["lat", "lon", "time"]
+                # Support both lowercase (Jason3, SWOT) and uppercase
+                # (ARGO: LATITUDE, LONGITUDE, TIME) naming conventions.
+                coord_candidates = ["lat", "lon", "time", "LATITUDE", "LONGITUDE", "TIME"]
                 promote = [
                     c
                     for c in coord_candidates

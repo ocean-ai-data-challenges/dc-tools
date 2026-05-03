@@ -217,9 +217,11 @@ def _pb_raw_to_v2_row(
         all_metrics: set = {k for b in bins for k in b if k not in _PB_SKIP}
         for metric in sorted(all_metrics):
             col[metric] = [
-                round(float(b[metric]), _PB_METRIC_DP)
-                if b.get(metric) is not None
-                else None
+                # Use ``m == m`` to detect NaN (NaN != NaN) so that NaN metric
+                # values are stored as JSON null rather than the non-standard
+                # "NaN" literal that would cause orjson to raise TypeError.
+                None if (m := b.get(metric)) is None or m != m
+                else round(float(m), _PB_METRIC_DP)
                 for b in bins
             ]
         per_bins_out[var] = col
@@ -276,15 +278,44 @@ def _prefetch_iter(paths, max_ahead: int = 2):
 def _iter_batch_items(path: str):
     """Yield individual items from a batch file (JSON array), one at a time.
 
-    Decompresses the file into a text buffer (~1 GB for large batches) and
-    uses :meth:`json.JSONDecoder.raw_decode` to parse items incrementally.
-    Only **one** parsed item exists in memory at any time (~400 MB for items
-    with large ``per_bins``).
+    Uses ``orjson`` (Rust-based, iterative parser) when available to avoid the
+    C stack overflow that CPython's ``json.raw_decode`` triggers on large
+    per_bins objects (~164 MB each, ~892 MB decompressed per glorys batch).
+    CPython's recursive C scanner overflows its stack on deeply nested 160+ MB
+    JSON objects, causing a SIGSEGV (exit 245).
 
-    Peak memory: decompressed text + one parsed item ≈ **1.4 GB** for the
-    largest batches, vs the previous ``_prefetch_iter`` approach that held
-    up to 3 fully-parsed batches ≈ **9–12 GB**.
+    Peak memory: raw bytes buffer + all parsed items ≈ 1.8–2.5 GB for the
+    largest glorys batches.  Acceptable given the cluster has been shut down
+    before post-processing runs.
     """
+    try:
+        import orjson as _json_lib  # type: ignore[import-not-found]
+        _use_orjson = True
+    except ImportError:
+        _json_lib = None  # type: ignore[assignment]
+        _use_orjson = False
+
+    if _use_orjson:
+        # orjson operates on bytes — read raw, skip text decode overhead.
+        if path.endswith(".gz"):
+            with gzip.open(path, "rb") as f:
+                raw = f.read()
+        else:
+            with open(path, "rb") as f:
+                raw = f.read()
+        data = _json_lib.loads(raw)  # type: ignore[union-attr]
+        del raw
+        if not isinstance(data, list):
+            return
+        # Yield items and release the backing list as we go to cap peak RAM.
+        for _i in range(len(data)):
+            yield data[_i]
+            data[_i] = None  # type: ignore[index]  # release parsed item
+        return
+
+    # ── Fallback: CPython json with incremental raw_decode ────────────────
+    # Only used when orjson is not installed.  May SIGSEGV on per_bins items
+    # > ~160 MB due to C stack overflow in the recursive scanner.
     if path.endswith(".gz"):
         with gzip.open(path, "rt", encoding="utf-8") as f:
             text = f.read()
@@ -461,6 +492,22 @@ class BaseDCEvaluation:
         # Propagate optional download concurrency cap.
         if "download_workers" in source:
             cfg["download_workers"] = int(source["download_workers"])
+        # Propagate optional look-ahead controls.
+        if "lookahead_depth" in dask_cfg or "lookahead_depth" in source:
+            cfg["lookahead_depth"] = max(
+                int(dask_cfg.get("lookahead_depth", source.get("lookahead_depth", 0))),
+                0,
+            )
+        if "lookahead_pred_workers" in dask_cfg or "lookahead_pred_workers" in source:
+            cfg["lookahead_pred_workers"] = max(
+                int(
+                    dask_cfg.get(
+                        "lookahead_pred_workers",
+                        source.get("lookahead_pred_workers", 1),
+                    )
+                ),
+                1,
+            )
         return cfg
 
     def _build_dask_cfgs_by_dataset(self) -> Dict[str, Dict[str, Any]]:
@@ -1268,6 +1315,7 @@ class BaseDCEvaluation:
         models_results: Dict[str, Any] = {}
 
         _resume = getattr(self.args, "resume", False)
+        _skip_existing_post = bool(getattr(self.args, "skip_existing_postprocessing", False))
 
         for alias in dataset_references.keys():
             dataset_json_path = os.path.join(self.results_directory, f"results_{alias}.json")
@@ -1289,15 +1337,20 @@ class BaseDCEvaluation:
             else:
                 os.makedirs(results_files_dir, exist_ok=True)
 
-            # Remove stale final results for this alias so a crash mid-run
-            # cannot leave outdated files from a previous evaluation.
-            # (Always removed — they are re-created by consolidation.)
-            _stale_final = os.path.join(self.results_directory, f"results_{alias}.json")
-            _stale_pb = os.path.join(self.results_directory, f"results_{alias}_per_bins.jsonl.gz")
-            for _sf in (_stale_final, _stale_pb):
-                if os.path.isfile(_sf):
-                    logger.debug(f"Removing stale result file: {os.path.basename(_sf)}")
-                    os.remove(_sf)
+            # Remove stale final results unless explicit skip-existing mode is
+            # enabled.  In skip-existing mode we preserve prior post-processing
+            # artefacts so a resumed run can bypass expensive consolidation.
+            if _skip_existing_post:
+                logger.debug(
+                    "skip_existing_postprocessing=true: preserving existing post-processing files."
+                )
+            else:
+                _stale_final = os.path.join(self.results_directory, f"results_{alias}.json")
+                _stale_pb = os.path.join(self.results_directory, f"results_{alias}_per_bins.jsonl.gz")
+                for _sf in (_stale_final, _stale_pb):
+                    if os.path.isfile(_sf):
+                        logger.debug(f"Removing stale result file: {os.path.basename(_sf)}")
+                        os.remove(_sf)
 
             dataset_manager.build_forecast_index(
                 alias,
@@ -1528,6 +1581,23 @@ class BaseDCEvaluation:
                 f"└{'─' * 68}┘</magenta>  <dim>[+{_fmt_elapsed(_t0)}]</dim>"
             )
 
+            # Optional fast-path for resumed runs: if the post-processing
+            # outputs already exist, skip consolidation for this dataset.
+            _existing_final = os.path.join(self.results_directory, f"results_{alias}.json")
+            _existing_pb_candidates = (
+                os.path.join(self.results_directory, f"results_{alias}_per_bins.jsonl.gz"),
+                os.path.join(self.results_directory, f"results_{alias}_per_bins.jsonl"),
+                os.path.join(self.results_directory, f"results_{alias}_per_bins.json"),
+            )
+            _has_final = os.path.isfile(_existing_final) and os.path.getsize(_existing_final) > 0
+            _has_per_bins = any(os.path.isfile(_p) and os.path.getsize(_p) > 0 for _p in _existing_pb_candidates)
+            if _skip_existing_post and _has_final and _has_per_bins:
+                logger.opt(colors=True).info(
+                    "  <dim>└</dim>  <yellow>↷  Skipping post-processing:</yellow>"
+                    f" existing artefacts found for <cyan>{alias}</cyan>"
+                )
+                continue
+
             # Aggregate batch results and write final JSON.
             try:
                 batch_files = sorted(
@@ -1599,13 +1669,13 @@ class BaseDCEvaluation:
                                     forecast_reference_time=item.get(
                                         "forecast_reference_time", ""
                                     ),
-                                    per_bins_raw=transform_in_place(
-                                        transform_in_place(
-                                            item.pop("per_bins"),
-                                            make_serializable,
-                                        ),
-                                        lambda x: None if isinstance(x, float) and x != x else x,
-                                    ),
+                                    # Batch files are JSON: all types are already basic
+                                    # Python types (no pd.Interval / np.ndarray etc.).
+                                    # make_serializable is a pure no-op here and would
+                                    # waste ~5 s per item traversing 750 K bin entries.
+                                    # NaN→None handling is done inline inside
+                                    # _pb_raw_to_v2_row (metric column building).
+                                    per_bins_raw=item.pop("per_bins"),
                                 )
                                 if _v2_row is not None:
                                     pb_gz_file.write(
@@ -1766,6 +1836,17 @@ class BaseDCEvaluation:
             os.makedirs(_leaderboard_dir, exist_ok=True)
             os.makedirs(_leaderboard_input_dir, exist_ok=True)
 
+            # Optional fast-path for resumed runs: skip leaderboard rebuild if
+            # the pages already exist.
+            _leaderboard_html = os.path.join(_leaderboard_dir, "leaderboard.html")
+            _maps_html = os.path.join(_leaderboard_dir, "maps.html")
+            if _skip_existing_post and os.path.isfile(_leaderboard_html) and os.path.isfile(_maps_html):
+                logger.opt(colors=True).info(
+                    "  <dim>└</dim>  <yellow>↷  Skipping leaderboard generation:</yellow>"
+                    " existing site artefacts found"
+                )
+                return
+
             # Copy reference baseline JSONs.
             # Primary source: <challenge_pkg>/leaderboard_results/ (sibling of evaluate.py).
             # _repo_root was derived from self.results_directory above (not __file__).
@@ -1813,29 +1894,55 @@ class BaseDCEvaluation:
                     )
                     _copied.append(f"results_{_alias}.json")
 
-            # Copy ALL per-bins files via glob (prefer .jsonl.gz, fall back to
+            # Stage ALL per-bins files via glob (prefer .jsonl.gz, fall back to
             # .jsonl then legacy .json) to avoid any alias-name mismatch.
-            # For each stem, only copy the most-compact format that is present
-            # so the reader in map_processing.py always gets the compact form.
+            # For each stem, only stage the most-compact format.
+            # Large .jsonl.gz files are symlinked (not copied) so that:
+            #   1. Staging is instant regardless of file size.
+            #   2. map_processing._NpzBinStore resolves the symlink to the REAL
+            #      path and places the NPZ cache next to the source file in
+            #      results_directory, so the cache survives leaderboard_input
+            #      cleanup and is reused on subsequent runs.
             _pb_stems_copied: set = set()
             for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.jsonl.gz")):
                 _stem = os.path.basename(_pb_src).replace(".jsonl.gz", "")
                 _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
-                _shutil.copy2(_pb_src, _pb_dst)
+                # Remove any stale symlink/file left by a previous interrupted run
+                # to avoid FileExistsError → shutil.copy2 → SameFileError.
+                if os.path.lexists(_pb_dst):
+                    os.remove(_pb_dst)
+                try:
+                    os.symlink(os.path.abspath(_pb_src), _pb_dst)
+                except (OSError, NotImplementedError):
+                    try:
+                        _shutil.copy2(_pb_src, _pb_dst)
+                    except _shutil.SameFileError:
+                        pass
                 _copied.append(os.path.basename(_pb_src))
                 _pb_stems_copied.add(_stem)
             for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.jsonl")):
                 _stem = os.path.basename(_pb_src).replace(".jsonl", "")
                 if _stem not in _pb_stems_copied:
                     _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
-                    _shutil.copy2(_pb_src, _pb_dst)
+                    if os.path.lexists(_pb_dst):
+                        os.remove(_pb_dst)
+                    try:
+                        os.symlink(os.path.abspath(_pb_src), _pb_dst)
+                    except (OSError, NotImplementedError):
+                        try:
+                            _shutil.copy2(_pb_src, _pb_dst)
+                        except _shutil.SameFileError:
+                            pass
                     _copied.append(os.path.basename(_pb_src))
                     _pb_stems_copied.add(_stem)
             for _pb_src in glob(os.path.join(self.results_directory, "*_per_bins.json")):
                 _stem = os.path.basename(_pb_src).replace("_per_bins.json", "")
                 if _stem not in _pb_stems_copied:
                     _pb_dst = os.path.join(_leaderboard_input_dir, os.path.basename(_pb_src))
-                    _shutil.copy2(_pb_src, _pb_dst)
+                    try:
+                        _shutil.copy2(_pb_src, _pb_dst)
+                    except _shutil.SameFileError:
+                        pass
                     _copied.append(os.path.basename(_pb_src))
 
             for _fname in _copied:
@@ -1882,10 +1989,12 @@ class BaseDCEvaluation:
                     "  Leaderboard metric whitelist from pipeline config: {}",
                     sorted(_pipeline_metrics),
                 )
+            _skip_frt = bool(getattr(self.args, "skip_frt_snapshots", False))
             _render_leaderboard(
                 results_dir=_leaderboard_input_dir,
                 output_site_dir=_leaderboard_dir,
                 custom_config=_lb_cfg if _lb_cfg else None,
+                skip_frt_snapshots=_skip_frt,
             )
             # Clean up the temporary input dir
             _shutil.rmtree(_leaderboard_input_dir, ignore_errors=True)

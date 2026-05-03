@@ -1,6 +1,8 @@
 """ARGO data interface: monthly partitioning, Kerchunk references, and S3/local access."""
+import os
 import shutil
 import tempfile
+import threading
 import xarray as xr
 import fsspec
 import pandas as pd
@@ -12,6 +14,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from scipy.io import netcdf_file
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover
+    _resource = None
 
 try:
     from kerchunk.netCDF3 import NetCDF3ToZarr  # type: ignore[import-untyped]
@@ -23,6 +31,41 @@ try:
 except Exception:  # pragma: no cover
     IndexFetcher = None
 from loguru import logger
+
+
+_ARGO_DIAGNOSTICS_ENABLED = os.environ.get("DCTOOLS_ARGO_DIAGNOSTICS", "1") != "0"
+_ARGO_DIAG_HEARTBEAT_SEC = max(
+    5, int(os.environ.get("DCTOOLS_ARGO_DIAG_HEARTBEAT_SEC", "30"))
+)
+
+
+def _current_rss_mb() -> float:
+    """Return current process RSS in MiB when available."""
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return float(parts[1]) / 1024.0
+    except Exception:
+        pass
+    if _resource is not None:
+        try:
+            return float(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss) / 1024.0
+        except Exception:
+            pass
+    return float("nan")
+
+
+def _log_argo_diag(phase: str, **fields: object) -> None:
+    """Emit a structured ARGO diagnostic line with current RSS."""
+    if not _ARGO_DIAGNOSTICS_ENABLED:
+        return
+    details = [f"rss={_current_rss_mb():.1f} MiB"]
+    for key, value in fields.items():
+        details.append(f"{key}={value}")
+    logger.debug(f"ARGO diag: {phase} | " + ", ".join(details))
 
 # Transient HTTP errors worth retrying (connection drops, rate limits, server errors)
 _TRANSIENT_EXCEPTIONS = (ConnectionError, TimeoutError)
@@ -212,6 +255,7 @@ class ArgoInterface:
         chunks: Optional[Dict[str, int]] = None,
         max_fetch_retries: int = 4,
         retry_backoff_seconds: float = 0.8,
+        n_download_workers: int = 4,
     ):
         """
         Initialise l'interface ARGO.
@@ -221,11 +265,18 @@ class ArgoInterface:
             variables: Liste des variables à extraire
             s3_storage_options: Options pour fsspec S3 (key, secret, endpoint_url, etc.)
             chunks: Configuration des chunks Dask (par défaut {"N_PROF": 2000})
+            n_download_workers: Concurrent download threads for batch profile loading
+                (``download_workers`` key in YAML).  Keep low (≤ 4) when a Dask cluster
+                is running to avoid GIL starvation of the scheduler asyncio loop.
         """
         self.base_path = base_path.rstrip("/")
         self.variables = variables
         self.s3_storage_options = s3_storage_options or {}
         self.chunks = chunks or {"N_PROF": 2000}
+        try:
+            self.n_download_workers = max(1, int(n_download_workers))
+        except (TypeError, ValueError):
+            self.n_download_workers = 4
         try:
             normalized_retries = int(max_fetch_retries)
         except (TypeError, ValueError):
@@ -295,6 +346,7 @@ class ArgoInterface:
                 s3_storage_options = {}
                 if hasattr(params, "endpoint_url") and params.endpoint_url:
                     s3_storage_options["client_kwargs"] = {"endpoint_url": params.endpoint_url}
+                    s3_storage_options["config_kwargs"] = {"connect_timeout": 30, "read_timeout": 60}
                 if hasattr(params, "s3_key") and params.s3_key:
                     s3_storage_options["key"] = params.s3_key
                 if hasattr(params, "s3_secret_key") and params.s3_secret_key:
@@ -311,6 +363,7 @@ class ArgoInterface:
             chunks=getattr(params, "chunks", {"N_PROF": 2000}),
             max_fetch_retries=getattr(params, "max_fetch_retries", 4),
             retry_backoff_seconds=getattr(params, "retry_backoff_seconds", 0.8),
+            n_download_workers=getattr(params, "download_workers", 4),
         )
 
     @staticmethod
@@ -425,6 +478,71 @@ class ArgoInterface:
                     break
         return result
 
+    @staticmethod
+    def _normalize_attr_value(value: Any) -> Any:
+        """Convert scipy/netCDF attribute values to xarray-safe Python types."""
+        if isinstance(value, bytes):
+            for encoding in ("utf-8", "latin-1"):
+                try:
+                    return value.decode(encoding).rstrip("\x00")
+                except Exception:
+                    continue
+            return value.decode("utf-8", errors="ignore").rstrip("\x00")
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            if value.ndim == 0:
+                return ArgoInterface._normalize_attr_value(value.item())
+            return [ArgoInterface._normalize_attr_value(item) for item in value.tolist()]
+        if isinstance(value, (list, tuple)):
+            return [ArgoInterface._normalize_attr_value(item) for item in value]
+        return value
+
+    @staticmethod
+    def _load_local_profile_dataset(
+        local_path: str,
+        variables: Optional[List[str]],
+    ) -> xr.Dataset:
+        """Load a small ARGO NetCDF3 profile without xarray backend machinery.
+
+        Reading thousands of tiny profiles through ``xr.open_dataset`` still
+        exercises xarray's backend/file-manager stack, which is the part that
+        has regressed across recent dependency updates.  For cached local
+        NetCDF3 files we only need a handful of numeric variables, so reading
+        them directly via ``scipy.io.netcdf_file`` is both simpler and more
+        robust.
+        """
+        keep_vars_set = set(variables) if variables else None
+        always_keep = {"PRES", "PRES_ADJUSTED", "TIME", "JULD"}
+
+        with netcdf_file(local_path, mmap=False) as nc:
+            global_attrs = {
+                name: ArgoInterface._normalize_attr_value(getattr(nc, name))
+                for name in getattr(nc, "_attributes", {})
+            }
+            data_vars: Dict[str, xr.Variable] = {}
+
+            for var_name, var in nc.variables.items():
+                if keep_vars_set and var_name not in keep_vars_set and var_name not in always_keep:
+                    continue
+
+                values = np.array(var[:])
+                if values.dtype.kind in {"S", "U", "V"}:
+                    continue
+
+                output_name = "TIME" if var_name == "JULD" else var_name
+                if output_name in data_vars:
+                    continue
+
+                dims = tuple(str(dim) for dim in getattr(var, "dimensions", ()))
+                attrs = {
+                    name: ArgoInterface._normalize_attr_value(getattr(var, name))
+                    for name in getattr(var, "_attributes", {})
+                }
+                data_vars[output_name] = xr.Variable(dims, values, attrs=attrs)
+
+        return xr.Dataset(data_vars=data_vars, attrs=global_attrs)
+
     def _batch_download_and_open_profiles(
         self,
         selected_refs: List[dict],
@@ -471,6 +589,14 @@ class ArgoInterface:
         for idx, url in url_map.items():
             unique_urls.setdefault(url, []).append(idx)
 
+        _dl_t0 = time.monotonic()
+        _log_argo_diag(
+            "batch-download-start",
+            selected_refs=len(selected_refs),
+            unique_urls=len(unique_urls),
+            download_workers=n_download_workers,
+        )
+
         # --- 2. Batch download with requests.Session (connection pooling) -----
         session = requests.Session()
         pool_sz = min(n_download_workers + 2, 30)
@@ -496,26 +622,27 @@ class ArgoInterface:
         downloaded: Dict[str, str] = {}  # url -> local_path
         n_fail = 0
         n_cached = 0
+        _dl_done = 0
+        _last_dl_progress = [_dl_t0]
+        _dl_lock = threading.Lock()
+        _dl_stop = threading.Event()
 
         def _is_valid_cached_profile(local_path: Path) -> bool:
-            ds = None
+            # Fast magic-byte check instead of xr.open_dataset(engine="scipy").
+            # scipy reads ALL variable data eagerly on open (mmap=False), so
+            # calling it for 13 k+ files held the GIL for ~34 s total, starving
+            # the Dask scheduler asyncio loop and causing LocalCluster deadlocks.
+            # NetCDF3 classic/64-bit files start with CDF\x01 or CDF\x02.
             try:
-                if not local_path.exists() or local_path.stat().st_size <= 0:
+                if not local_path.exists():
                     return False
-                ds = xr.open_dataset(
-                    local_path,
-                    engine="scipy",
-                    backend_kwargs={"mmap": False},
-                )
-                return True
+                if local_path.stat().st_size < 32:  # too small to be valid NC3
+                    return False
+                with open(local_path, "rb") as f:
+                    magic = f.read(4)
+                return magic in (b"CDF\x01", b"CDF\x02")
             except Exception:
                 return False
-            finally:
-                try:
-                    if ds is not None:
-                        ds.close()
-                except Exception:
-                    pass
 
         def _dl_one(url: str) -> tuple:
             stem = Path(url).stem or "profile"
@@ -553,29 +680,62 @@ class ArgoInterface:
                                 pass
                 return (url, None, exc)
 
-        with ThreadPoolExecutor(max_workers=n_download_workers) as pool:
-            futures = {pool.submit(_dl_one, url): url for url in unique_urls}
-            for fut in as_completed(futures):
-                try:
-                    url, local_path, flag = fut.result()
-                    if local_path is not None:
-                        downloaded[url] = local_path
-                        if flag is True:
-                            n_cached += 1
-                    else:
+        def _download_heartbeat() -> None:
+            while not _dl_stop.wait(_ARGO_DIAG_HEARTBEAT_SEC):
+                with _dl_lock:
+                    done = _dl_done
+                    cached = n_cached
+                    failed = n_fail
+                    stalled_for = time.monotonic() - _last_dl_progress[0]
+                _log_argo_diag(
+                    "batch-download-alive",
+                    elapsed_s=f"{time.monotonic() - _dl_t0:.1f}",
+                    completed=f"{done}/{len(unique_urls)}",
+                    cached=cached,
+                    failed=failed,
+                    stalled_for_s=f"{stalled_for:.1f}",
+                )
+
+        _dl_hb_thread = threading.Thread(
+            target=_download_heartbeat,
+            daemon=True,
+            name="argo-download-heartbeat",
+        )
+        _dl_hb_thread.start()
+
+        try:
+            with ThreadPoolExecutor(max_workers=n_download_workers) as pool:
+                futures = {pool.submit(_dl_one, url): url for url in unique_urls}
+                for fut in as_completed(futures):
+                    try:
+                        url, local_path, flag = fut.result()
+                        if local_path is not None:
+                            downloaded[url] = local_path
+                            if flag is True:
+                                n_cached += 1
+                        else:
+                            n_fail += 1
+                    except Exception:
                         n_fail += 1
-                except Exception:
-                    n_fail += 1
+                    finally:
+                        with _dl_lock:
+                            _dl_done += 1
+                            _last_dl_progress[0] = time.monotonic()
+        finally:
+            _dl_stop.set()
+            _dl_hb_thread.join(timeout=1)
 
         session.close()
 
         n_downloaded = len(downloaded) - n_cached
-        if n_downloaded > 0 or n_cached > 0:
-            logger.debug(
-                f"ARGO batch download: {n_downloaded} new, "
-                f"{n_cached} cached, {n_fail} failed "
-                f"({len(unique_urls)} unique URLs)"
-            )
+        _log_argo_diag(
+            "batch-download-done",
+            elapsed_s=f"{time.monotonic() - _dl_t0:.1f}",
+            new=n_downloaded,
+            cached=n_cached,
+            failed=n_fail,
+            unique_urls=len(unique_urls),
+        )
 
         # --- 3. Open each profile locally (no HTTP, fast) --------------------
         keep_vars_set = set(variables) if variables else None
@@ -583,56 +743,64 @@ class ArgoInterface:
 
         per_profile: List[xr.Dataset] = []
         open_fail = 0
+        _open_t0 = time.monotonic()
+        _log_argo_diag(
+            "local-open-start",
+            selected_refs=len(selected_refs),
+            cached_files=len(downloaded),
+        )
 
         def _open_local(local_path: str) -> Optional[xr.Dataset]:
             try:
-                ds = xr.open_dataset(
-                    local_path,
-                    engine="scipy",
-                    backend_kwargs={"mmap": False},
-                )
-                if "TIME" not in ds and "JULD" in ds:
-                    ds = ds.rename({"JULD": "TIME"})
-                if keep_vars_set:
-                    keep = [v for v in keep_vars_set if v in ds]
-                    keep += [c for c in always_keep if c in ds and c not in keep]
-                    ds = ds[keep]
-                ds.load()
-                ds.close()
-                return ds
+                return self._load_local_profile_dataset(local_path, variables)
             except Exception:
                 return None
 
-        # Open in parallel (local I/O, very fast)
-        ordered_local_paths: List[Optional[str]] = []
+        # Open sequentially with periodic GIL yields between files.
+        # Parallel approaches (ThreadPoolExecutor) caused asyncio-loop starvation
+        # or xarray SerializableLock deadlocks regardless of the engine used:
+        #   - scipy (mmap=False): holds GIL during all reads → asyncio starved
+        #   - netcdf4: acquires xarray SerializableLock per variable → deadlock
+        #     between threads sharing the same FileManager cache
+        # Sequential open with time.sleep(0) between files yields the GIL to
+        # the asyncio thread, keeping Dask worker heartbeats alive.
+        # Local SSD read of ~82 KB profiles: ~0.1 ms each → 13k files ≈ 1.5 s
+        # of I/O vs. minutes of deadlock recovery.
+        results_map: Dict[int, xr.Dataset] = {}
         for idx in range(len(selected_refs)):
             url = url_map.get(idx)  # type: ignore[assignment]
-            if url and url in downloaded:
-                ordered_local_paths.append(downloaded[url])
+            local_path = downloaded.get(url) if url else None  # type: ignore[arg-type]
+            if local_path is None:
+                open_fail += 1
+                continue
+            ds = _open_local(local_path)
+            if ds is not None:
+                results_map[idx] = ds  # type: ignore[assignment]
             else:
-                ordered_local_paths.append(None)
-
-        with ThreadPoolExecutor(max_workers=min(16, len(selected_refs))) as pool:
-            futures_open = {
-                pool.submit(_open_local, lp): i
-                for i, lp in enumerate(ordered_local_paths)
-                if lp is not None
-            }
-            results_map: Dict[int, xr.Dataset] = {}
-            for fut in as_completed(futures_open):  # type: ignore[assignment]
-                idx = futures_open[fut]  # type: ignore[index]
-                ds = fut.result()
-                if ds is not None:
-                    results_map[idx] = ds  # type: ignore[assignment]
-                else:
-                    open_fail += 1
+                open_fail += 1
+            # Yield GIL to asyncio thread every 10 files so Dask worker
+            # heartbeats are not starved during the full scan.
+            if idx > 0 and idx % 500 == 0:
+                _log_argo_diag(
+                    "local-open-progress",
+                    elapsed_s=f"{time.monotonic() - _open_t0:.1f}",
+                    scanned=f"{idx}/{len(selected_refs)}",
+                    opened=len(results_map),
+                    failed=open_fail,
+                )
+            if idx % 10 == 0:
+                time.sleep(0)
 
         # Preserve order
         for idx in sorted(results_map.keys()):
             per_profile.append(results_map[idx])
 
-        if open_fail > 0:
-            logger.debug(f"ARGO local open: {open_fail} files failed to parse")
+        _log_argo_diag(
+            "local-open-done",
+            elapsed_s=f"{time.monotonic() - _open_t0:.1f}",
+            opened=len(per_profile),
+            failed=open_fail,
+        )
 
         return per_profile
 
@@ -1277,6 +1445,12 @@ class ArgoInterface:
         if cache_key in self._tw_cache:
             logger.debug("ARGO open_time_window cache hit")
             return self._tw_cache[cache_key]
+        # Free memory from previous month BEFORE loading new data.
+        # Without this, the old ~3 GB dataset stays alive in the cache
+        # while 13 k+ new profiles are downloaded and concatenated,
+        # causing a ~6 GB peak that triggers the OOM killer.
+        if self._tw_cache:
+            self._tw_cache.clear()
 
         # --- master index: prefer caller-provided, avoid S3 round-trip -------
         if master_index is not None:
@@ -1307,34 +1481,52 @@ class ArgoInterface:
         if not relevant_months:
             raise ValueError("Aucune donnée trouvée pour cette période")
 
+        _tw_t0 = time.monotonic()
+        _log_argo_diag(
+            "open-time-window-start",
+            start=str(pd.Timestamp(start)),
+            end=str(pd.Timestamp(end)),
+            relevant_months=len(relevant_months),
+            max_profiles=max_profiles,
+        )
+
         def _concat_profiles_safe(profile_datasets: List[xr.Dataset]) -> xr.Dataset:
             """Concat ARGO profiles while tolerating heterogeneous N_LEVELS sizes."""
             try:
                 return xr.concat(profile_datasets, dim="N_PROF", join="outer")
             except Exception as exc:
-                if "N_LEVELS" not in str(exc):
-                    raise
-
-                max_n_levels = max(
-                    (int(ds.sizes.get("N_LEVELS", 0)) for ds in profile_datasets),
-                    default=0,
-                )
-                if max_n_levels <= 0:
+                varying_dims = [
+                    dim
+                    for dim in sorted(
+                        {
+                            dim
+                            for ds in profile_datasets
+                            for dim in ds.dims
+                            if dim != "N_PROF"
+                        }
+                    )
+                    if len(
+                        {
+                            int(ds.sizes[dim])
+                            for ds in profile_datasets
+                            if dim in ds.dims
+                        }
+                    )
+                    > 1
+                ]
+                if not varying_dims:
                     raise
 
                 padded: List[xr.Dataset] = []
-                target_levels = np.arange(max_n_levels)
                 for ds in profile_datasets:
-                    if "N_LEVELS" in ds.dims:
-                        if "N_LEVELS" not in ds.coords:
-                            ds = ds.assign_coords(N_LEVELS=np.arange(ds.sizes["N_LEVELS"]))
-                        ds = ds.reindex(N_LEVELS=target_levels)
+                    for dim in varying_dims:
+                        if dim not in ds.dims:
+                            continue
+                        if dim not in ds.coords:
+                            ds = ds.assign_coords({dim: np.arange(ds.sizes[dim])})
+                        ds = ds.reindex({dim: np.arange(max(int(d.sizes.get(dim, 0)) for d in profile_datasets))})
                     padded.append(ds)
 
-                # logger.debug(
-                #    "ARGO concat fallback applied: padded profiles to "
-                #    f"N_LEVELS={max_n_levels} after alignment error: {exc}"
-                # )
                 return xr.concat(padded, dim="N_PROF", join="outer")
 
         # Track total profiles loaded across months (for max_profiles cap)
@@ -1398,36 +1590,125 @@ class ArgoInterface:
 
                 selected_refs = monthly_json["profile_refs"][left:right]
                 n_refs = len(selected_refs)
+                _month_t0 = time.monotonic()
+                _log_argo_diag(
+                    "month-load-start",
+                    month=key,
+                    selected_profiles=n_refs,
+                    total_profiles=n_total_month,
+                )
                 if n_refs > 2000:
                     logger.info(
                         f"Month {key}: loading {n_refs} profiles in parallel. "
                         "This may take a moment."
                     )
 
-                # --- BATCH DOWNLOAD + LOCAL OPEN (fast path) ---------------
-                # Instead of loading each profile via fsspec HTTP (slow,
-                # creates per-profile TCP connections, causes GDAC
-                # rate-limiting with multiple Dask workers), we:
-                #   1. Extract GDAC URLs from kerchunk refs
-                #   2. Batch-download all profiles using requests.Session
-                #      (HTTP connection pooling -> single TCP+TLS handshake)
-                #   3. Open each profile from local disk (no HTTP)
-                per_profile = self._batch_download_and_open_profiles(
-                    selected_refs,
-                    variables,
-                    n_download_workers=16,
+                # ── Early depth interpolation per chunk ───────────────────
+                # Interpolating BEFORE the final concat is the single
+                # biggest memory optimisation.  A chunk of a few hundred
+                # padded profiles is much smaller than a full month. After
+                # depth interp
+                # to ~200 levels it shrinks to ~30 MB.  The final concat of
+                # all interpolated chunks therefore peaks at ~0.2 GB instead
+                # of the previous ~4 GB, eliminating the OOM kill.
+                #
+                # depth_levels / depth_levels_arr come from the enclosing
+                # open_time_window closure; _interpolate_profiles_to_depth
+                # is a module-level function.
+                _do_early_interp = (
+                    depth_levels is not None
+                    and len(depth_levels) > 0
                 )
-                failed = n_refs - len(per_profile)
+                _depth_arr = (
+                    np.asarray(depth_levels, dtype=float)
+                    if _do_early_interp else None
+                )
+
+                def _interp_chunk(chunk_ds):
+                    """Interpolate a chunk to depth levels (if applicable)."""
+                    if not _do_early_interp:
+                        return chunk_ds
+                    # Detect the best pressure variable
+                    for _pv in ("PRES_ADJUSTED", "PRES"):
+                        if _pv in chunk_ds.data_vars or _pv in chunk_ds.coords:
+                            return _interpolate_profiles_to_depth(
+                                chunk_ds, _depth_arr, _pv
+                            )
+                    return chunk_ds  # no pressure var → return as-is
+
+                # Download/open/concat in bounded slices to avoid retaining
+                # thousands of xr.Dataset objects backed by native NetCDF
+                # buffers at once. Keeping the whole month resident was the
+                # fastest way to hit a C-level OOM and segfault before the
+                # later concat chunking could help.
+                import gc as _gc_argo
+                _DL_CHUNK = 500
+                chunks = []
+                loaded_profiles = 0
+                failed = 0
+
+                for i in range(0, n_refs, _DL_CHUNK):
+                    ref_batch = selected_refs[i:i + _DL_CHUNK]
+                    per_profile = self._batch_download_and_open_profiles(
+                        ref_batch,
+                        variables,
+                        n_download_workers=self.n_download_workers,
+                    )
+                    failed += len(ref_batch) - len(per_profile)
+                    if not per_profile:
+                        _log_argo_diag(
+                            "month-load-empty-chunk",
+                            month=key,
+                            chunk=f"{(i // _DL_CHUNK) + 1}/{(n_refs + _DL_CHUNK - 1) // _DL_CHUNK}",
+                            elapsed_s=f"{time.monotonic() - _month_t0:.1f}",
+                        )
+                        continue
+
+                    loaded_profiles += len(per_profile)
+                    chunk_ds = _concat_profiles_safe(per_profile)
+                    chunk_ds = _interp_chunk(chunk_ds)
+
+                    for _ds in per_profile:
+                        _ds.close()
+                    del per_profile
+                    _gc_argo.collect()
+
+                    chunks.append(chunk_ds)
+                    _log_argo_diag(
+                        "month-concat-chunk",
+                        month=key,
+                        chunk=f"{(i // _DL_CHUNK) + 1}/{(n_refs + _DL_CHUNK - 1) // _DL_CHUNK}",
+                        chunk_profiles=len(ref_batch),
+                        loaded_profiles=loaded_profiles,
+                        failed=failed,
+                        elapsed_s=f"{time.monotonic() - _month_t0:.1f}",
+                    )
 
                 if failed > 0:
                     logger.debug(f"Month {key}: {failed}/{n_refs} profiles failed to load")
-                if not per_profile:
+                if not chunks:
                     return None
-                _profiles_loaded_counter[0] += len(per_profile)
-                combined = _concat_profiles_safe(per_profile)
-                # Release individual dataset handles
-                for _ds in per_profile:
+
+                _log_argo_diag(
+                    "month-load-profiles-ready",
+                    month=key,
+                    elapsed_s=f"{time.monotonic() - _month_t0:.1f}",
+                    loaded=loaded_profiles,
+                    failed=failed,
+                    chunk_size=_DL_CHUNK,
+                )
+                _profiles_loaded_counter[0] += loaded_profiles
+                combined = xr.concat(chunks, dim="N_PROF")
+                for _ds in chunks:
                     _ds.close()
+                del chunks
+                _gc_argo.collect()
+                _log_argo_diag(
+                    "month-load-done",
+                    month=key,
+                    elapsed_s=f"{time.monotonic() - _month_t0:.1f}",
+                    combined_profiles=int(combined.sizes.get("N_PROF", 0)),
+                )
                 return combined
 
             # --- Legacy format: single combined kerchunk_refs + indices ----
@@ -1504,7 +1785,12 @@ class ArgoInterface:
         # ------------------------------------------------------------------
         renames: Dict[str, str] = {"N_PROF": "obs"}
 
-        if depth_levels is not None and len(depth_levels) > 0:
+        # If _load_month already interpolated per-chunk (early interp),
+        # ds_final will have a 'depth' dim and no PRES variable.  Skip
+        # the full-dataset interpolation in that case.
+        _already_interpolated = "depth" in ds_final.dims
+
+        if depth_levels is not None and len(depth_levels) > 0 and not _already_interpolated:
             depth_levels_arr = np.asarray(depth_levels, dtype=float)
 
             # --- Find the best pressure variable --------------------------
@@ -1557,4 +1843,10 @@ class ArgoInterface:
         if len(self._tw_cache) >= 1:
             self._tw_cache.clear()
         self._tw_cache[cache_key] = ds_final
+        _log_argo_diag(
+            "open-time-window-done",
+            elapsed_s=f"{time.monotonic() - _tw_t0:.1f}",
+            total_profiles=int(ds_final.sizes.get("obs", 0)),
+            loaded_months=n_months,
+        )
         return ds_final

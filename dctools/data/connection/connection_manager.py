@@ -40,8 +40,11 @@ if not hasattr(_xr, "_original_open_dataset"):
                 _bk = dict(_bk)
             _bk.setdefault("mmap", False)
             kwargs["backend_kwargs"] = _bk
-        # Suppress FutureWarning about MTIME timedelta decoding
+        # Keep ARGO profile opens lightweight and deterministic:
+        # skip CF/time decoding on every small file (thousands per batch).
         kwargs.setdefault("decode_timedelta", False)
+        kwargs.setdefault("decode_times", False)
+        kwargs.setdefault("decode_cf", False)
         return _xr._original_open_dataset(filename_or_obj, *args, **kwargs)  # type: ignore[attr-defined]
 
     _xr.open_dataset = _open_dataset_scipy_for_inmem
@@ -185,6 +188,8 @@ def _is_valid_local_dataset_cache(local_path: str) -> bool:
             str(path_obj),
             engine="scipy",
             backend_kwargs={"mmap": False},
+            decode_cf=False,
+            decode_times=False,
             decode_timedelta=False,
         )
         return True
@@ -1935,6 +1940,34 @@ class ArgoManager(BaseConnectionManager):
                 f" (batch window: {all_t0_in_month.date()} -> {all_t1_in_month.date()})"
             )
 
+            # Log current RSS and system free memory before loading
+            def _get_current_rss_mb():
+                try:
+                    with open('/proc/self/status') as _f:
+                        for _line in _f:
+                            if _line.startswith('VmRSS:'):
+                                return int(_line.split()[1]) // 1024
+                except Exception:
+                    pass
+                return -1
+
+            def _get_sys_avail_mb():
+                try:
+                    with open('/proc/meminfo') as _f:
+                        for _line in _f:
+                            if _line.startswith('MemAvailable:'):
+                                return int(_line.split()[1]) // 1024
+                except Exception:
+                    pass
+                return -1
+
+            _rss_before = _get_current_rss_mb()
+            _avail_before = _get_sys_avail_mb()
+            logger.debug(
+                f"ARGO prefetch {mkey}: driver RSS = {_rss_before} MB, "
+                f"system available = {_avail_before} MB"
+            )
+
             try:
                 ds = self.argo_interface.open_time_window(
                     start=month_t0,
@@ -1995,6 +2028,33 @@ class ArgoManager(BaseConnectionManager):
             )
             partitions.append(
                 {"t0": all_t0_in_month, "t1": all_t1_in_month, "zarr_path": zarr_path}
+            )
+
+            # Free profile memory.  Drop the ArgoInterface's internal
+            # time-window cache first (it holds a second reference to the
+            # same Dataset that keeps it alive even after ``del ds``), then
+            # let gc.collect() handle the remaining Python objects.
+            #
+            # NOTE: malloc_trim(0) is intentionally NOT called here.
+            # Dask's asyncio event-loop thread is always running in the
+            # background (even between batches), and calling malloc_trim
+            # while it does concurrent glibc malloc/free operations can
+            # corrupt the malloc arena bookkeeping, leading to a SIGSEGV
+            # that surfaces later in an unrelated Python frame.
+            # gc.collect() alone is sufficient; glibc reuses freed pages
+            # for the next allocation without needing explicit trimming.
+            del ds
+            if hasattr(self, 'argo_interface') and hasattr(self.argo_interface, '_tw_cache'):
+                self.argo_interface._tw_cache.clear()
+            import gc as _gc_conn
+            _gc_conn.collect()
+
+            # Log RSS after cleanup
+            _rss_after = _get_current_rss_mb()
+            _avail_after = _get_sys_avail_mb()
+            logger.debug(
+                f"ARGO prefetch {mkey}: driver RSS after cleanup = {_rss_after} MB, "
+                f"system available = {_avail_after} MB"
             )
 
         return partitions
@@ -2262,12 +2322,58 @@ def prefetch_obs_files_to_local(
 
     _lock = _dl_threading.Lock()
 
+    # Transient network errors that are worth retrying
+    _TRANSIENT_EXC_NAMES = frozenset({
+        "EndpointConnectionError",
+        "ClientConnectorDNSError",
+        "ClientConnectorError",
+        "ServerDisconnectedError",
+        "asyncio.TimeoutError",
+        "TimeoutError",
+        "ConnectionResetError",
+        "gaierror",
+    })
+    _DL_MAX_RETRIES = 3
+    _DL_RETRY_BASE_DELAY = 2.0  # seconds; doubles each attempt
+
+    def _is_transient(exc: BaseException) -> bool:
+        """Return True if *exc* looks like a recoverable network error."""
+        return type(exc).__name__ in _TRANSIENT_EXC_NAMES or isinstance(exc, OSError)
+
     def _download_one(rpath: str) -> None:
-        """Download a single file (thread-safe)."""
+        """Download a single file (thread-safe, with transient-error retries)."""
+        import time as _time_mod
+
         filename = Path(rpath).name
         local_path = os.path.join(cache_dir, filename)
         extension = Path(rpath).suffix
 
+        try:
+            for _attempt in range(_DL_MAX_RETRIES):
+                try:
+                    _do_download_attempt(rpath, filename, local_path, extension)
+                    return  # success
+                except Exception as exc:
+                    if _attempt < _DL_MAX_RETRIES - 1 and _is_transient(exc):
+                        _delay = _DL_RETRY_BASE_DELAY * (2 ** _attempt)
+                        logger.debug(
+                            f"Prefetch transient error for {filename} "
+                            f"(attempt {_attempt + 1}/{_DL_MAX_RETRIES}): "
+                            f"{exc!r} – retrying in {_delay:.1f}s"
+                        )
+                        _time_mod.sleep(_delay)
+                    else:
+                        with _lock:
+                            _stats["failed"] += 1
+                            _failures.append(f"{filename}: {exc!r}")
+                        logger.debug(f"Prefetch failed for {rpath}: {exc!r}")
+                        break
+        finally:
+            with _lock:
+                _bar.update(1)
+
+    def _do_download_attempt(rpath: str, filename: str, local_path: str, extension: str) -> None:
+        """Single download attempt (raises on failure)."""
         try:
             if extension == ".zarr":
                 if os.path.isdir(local_path) and os.listdir(local_path):
@@ -2290,7 +2396,6 @@ def prefetch_obs_files_to_local(
                         with _lock:
                             path_map[rpath] = local_path
                             _stats["cached"] += 1
-                            _bar.update(1)
                         return
                 s3_key = rpath
                 if s3_key.startswith("s3://"):
@@ -2349,7 +2454,6 @@ def prefetch_obs_files_to_local(
                         with _lock:
                             path_map[rpath] = local_path
                             _stats["cached"] += 1
-                            _bar.update(1)
                         return
                 tmp_path = local_path + f".tmp.{_dl_threading.current_thread().ident}"
                 with fs.open(rpath, "rb") as remote_file:
@@ -2359,14 +2463,8 @@ def prefetch_obs_files_to_local(
                 with _lock:
                     path_map[rpath] = local_path
                     _stats["downloaded"] += 1
-        except Exception as exc:
-            with _lock:
-                _stats["failed"] += 1
-                _failures.append(f"{filename}: {exc!r}")
-            logger.debug(f"Prefetch failed for {rpath}: {exc!r}")
-
-        with _lock:
-            _bar.update(1)
+        except Exception:
+            raise  # propagated to _download_one retry loop
 
     # ── Parallel downloads ──────────────────────────────────────────
     # S3/Wasabi round-trip latency dominates for small obs files
@@ -2374,14 +2472,37 @@ def prefetch_obs_files_to_local(
     # more requests in flight = better bandwidth utilisation.
     # Scale with file count: many small files benefit most from
     # high concurrency; cap at 32 to avoid fd/socket exhaustion.
+    import asyncio as _asyncio
     from concurrent.futures import ThreadPoolExecutor as _DlPool
+
+    # s3fs creates asyncio Tasks internally; when DNS/network errors occur
+    # those Tasks can be GC'd before their exception is retrieved, causing
+    # noisy "Task exception was never retrieved" log spam.  We install a
+    # temporary exception handler on any running loop to swallow that noise.
+    def _silence_task_exc(loop: Any, context: Any) -> None:
+        exc = context.get("exception")
+        if exc is not None and _is_transient(exc):
+            return  # silently discard
+        loop.default_exception_handler(context)
+
+    try:
+        _loop = _asyncio.get_event_loop()
+    except RuntimeError:
+        _loop = None
+    if _loop is not None and _loop.is_running():
+        _loop.set_exception_handler(_silence_task_exc)
 
     if max_download_workers is not None and max_download_workers > 0:
         _MAX_DL_WORKERS = min(max_download_workers, len(unique_paths))
     else:
         _MAX_DL_WORKERS = min(max(16, len(unique_paths) // 20), 32, len(unique_paths))
-    with _DlPool(max_workers=_MAX_DL_WORKERS) as pool:
-        list(pool.map(_download_one, unique_paths))
+    try:
+        with _DlPool(max_workers=_MAX_DL_WORKERS) as pool:
+            list(pool.map(_download_one, unique_paths))
+    finally:
+        # Restore default asyncio exception handler
+        if _loop is not None and _loop.is_running():
+            _loop.set_exception_handler(None)
 
     _bar.close()
 

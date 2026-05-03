@@ -486,8 +486,12 @@ class ARGOConnectionConfig(BaseConnectionConfig):
 
     def get_storage_options(self) -> Dict[str, Any]:
         """Get S3 storage options for ArgoInterface."""
+        config_kwargs = {"connect_timeout": 30, "read_timeout": 60}
         if self.s3_bucket and self.endpoint_url:
-            storage_opts = {"client_kwargs": {"endpoint_url": self.endpoint_url}}
+            storage_opts = {
+                "client_kwargs": {"endpoint_url": self.endpoint_url},
+                "config_kwargs": config_kwargs,
+            }
             if self.s3_key and self.s3_secret_key:
                 storage_opts["key"] = self.s3_key  # type: ignore[assignment]
                 storage_opts["secret"] = self.s3_secret_key  # type: ignore[assignment]

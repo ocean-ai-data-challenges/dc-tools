@@ -1169,11 +1169,23 @@ def _process_file_to_zarr(args: Tuple) -> Tuple[Optional[str], int, Any]:
     """
     (path, file_idx, is_swath, n_points_dim, alias,
      keep_vars, coordinates, output_dir, eval_variables) = args
+    import time as _time
+
+    _trace_files = os.environ.get(
+        "DCTOOLS_PREP_TRACE_FILES", ""
+    ).lower() in ("1", "true", "yes")
+    _t0 = _time.perf_counter()
     try:
         # Force synchronous dask scheduler — avoid any interaction with
         # a distributed Client that may have been inherited via fork().
         import dask as _dask_mod
         _dask_mod.config.set(scheduler="synchronous")
+
+        if _trace_files:
+            logger.info(
+                f"Batch preproc ({alias}) file {file_idx} start: "
+                f"{os.path.basename(path)}"
+            )
 
         result = preprocess_one_npoints(
             path, is_swath, n_points_dim,
@@ -1219,8 +1231,19 @@ def _process_file_to_zarr(args: Tuple) -> Tuple[Optional[str], int, Any]:
         result.to_zarr(zarr_path, mode="w")
         del result
         gc.collect()
+        if _trace_files:
+            logger.info(
+                f"Batch preproc ({alias}) file {file_idx} done: "
+                f"{os.path.basename(path)} -> {n_pts:,} pts "
+                f"in {_time.perf_counter() - _t0:.1f}s"
+            )
         return (zarr_path, n_pts, _t_start)
     except Exception as exc:
+        if _trace_files:
+            logger.warning(
+                f"Batch preproc ({alias}) file {file_idx} failed: "
+                f"{os.path.basename(path)}: {exc!r}"
+            )
         logger.debug(f"Batch preproc ({alias}) file {file_idx}: {exc}")
         return (None, 0, None)
 
@@ -1336,14 +1359,29 @@ def preprocess_batch_obs_files(
     if not local_paths:
         return None
 
+    _enable_shared_batch_prep = os.environ.get(
+        "DCTOOLS_ENABLE_SHARED_OBS_PREPROCESS", "0"
+    ).lower() in ("1", "true", "yes")
+    if not _enable_shared_batch_prep:
+        if output_zarr_dir:
+            shutil.rmtree(output_zarr_dir, ignore_errors=True)
+        logger.debug(
+            f"Shared batch preprocessing ({alias}) disabled by default; "
+            f"workers will process files individually. Set "
+            f"DCTOOLS_ENABLE_SHARED_OBS_PREPROCESS=1 to re-enable it."
+        )
+        return None
+
     # ── File-count guard ──────────────────────────────────────────────
-    # For very large observation sets (e.g. SWOT with 9 000+ files over
-    # a full year), building the shared Zarr on the driver can take over
-    # an hour (one mini-flush every ~12 s × 300 flushes).  Skip the
-    # shared build when the number of unique files exceeds the limit;
-    # workers will fall back to processing only their ~25 files each.
+    # For very large observation sets, building the shared Zarr on the
+    # driver becomes fragile: long-lived thread-pool preprocessing across
+    # thousands of files can accumulate allocator state, while the later
+    # concat/write phase creates a very large driver-side working set.
+    # Skip the shared build when the number of unique files exceeds the
+    # limit; workers will fall back to processing only their local task
+    # windows instead of materializing one giant batch-wide cache.
     _MAX_SHARED_OBS_FILES = int(
-        os.environ.get("DCTOOLS_SHARED_OBS_MAX_FILES", "5000")
+        os.environ.get("DCTOOLS_SHARED_OBS_MAX_FILES", "1000")
     )
     if len(local_paths) > _MAX_SHARED_OBS_FILES:
         logger.info(
@@ -1470,21 +1508,35 @@ def preprocess_batch_obs_files(
     # of the current file trigger copy-on-write).  With 4 workers the
     # overhead is ~0.6–1.2 GB, acceptable on any machine running DC1.
     #
-    # Set DCTOOLS_PREP_USE_THREADS=1 to fall back to threads
-    # (e.g. if running inside a container with restricted fork()).
+    # Fork-after-thread is unsafe: if Dask workers, botocore/fsspec
+    # download threads, or any other thread holds a mutex at fork time,
+    # the forked child inherits the locked mutex with no thread to
+    # release it → immediate deadlock inside the ProcessPool worker.
+    # In practice this caused silent hangs at batch 112 (saral Phase 1).
+    # Default to threads; use DCTOOLS_PREP_USE_PROCESSES=1 to opt back
+    # into processes on a machine where fork is safe (no active threads).
     _use_processes = os.environ.get(
-        "DCTOOLS_PREP_USE_THREADS", ""
-    ).lower() not in ("1", "true", "yes")
+        "DCTOOLS_PREP_USE_PROCESSES", ""
+    ).lower() in ("1", "true", "yes")
 
-    # Use most available CPUs for preprocessing.  During this phase the
-    # Dask cluster is idle (no tasks submitted yet), so it is safe to
-    # use all the cores that would otherwise be assigned to workers.
-    # Memory: each forked child adds ~150-300 MB RSS.  Cap at 16 to
-    # keep peak RSS under 4.8 GB even on high-core-count machines.
-    _default_max = max(max_workers or 0, min(_cpu_count * 3 // 4, 16))
-    _MAX_PREP_WORKERS = min(
-        min(_cpu_count, _default_max),
-        len(local_paths),
+    # Use most available CPUs for preprocessing when no explicit limit is
+    # provided. During this phase the Dask cluster is idle (no tasks submitted
+    # yet), so it is safe to use many cores. Memory: each forked child adds
+    # ~150-300 MB RSS, so auto mode is capped at 16 workers.
+    #
+    # IMPORTANT: when max_workers is provided by the caller, it is an upper
+    # bound and must be honored. The previous logic accidentally treated it as
+    # a lower bound, which could inflate a requested limit of 3 workers to 16
+    # threads on large machines and trigger driver-side OOM during SWOT shared
+    # preprocessing.
+    if max_workers is not None and int(max_workers) > 0:
+        _requested_max = int(max_workers)
+    else:
+        _requested_max = min(_cpu_count * 3 // 4, 16)
+
+    _MAX_PREP_WORKERS = max(
+        1,
+        min(_cpu_count, _requested_max, len(local_paths)),
     )
 
     _args_list = [
@@ -1495,46 +1547,148 @@ def preprocess_batch_obs_files(
     ]
 
     _t_phase1_start = _time.perf_counter()
+    _progress_seconds = max(
+        5,
+        int(os.environ.get("DCTOOLS_PREP_PROGRESS_SECONDS", "60")),
+    )
+    _progress_every = max(
+        1,
+        int(os.environ.get("DCTOOLS_PREP_PROGRESS_EVERY", "10")),
+    )
+    _prep_pool_batch_size = max(
+        _MAX_PREP_WORKERS,
+        int(
+            os.environ.get(
+                "DCTOOLS_PREP_POOL_BATCH_SIZE",
+                str(max(_MAX_PREP_WORKERS * 32, 96)),
+            )
+        ),
+    )
+    _trace_files = os.environ.get(
+        "DCTOOLS_PREP_TRACE_FILES", ""
+    ).lower() in ("1", "true", "yes")
     logger.debug(
         f"Shared batch preprocessing ({alias}): "
         f"{len(local_paths)} unique files, "
         f"{_MAX_PREP_WORKERS} {'processes' if _use_processes else 'threads'}"
     )
 
-    def _collect_phase1_result(fut: Any, fut_to_path: Dict) -> None:
+    if _trace_files:
+        logger.info(
+            f"Shared batch ({alias}) phase 1 file set: "
+            f"{', '.join(os.path.basename(p) for p in local_paths)}"
+        )
+
+    def _pending_sample_text(pending_futs: List[Any], fut_meta: Dict[Any, Dict[str, Any]]) -> str:
+        _sample = []
+        for _pf in pending_futs[:5]:
+            _meta = fut_meta.get(_pf, {})
+            _sample.append(
+                f"{_meta.get('idx', '?')}:{os.path.basename(str(_meta.get('path', 'unknown')))}"
+            )
+        return ", ".join(_sample) if _sample else "none"
+
+    def _collect_phase1_result(fut: Any, fut_meta: Dict[Any, Dict[str, Any]]) -> Tuple[int, str, int]:
         """Unpack a Phase-1 future and append to the shared lists."""
+        _meta = fut_meta.get(fut, {})
+        _idx = int(_meta.get("idx", -1))
+        _basename = os.path.basename(str(_meta.get("path", "unknown")))
         try:
             zarr_path, n_pts, t_start = fut.result()
         except Exception as _fe:
-            _fpath = os.path.basename(str(fut_to_path.get(fut, "unknown")))
             logger.warning(
-                f"Batch preproc ({alias}): skipping file {_fpath}: {_fe!r}"
+                f"Batch preproc ({alias}): skipping file {_idx}:{_basename}: {_fe!r}"
             )
-            return
+            return (_idx, _basename, 0)
         if zarr_path is not None:
             _mini_zarr_paths.append(zarr_path)
             _t_starts_phase1.append(t_start)
             nonlocal n_ok, n_pts_total
             n_ok += 1
             n_pts_total += n_pts
+        return (_idx, _basename, int(n_pts or 0))
+
+    def _run_phase1(pool_factory: Any, wait_fn: Any) -> None:
+        _total_files = len(_args_list)
+        _done_count = 0
+        _n_waves = max(1, (_total_files + _prep_pool_batch_size - 1) // _prep_pool_batch_size)
+
+        for _wave_idx, _wave_start in enumerate(range(0, _total_files, _prep_pool_batch_size), start=1):
+            _wave_args = _args_list[_wave_start:_wave_start + _prep_pool_batch_size]
+            _wave_end = _wave_start + len(_wave_args)
+            if _n_waves > 1:
+                logger.info(
+                    f"Shared batch ({alias}) phase 1 wave {_wave_idx}/{_n_waves}: "
+                    f"files {_wave_start}-{_wave_end - 1} with {_MAX_PREP_WORKERS} "
+                    f"{'processes' if _use_processes else 'threads'}"
+                )
+
+            with pool_factory() as pool:
+                _futs = [pool.submit(_process_file_to_zarr, a) for a in _wave_args]
+                _fut_meta = {
+                    f: {"path": a[0], "idx": a[1]}
+                    for f, a in zip(_futs, _wave_args, strict=False)
+                }
+                _pending = set(_futs)
+
+                while _pending:
+                    _done, _pending = wait_fn(
+                        _pending,
+                        timeout=_progress_seconds,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    if not _done:
+                        _elapsed = _time.perf_counter() - _t_phase1_start
+                        _future_files = _total_files - _done_count - len(_pending)
+                        logger.info(
+                            f"Shared batch ({alias}) phase 1 in progress: "
+                            f"{_done_count}/{_total_files} files done after {_elapsed:.1f}s; "
+                            f"pending={len(_pending) + _future_files}; sample pending: "
+                            f"{_pending_sample_text(sorted(_pending, key=lambda f: fut_meta_key(_fut_meta, f)), _fut_meta)}"
+                        )
+                        continue
+
+                    for fut in sorted(_done, key=lambda f: fut_meta_key(_fut_meta, f)):
+                        _idx, _basename, _n_pts = _collect_phase1_result(fut, _fut_meta)
+                        _done_count += 1
+                        if _trace_files:
+                            logger.info(
+                                f"Shared batch ({alias}) phase 1 progress: "
+                                f"{_done_count}/{_total_files} done | latest {_idx}:{_basename} "
+                                f"({_n_pts:,} pts)"
+                            )
+                        elif _done_count % _progress_every == 0 or not _pending:
+                            _elapsed = _time.perf_counter() - _t_phase1_start
+                            _future_files = _total_files - _done_count - len(_pending)
+                            logger.info(
+                                f"Shared batch ({alias}) phase 1 progress: "
+                                f"{_done_count}/{_total_files} files done after {_elapsed:.1f}s; "
+                                f"pending={len(_pending) + _future_files}; latest {_idx}:{_basename}"
+                            )
+
+            # Releasing the pool between waves helps reclaim thread-local and
+            # allocator state that can otherwise accumulate across hundreds of
+            # large swath files in a single long-lived executor.
+            gc.collect()
+
+    def fut_meta_key(fut_meta: Dict[Any, Dict[str, Any]], fut: Any) -> Any:
+        return fut_meta.get(fut, {}).get("idx", 10**9)
 
     try:
         if _use_processes:
             from concurrent.futures import ProcessPoolExecutor as _FilePool
-            from concurrent.futures import as_completed as _pool_ac
-            with _FilePool(max_workers=_MAX_PREP_WORKERS) as pool:
-                _futs = [pool.submit(_process_file_to_zarr, a) for a in _args_list]
-                _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
-                for fut in _pool_ac(_futs):
-                    _collect_phase1_result(fut, _fut_to_path)
+            from concurrent.futures import wait as _pool_wait, FIRST_COMPLETED
+            _run_phase1(
+                lambda: _FilePool(max_workers=_MAX_PREP_WORKERS),
+                _pool_wait,
+            )
         else:
             from concurrent.futures import ThreadPoolExecutor as _ThrPool
-            from concurrent.futures import as_completed as _pool_ac
-            with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
-                _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
-                _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
-                for fut in _pool_ac(_futs):
-                    _collect_phase1_result(fut, _fut_to_path)
+            from concurrent.futures import wait as _pool_wait, FIRST_COMPLETED
+            _run_phase1(
+                lambda: _ThrPool(max_workers=_MAX_PREP_WORKERS),
+                _pool_wait,
+            )
 
     except (OSError, BrokenPipeError) as _pool_exc:
         logger.warning(
@@ -1542,12 +1696,11 @@ def preprocess_batch_obs_files(
             f"({_pool_exc!r}), retrying with ThreadPoolExecutor"
         )
         from concurrent.futures import ThreadPoolExecutor as _ThrPool
-        from concurrent.futures import as_completed as _pool_ac
-        with _ThrPool(max_workers=_MAX_PREP_WORKERS) as tpool:
-            _futs = [tpool.submit(_process_file_to_zarr, a) for a in _args_list]
-            _fut_to_path = {f: a[0] for f, a in zip(_futs, _args_list, strict=False)}
-            for fut in _pool_ac(_futs):
-                _collect_phase1_result(fut, _fut_to_path)
+        from concurrent.futures import wait as _pool_wait, FIRST_COMPLETED
+        _run_phase1(
+            lambda: _ThrPool(max_workers=_MAX_PREP_WORKERS),
+            _pool_wait,
+        )
 
     _t_phase1_elapsed = _time.perf_counter() - _t_phase1_start
     logger.debug(
@@ -1984,7 +2137,7 @@ class ObservationDataViewer:
                 # if load_to_memory:
                 #    combined = combined.compute()
 
-                return xr.Dataset(combined) if combined is not None else None
+                return combined
 
             except Exception as e:
                 logger.error(f"Preprocessing failed for {self.alias}: {e}")
@@ -2031,7 +2184,7 @@ class ObservationDataViewer:
                 # Combine results
                 combined = concat_with_dim(batch_results, self.n_points_dim)
 
-                return xr.Dataset(combined) if combined is not None else None
+                return combined
 
             except Exception as e:
                 logger.error(f"Preprocessing failed for {self.alias}: {e}")
