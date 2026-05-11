@@ -23,10 +23,9 @@ Quick references for specific tasks:
 ### Data Loading
 
 ```python
-from dctools.data import EvaluationDataloader
+import xarray as xr
 
-loader = EvaluationDataloader()
-data = loader.load_dataset(source="argo")  # or "cmems", "s3"
+data = xr.open_dataset("reference.nc")
 ```
 
 See [Quick Start - Loading Data](quickstart.md#2-loading-data)
@@ -34,9 +33,9 @@ See [Quick Start - Loading Data](quickstart.md#2-loading-data)
 ### Processing Data
 
 ```python
-from dctools.processing import interpolate_dataset
+from dctools.processing.interpolation import interpolate_dataset
 
-interpolated = interpolate_dataset(model_data, reference_grid)
+interpolated = interpolate_dataset(model_data, target_grid=reference_grid)
 ```
 
 See [Quick Start - Processing Data](quickstart.md#4-processing-data)
@@ -44,10 +43,10 @@ See [Quick Start - Processing Data](quickstart.md#4-processing-data)
 ### Computing Metrics
 
 ```python
-from dctools.metrics import MetricComputer
+from dctools.metrics.metrics import MetricComputer
 
 computer = MetricComputer()
-metrics = computer.compute(prediction, reference, ["rmse", "mae"])
+metrics = computer.compute(pred_data=prediction, ref_data=reference)
 ```
 
 See [Quick Start - Computing Metrics](quickstart.md#5-computing-metrics)
@@ -76,7 +75,7 @@ Learn to configure evaluation workflows:
 ### Run from Configuration
 
 ```bash
-poetry run python -m dctools run config.yaml
+poetry run python dc2/evaluate.py -d ./data -c dc2
 ```
 
 ## Understanding Architecture
@@ -121,7 +120,7 @@ See [Architecture - Performance](architecture.md#performance-characteristics)
 Extend dc-tools for your needs:
 
 ```python
-from dctools.processing import BaseDCEvaluation
+from dctools.processing.base import BaseDCEvaluation
 
 class MyEvaluation(BaseDCEvaluation):
     # Custom logic here
@@ -151,7 +150,7 @@ See [Architecture - Troubleshooting](architecture.md#troubleshooting-architectur
 ```bash
 # 1. Create config.yaml (5 min)
 # 2. Run
-poetry run python -m dctools run config.yaml
+poetry run python dc2/evaluate.py -d ./data -c dc2
 # 3. Check results
 cat results/metrics.json
 ```
@@ -167,7 +166,7 @@ dask-worker scheduler_address:8786 &
 
 # 2. Configure for cluster (in config.yaml)
 # 3. Run
-poetry run python -m dctools run config.yaml
+poetry run python dc2/evaluate.py -d ./data -c dc2
 
 # 4. Monitor progress
 # Visit http://localhost:8787 for Dask dashboard
@@ -179,7 +178,7 @@ Time: hours to days depending on dataset size
 
 ```python
 # 1. Create challenge class
-from dctools.processing import BaseDCEvaluation
+from dctools.processing.base import BaseDCEvaluation
 
 class MyChallenge(BaseDCEvaluation):
     VARIABLES = ['MY_VAR']

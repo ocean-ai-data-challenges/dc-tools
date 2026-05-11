@@ -1411,7 +1411,7 @@ class BaseDCEvaluation:
                     continue
 
                 oceanbench_eval_variables = (
-                    [get_variable_alias(var) for var in common_vars] if common_vars else None
+                    [get_variable_alias(var) or var for var in common_vars] if common_vars else None
                 )
 
                 common_metrics = [
@@ -1537,6 +1537,7 @@ class BaseDCEvaluation:
                 restart_frequency=getattr(self.args, "restart_frequency", 1),
                 max_p_memory_increase=getattr(self.args, "max_p_memory_increase", 0.2),
                 max_worker_memory_fraction=getattr(self.args, "max_worker_memory_fraction", 0.85),
+                max_worker_rss_fraction=getattr(self.args, "max_worker_rss_fraction", 1.0),
                 resume=_resume,
             )
             _n_pred_total = len(dataset_references)

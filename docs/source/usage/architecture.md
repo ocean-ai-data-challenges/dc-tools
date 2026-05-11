@@ -38,7 +38,7 @@ This document describes the architecture and design patterns used in dc-tools.
 │                                                              │
 │  I/O (dcio/)                                                │
 │  ├─ DataSaver (NetCDF/Zarr)                                │
-│  └─ DataLoader                                              │
+│  └─ FileLoader                                              │
 │                                                              │
 │  Utilities (utilities/)                                     │
 │  ├─ Configuration Parsing                                  │
@@ -181,9 +181,11 @@ Each extends with challenge-specific:
 
 ```python
 class EvaluationDataloader:
-    """Main entry point for data loading"""
-    def load_dataset(source: str) → xr.Dataset
-    def _transform_coordinates(ds) → xr.Dataset
+    """Iterable dataloader; instantiated via a params dict by the runner."""
+    # key public interface
+    def __iter__(self) → Generator[List[Dict], None, None]
+    def open_pred(self, pred_entry) → xr.Dataset
+    def open_ref(self, ref_entry, ref_alias) → xr.Dataset
 
 class CoordinateSystem:
     """Detect and normalize coordinates"""
@@ -378,8 +380,9 @@ config:
 
 ```python
 # Uses thread pool (no GIL bottleneck for Dask)
-loader = EvaluationDataloader()
-metrics = loader.evaluate()  # Synchronous
+from dctools.metrics.evaluator import Evaluator
+evaluator = Evaluator(...)
+results = evaluator.evaluate()  # Synchronous
 ```
 
 ### Distributed Execution
@@ -389,8 +392,8 @@ from dask.distributed import Client
 
 with Client(n_workers=10, threads_per_worker=2):
     # Same code runs on cluster
-    loader = EvaluationDataloader()
-    metrics = loader.evaluate()  # Distributed
+    evaluator = Evaluator(...)
+    results = evaluator.evaluate()  # Distributed
 ```
 
 **No code changes needed - Dask handles distribution.**
@@ -459,9 +462,9 @@ Developers can extend dc-tools at several points:
 ### 1. Custom Data Source
 
 ```python
-from dctools.data import ConnectionManager
+from dctools.data.connection.connection_manager import BaseConnectionManager
 
-class CustomBackend(ConnectionManager):
+class CustomBackend(BaseConnectionManager):
     def connect(config):
         # Custom connection logic
         return xr.Dataset(...)
@@ -470,7 +473,7 @@ class CustomBackend(ConnectionManager):
 ### 2. Custom Metric
 
 ```python
-from dctools.metrics import MetricComputer
+from dctools.metrics.metrics import MetricComputer
 
 class CustomMetric(MetricComputer):
     def _custom_metric(pred, ref):
@@ -481,7 +484,7 @@ class CustomMetric(MetricComputer):
 ### 3. Custom Evaluation
 
 ```python
-from dctools.processing import BaseDCEvaluation
+from dctools.processing.base import BaseDCEvaluation
 
 class CustomEvaluation(BaseDCEvaluation):
     def _process(self):

@@ -106,7 +106,7 @@ Handles data reading and writing.
 
 **Key Functions:**
 - `DataSaver.save_dataset()` - Save to NetCDF/Zarr
-- `DataLoader` - Load various formats
+- `FileLoader` - Load various formats
 - `choose_chunks_automatically()` - Optimize chunking
 
 **Formats supported:**
@@ -162,15 +162,24 @@ Development and debugging utilities.
 Validate model output against Argo profiles:
 
 ```python
-from dctools.data import EvaluationDataloader
-from dctools.metrics import MetricComputer
+import xarray as xr
 
-loader = EvaluationDataloader()
-model = loader.load_dataset(source="cmems")
-observations = loader.load_dataset(source="argo")
+from dctools.data.coordinates import CoordinateSystem
+from dctools.metrics.metrics import MetricComputer
 
-computer = MetricComputer()
-metrics = computer.compute(model, observations)
+model = xr.open_dataset("model.nc")
+observations = xr.open_dataset("observations.nc")
+
+model_coords = CoordinateSystem(model)
+obs_coords = CoordinateSystem(observations)
+
+computer = MetricComputer(eval_variables=["so", "thetao"])
+metrics = computer.compute(
+   pred_data=model,
+   ref_data=observations,
+   pred_coords=model_coords,
+   ref_coords=obs_coords,
+)
 ```
 
 ### Use Case 2: Large-Scale Evaluation
@@ -179,14 +188,14 @@ Evaluate on a Dask cluster across multiple regions:
 
 ```python
 from dask.distributed import Client
-from dctools.metrics import Evaluator
+
+from dc2.evaluation.evaluation import DC2Evaluation
+from dctools.utilities.args_config import load_args_and_config
 
 with Client(n_workers=10):
-    evaluator = Evaluator()
-    results = evaluator.evaluate(
-        datasets=[ds1, ds2, ds3],
-        reference=reference
-    )
+   args = load_args_and_config("dc2/config/dc2.yaml")
+   evaluator = DC2Evaluation(args)
+   evaluator.run_eval()
 ```
 
 ### Use Case 3: Data Challenge Setup
@@ -208,7 +217,7 @@ evaluation:
 ```
 
 ```bash
-poetry run python -m dctools run config.yaml
+poetry run python dc2/evaluate.py -d ./data -c dc2
 ```
 
 ## Architecture Patterns

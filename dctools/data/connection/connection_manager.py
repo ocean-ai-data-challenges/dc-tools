@@ -261,6 +261,26 @@ def get_time_bound_values(ds: xr.Dataset) -> tuple:
                 if np.isnan(num_min) or np.isnan(num_max):
                     return (None, None)
                 return (num_min, num_max)
+            elif time_vals.dtype == object:
+                # cftime objects (from use_cftime=True) or other object arrays
+                try:
+                    values = np.asarray(time_vals.values).ravel()
+                    if len(values) == 0:
+                        return (None, None)
+                    t_min = values.min()
+                    t_max = values.max()
+                    return (pd.Timestamp(t_min.isoformat()), pd.Timestamp(t_max.isoformat()))
+                except Exception:
+                    try:
+                        converted = pd.to_datetime(
+                            [str(v) for v in values], errors="coerce"
+                        )
+                        valid = converted.dropna()
+                        if len(valid) > 0:
+                            return (valid.min(), valid.max())
+                    except Exception:
+                        pass
+                    return (None, None)
             else:
                 logger.warning(f"Unsupported time data type: {time_vals.dtype}")
                 return (None, None)

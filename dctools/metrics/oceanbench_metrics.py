@@ -131,10 +131,18 @@ def _compute_spatial_per_bins(
     n_lon_bins = len(lon_bins) - 1
     n_bins_total = n_lat_bins * n_lon_bins
 
-    lat_idx = np.clip(np.digitize(lat_coord, lat_bins) - 1, 0, n_lat_bins - 1)  # (nlat,)
-    lon_idx = np.clip(np.digitize(lon_coord, lon_bins) - 1, 0, n_lon_bins - 1)  # (nlon,)
-    # Broadcast to 2D and flatten: shape (nlat * nlon,)
-    combined_idx = (lat_idx[:, None] * n_lon_bins + lon_idx[None, :]).ravel()
+    lat_idx = np.clip(np.digitize(lat_coord, lat_bins) - 1, 0, n_lat_bins - 1)
+    lon_idx = np.clip(np.digitize(lon_coord, lon_bins) - 1, 0, n_lon_bins - 1)
+    # Build flat bin index mapping each grid point to its (lat_bin, lon_bin) cell.
+    # For 2D curvilinear grids (lat_coord.ndim == 2), lat_idx and lon_idx already
+    # have shape (nlat, nlon) — element-wise multiplication avoids a catastrophic
+    # (nlat, 1, nlon) × (1, nlat, nlon) broadcast that would allocate nlat² × nlon
+    # elements (e.g. 881² × 609 ≈ 3.8 GB for a typical Arctic model grid).
+    if lat_coord.ndim == 2:
+        combined_idx = (lat_idx * n_lon_bins + lon_idx).ravel()
+    else:
+        # 1-D lat/lon axes: broadcast to a 2D grid then flatten
+        combined_idx = (lat_idx[:, None] * n_lon_bins + lon_idx[None, :]).ravel()
 
     # Determine variables to process
     var_names = [v for v in eval_variables if v in pred_ds.data_vars and v in ref_ds.data_vars]
@@ -183,47 +191,122 @@ def _compute_spatial_per_bins(
             if depth_index is not None:
                 if ref_da.sizes.get("depth", 0) <= depth_index:
                     continue
-                try:
-                    pred_slice = pred_da.isel(depth=depth_index).transpose("lat", "lon")
-                    ref_slice = ref_da.isel(depth=depth_index).transpose("lat", "lon")
-                except Exception:
-                    continue
                 depth_bin: Optional[Dict[str, Any]] = _depth_bin(depth_index)
+                _pred_base = pred_da.isel(depth=depth_index)
+                _ref_base = ref_da.isel(depth=depth_index)
             else:
+                depth_bin = None
+                _pred_base = pred_da
+                _ref_base = ref_da
+
+            # ── Get data arrays, handling 2D curvilinear grids ──────────────
+            # First try transpose to (lat, lon) for regular lat/lon dimension grids.
+            # Fall back to native (y, x) order when lat/lon are auxiliary 2D coordinates.
+            pred_arr = None
+            ref_arr = None
+            try:
+                pred_arr = _pred_base.transpose("lat", "lon").values.astype(np.float64)
+                ref_arr = _ref_base.transpose("lat", "lon").values.astype(np.float64)
+            except Exception:
                 try:
-                    pred_slice = pred_da.transpose("lat", "lon")
-                    ref_slice = ref_da.transpose("lat", "lon")
+                    pred_arr = _pred_base.values.astype(np.float64).squeeze()
+                    ref_arr = _ref_base.values.astype(np.float64).squeeze()
                 except Exception:
                     continue
-                depth_bin = None
 
-            pred_arr = pred_slice.values.astype(np.float64)
-            ref_arr = ref_slice.values.astype(np.float64)
-            if pred_arr.shape != ref_arr.shape or pred_arr.ndim != 2:
+            if pred_arr is None or pred_arr.ndim != 2:
                 continue
 
-            # ── Vectorised accumulation ──────────────────────────────────────
-            flat_pred = pred_arr.ravel()
-            flat_ref = ref_arr.ravel()
-            valid = ~(np.isnan(flat_pred) | np.isnan(flat_ref))
-            if not valid.any():
-                continue
+            # ── Same-grid path: direct point-wise RMSE per bin ───────────────
+            if pred_arr.shape == ref_arr.shape:
+                flat_pred = pred_arr.ravel()
+                flat_ref = ref_arr.ravel()
+                if flat_pred.size != combined_idx.size:
+                    continue
+                valid = ~(np.isnan(flat_pred) | np.isnan(flat_ref))
+                if not valid.any():
+                    continue
 
-            diff_sq = (flat_pred[valid] - flat_ref[valid]) ** 2
-            valid_idx = combined_idx[valid]
+                diff_sq = (flat_pred[valid] - flat_ref[valid]) ** 2
+                valid_idx = combined_idx[valid]
+                counts = np.bincount(valid_idx, minlength=n_bins_total)
+                sum_sq = np.bincount(valid_idx, weights=diff_sq, minlength=n_bins_total)
+                nz_flat = np.flatnonzero(counts)
+                if nz_flat.size == 0:
+                    continue
+                nz_rmse = np.sqrt(sum_sq[nz_flat] / counts[nz_flat])
+                nz_counts = counts[nz_flat]
 
-            # np.bincount is O(N) and ~10× faster than np.add.at for dense integer indices
-            counts = np.bincount(valid_idx, minlength=n_bins_total)
-            sum_sq = np.bincount(valid_idx, weights=diff_sq, minlength=n_bins_total)
+            else:
+                # ── Different-grid path: per-bin mean then RMSE ──────────────
+                # Pred and ref are on different grids (e.g. TOPAZ 881×609 vs
+                # AMSR2 3584×2432). Build combined_idx for each grid separately,
+                # bin-average each, then compute RMSE between bin averages.
+                if ref_arr.ndim != 2:
+                    continue
 
-            # ── Emit one dict per non-empty bin ──────────────────────────────
-            nz_flat = np.flatnonzero(counts)
+                # Get ref lat/lon (may be in coords OR data_vars)
+                ref_lat_arr = None
+                ref_lon_arr = None
+                for _lat_src in (ref_ds.coords, getattr(ref_ds, "data_vars", {})):
+                    if "lat" in _lat_src and ref_lat_arr is None:
+                        ref_lat_arr = np.asarray(_lat_src["lat"].values, dtype=np.float64).squeeze()
+                    if "lon" in _lat_src and ref_lon_arr is None:
+                        ref_lon_arr = np.asarray(_lat_src["lon"].values, dtype=np.float64).squeeze()
+
+                if ref_lat_arr is None or ref_lon_arr is None:
+                    continue
+                # Normalise ref lat/lon to 2D → flatten
+                if ref_lat_arr.shape != ref_arr.shape:
+                    try:
+                        ref_lat_arr = np.broadcast_to(ref_lat_arr, ref_arr.shape).copy()
+                        ref_lon_arr = np.broadcast_to(ref_lon_arr, ref_arr.shape).copy()
+                    except Exception:
+                        continue
+
+                ref_lat_flat = ref_lat_arr.ravel()
+                ref_lon_flat = ref_lon_arr.ravel()
+                ref_flat = ref_arr.ravel()
+
+                ref_lat_idx = np.clip(np.digitize(ref_lat_flat, lat_bins) - 1, 0, n_lat_bins - 1)
+                ref_lon_idx = np.clip(np.digitize(ref_lon_flat, lon_bins) - 1, 0, n_lon_bins - 1)
+                ref_cidx = (ref_lat_idx * n_lon_bins + ref_lon_idx)
+
+                # Bin-average pred (using pred combined_idx)
+                pred_flat = pred_arr.ravel()
+                if pred_flat.size != combined_idx.size:
+                    continue
+                p_valid = ~np.isnan(pred_flat)
+                p_counts = np.bincount(combined_idx[p_valid], weights=None, minlength=n_bins_total)
+                p_sums = np.bincount(combined_idx[p_valid], weights=pred_flat[p_valid], minlength=n_bins_total)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    p_means = np.where(p_counts > 0, p_sums / p_counts, np.nan)
+
+                # Bin-average ref (using ref combined_idx)
+                r_valid = ~np.isnan(ref_flat)
+                r_counts = np.bincount(ref_cidx[r_valid], weights=None, minlength=n_bins_total)
+                r_sums = np.bincount(ref_cidx[r_valid], weights=ref_flat[r_valid], minlength=n_bins_total)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    r_means = np.where(r_counts > 0, r_sums / r_counts, np.nan)
+
+                # RMSE between bin-averages for bins covered by both grids
+                both = (~np.isnan(p_means)) & (~np.isnan(r_means))
+                if not both.any():
+                    continue
+                sum_sq = np.where(both, (p_means - r_means) ** 2, 0.0)
+                counts = np.where(both, np.minimum(p_counts, r_counts).astype(np.int64), 0)
+                # Treat each bin as having count from min of pred/ref coverage
+                nz_flat = np.flatnonzero(both)
+                if nz_flat.size == 0:
+                    continue
+                nz_rmse = np.sqrt(sum_sq[nz_flat])
+                nz_counts = counts[nz_flat]
+
+            # ── Shared: emit one dict per non-empty bin ─────────────────────
             if nz_flat.size == 0:
                 continue
             nz_lat = nz_flat // n_lon_bins
             nz_lon = nz_flat % n_lon_bins
-            nz_rmse = np.sqrt(sum_sq[nz_flat] / counts[nz_flat])
-            nz_counts = counts[nz_flat]
 
             for k in range(nz_flat.size):
                 li = int(nz_lat[k])

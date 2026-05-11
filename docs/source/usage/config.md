@@ -358,17 +358,14 @@ output:
 Execute evaluation using the configuration file:
 
 ```bash
-# Basic usage
-poetry run python -m dctools run config.yaml
+# Run DC2 with the default config (dc2/config/dc2.yaml)
+poetry run python dc2/evaluate.py -d ./data -c dc2
 
-# With custom output directory
-poetry run python -m dctools run config.yaml --output-dir ./custom_results/
+# Run DC2 with another config name (dc2/config/<name>.yaml)
+poetry run python dc2/evaluate.py -d ./data -c dc2_edito
 
-# Verbose output
-poetry run python -m dctools run config.yaml --verbose
-
-# Dry run (show what would be executed)
-poetry run python -m dctools run config.yaml --dry-run
+# Optional: write logs to a file
+poetry run python dc2/evaluate.py -d ./data -c dc2 -l ./logs/dc2.log
 ```
 
 ## Environment Variables
@@ -385,7 +382,7 @@ export S3_ENDPOINT=s3.example.com
 export ARGO_CACHEDIR=/custom/cache
 
 # Run evaluation
-poetry run python -m dctools run config.yaml
+poetry run python dc2/evaluate.py -d ./data -c dc2
 ```
 
 ## Advanced Patterns
@@ -447,9 +444,11 @@ evaluation:
 
 **Issue**: Configuration not found
 ```bash
-# Make sure path is correct
-poetry run python -m dctools run --help
-poetry run python -m dctools run ./config.yaml  # Use ./
+# Check available CLI arguments
+poetry run python dc2/evaluate.py --help
+
+# Config name must map to: dc2/config/<config_name>.yaml
+poetry run python dc2/evaluate.py -d ./data -c dc2
 ```
 
 **Issue**: Invalid variable names

@@ -33,7 +33,7 @@ Complete API documentation for all dctools modules.
 ### Key Functions
 
 - `DataSaver.save_dataset()` - Save data to various formats
-- `DataLoader` - Load data from disk
+- `FileLoader` - Load various file formats (NetCDF, Zarr, HDF5)
 - `choose_chunks_automatically()` - Optimize data chunking
 
 ## Metrics
@@ -114,19 +114,23 @@ Here are the typical imports for common tasks:
 
 ```python
 # Data loading
-from dctools.data import EvaluationDataloader, CoordinateSystem
+from dctools.data.coordinates import CoordinateSystem
+from dctools.data.datasets.dataloader import EvaluationDataloader
 
 # Metrics computation
-from dctools.metrics import MetricComputer, Evaluator
+from dctools.metrics.evaluator import Evaluator
+from dctools.metrics.metrics import MetricComputer
 
 # Data processing
-from dctools.processing import interpolate_dataset, BaseDCEvaluation
+from dctools.processing.base import BaseDCEvaluation
+from dctools.processing.interpolation import interpolate_dataset
 
 # I/O operations
-from dctools.dcio import DataSaver, DataLoader
+from dctools.dcio.loader import FileLoader, choose_chunks_automatically
+from dctools.dcio.saver import DataSaver
 
 # Utilities
-from dctools.utilities import init_dask_cluster
+from dctools.utilities.args_config import load_args_and_config
 ```
 
 ## Module Overview
@@ -134,7 +138,7 @@ from dctools.utilities import init_dask_cluster
 | Module | Purpose | Key Classes |
 |--------|---------|-------------|
 | `dctools.data` | Data loading & coordinate handling | `EvaluationDataloader`, `CoordinateSystem` |
-| `dctools.dcio` | Data I/O operations | `DataSaver`, `DataLoader` |
+| `dctools.dcio` | Data I/O operations | `DataSaver`, `FileLoader` |
 | `dctools.metrics` | Metric computation | `MetricComputer`, `Evaluator` |
 | `dctools.processing` | Data processing pipelines | `BaseDCEvaluation`, `interpolate_dataset` |
 | `dctools.utilities` | General utilities | Various helper functions |

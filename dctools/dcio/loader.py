@@ -57,6 +57,33 @@ def choose_chunks_automatically(
     return suggested
 
 
+def _fix_nanosecond_time(ds: xr.Dataset) -> xr.Dataset:
+    """Convert time variables stored as 'nanoseconds since <epoch>' to datetime64[ns].
+
+    xarray/cftime cannot decode 'nanoseconds' as a CF time unit.  When a zarr
+    store is opened with ``decode_times=False`` this helper detects integer
+    variables whose ``units`` attribute starts with 'nanoseconds since' and
+    reinterprets their int64 values as numpy datetime64[ns] (which uses the
+    same epoch convention internally).
+    """
+    for var in list(ds.coords) + list(ds.data_vars):
+        v = ds[var]
+        units = v.attrs.get("units", "")
+        if "nanoseconds since" in units and np.issubdtype(v.dtype, np.integer):
+            # Use scheduler="synchronous" to avoid routing through the distributed
+            # client (which can be broken inside a cancelled/restarting worker and
+            # would raise ClosedClientError when .values triggers __array__).
+            raw_data = v.variable._data
+            if hasattr(raw_data, "compute"):
+                raw_np = raw_data.compute(scheduler="synchronous")
+            else:
+                raw_np = np.asarray(raw_data)
+            new_values = raw_np.astype("datetime64[ns]")
+            new_attrs = {k: val for k, val in v.attrs.items() if k not in ("units", "calendar")}
+            ds[var] = xr.Variable(v.dims, new_values, new_attrs)
+    return ds
+
+
 def list_all_group_paths(nc_path: str) -> List[str]:
     """List all group paths in a NetCDF file.
 
@@ -213,6 +240,7 @@ class FileLoader:
                 zarr_kwargs: Dict[str, Any] = {
                     "chunks": base_chunks,
                     "consolidated": True,
+                    "decode_times": xr.coders.CFDatetimeCoder(use_cftime=True),
                 }
                 if file_storage is not None:
                     for attempt in range(reading_retries):
@@ -223,17 +251,54 @@ class FileLoader:
                             ds = xr.open_zarr(store, **zarr_kwargs)
                             break  # success — do NOT open the store again on next iteration
                         except Exception as e:
-                            logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
-                            if attempt == reading_retries - 1:
-                                raise
+                            err_str = str(e).lower()
+                            # Some SWOT files use 'nanoseconds since …' which is not a
+                            # valid CF unit — fall back to decode_times=False and fix up.
+                            if "nanoseconds" in err_str:
+                                try:
+                                    store = file_storage.get_mapper(file_path)
+                                    no_decode_kw = {**zarr_kwargs, "decode_times": False}
+                                    ds = _fix_nanosecond_time(xr.open_zarr(store, **no_decode_kw))
+                                    break
+                                except Exception as e2:
+                                    logger.warning(f"Reading attempt {attempt + 1} failed (nanoseconds fallback): {e2}")
+                                    if attempt == reading_retries - 1:
+                                        raise
+                            # If consolidated metadata is missing, retry without it
+                            elif "zmetadata" in err_str or "consolidated" in err_str or "nosuchkey" in err_str:
+                                try:
+                                    store = file_storage.get_mapper(file_path)
+                                    fallback_kw = {**zarr_kwargs, "consolidated": False}
+                                    ds = xr.open_zarr(store, **fallback_kw)
+                                    break
+                                except Exception as e2:
+                                    logger.warning(f"Reading attempt {attempt + 1} failed: {e2}")
+                                    if attempt == reading_retries - 1:
+                                        raise
+                            else:
+                                logger.warning(f"Reading attempt {attempt + 1} failed: {e}")
+                                if attempt == reading_retries - 1:
+                                    raise
                 else:
                     for attempt in range(reading_retries):
                         try:
                             ds = xr.open_zarr(file_path, **zarr_kwargs)
                             break
                         except Exception as e:
+                            err_str = str(e).lower()
+                            # Some SWOT files use 'nanoseconds since …' which is not a
+                            # valid CF unit — fall back to decode_times=False and fix up.
+                            if "nanoseconds" in err_str:
+                                try:
+                                    no_decode_kw = {**zarr_kwargs, "decode_times": False}
+                                    ds = _fix_nanosecond_time(xr.open_zarr(file_path, **no_decode_kw))
+                                    break
+                                except Exception as e2:
+                                    logger.warning(f"Reading attempt {attempt + 1} failed (nanoseconds fallback): {e2}")
+                                    if attempt == reading_retries - 1:
+                                        raise
                             # If consolidated metadata is missing, retry without it
-                            if "zmetadata" in str(e).lower() or "consolidated" in str(e).lower():
+                            elif "zmetadata" in err_str or "consolidated" in err_str:
                                 try:
                                     fallback_kw = {**zarr_kwargs, "consolidated": False}
                                     ds = xr.open_zarr(file_path, **fallback_kw)

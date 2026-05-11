@@ -88,8 +88,8 @@ class CatalogEntry:
         """Convert catalog entry to dictionary."""
         try:
             dct = asdict(self)
-            dct["date_start"] = self.date_start.isoformat()
-            dct["date_end"] = self.date_end.isoformat()
+            dct["date_start"] = self.date_start.isoformat() if self.date_start is not None else None
+            dct["date_end"] = self.date_end.isoformat() if self.date_end is not None else None
             normalized_geometry = self._normalize_geometry(self.geometry)
             if normalized_geometry is not None:
                 dct["geometry"] = mapping(normalized_geometry)
@@ -231,6 +231,7 @@ class DatasetCatalog:
                         props["geometry"] = geom_obj
                     else:
                         logger.warning(f"Feature without geometry : {props['path']}, skipping.")
+                        props["geometry"] = None
                 return props
             except Exception as exc:
                 logger.warning(f"Could not parse feature: {feat} ({exc})")

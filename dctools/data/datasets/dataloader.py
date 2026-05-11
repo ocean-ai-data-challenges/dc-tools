@@ -673,11 +673,19 @@ class EvaluationDataloader:
                             break
 
                         # ref_catalog = self.ref_catalogs[ref_alias]
-                        coord_system = ref_catalog.get_global_metadata().get("coord_system")
-                        if coord_system:
-                            is_observation = coord_system.is_observation_dataset()
+                        _ref_meta = ref_catalog.get_global_metadata()
+                        # Prefer the explicit is_observation flag stored in the catalog
+                        # metadata (set by Dataset.__init__ and respecting any config
+                        # override such as `observation_dataset: false`).  Only fall back
+                        # to coord_system auto-detection when the flag is absent.
+                        if "is_observation" in _ref_meta:
+                            is_observation = bool(_ref_meta["is_observation"])
                         else:
-                            is_observation = False
+                            coord_system = _ref_meta.get("coord_system")
+                            if coord_system:
+                                is_observation = coord_system.is_observation_dataset()
+                            else:
+                                is_observation = False
 
                         if is_observation:
                             # Observation logic: filter observation catalog

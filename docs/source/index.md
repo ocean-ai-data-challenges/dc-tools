@@ -85,16 +85,13 @@ Define evaluation workflows in YAML for reproducibility and version control.
 6. Save and analyze results
 ```
 
-## Recent Changes
+## Documentation Status
 
-This documentation has been updated to reflect the current state of the codebase (May 2026):
+Documentation content is actively maintained and periodically reviewed against the codebase.
 
-- ✅ Complete installation instructions with troubleshooting
-- ✅ Comprehensive quick start guide with working code examples
-- ✅ Full API reference for all modules
-- ✅ Architecture documentation
-- ✅ Common use cases and patterns
-- ✅ Configuration file examples
+- Core guides are available for installation, quickstart, API, and challenge workflows.
+- Some advanced sections are conceptual and may require adaptation for custom pipelines.
+- When in doubt, prefer explicit imports from module files and the challenge entrypoint scripts.
 
 ## Getting Help
 
@@ -136,4 +133,4 @@ package_docs/api.md
 data_challenges/dc_index.md
 ```
 
-**Last updated**: May 2026 | **Status**: Complete and current
+**Last reviewed**: May 2026 | **Status**: Maintained
