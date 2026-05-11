@@ -190,6 +190,8 @@ class BaseDataset:
                     # Ensure is_observation flag is set
                     if config.observation_dataset:
                         self.observation_dataset = config.observation_dataset
+                    elif isinstance(getattr(config, "observation_dataset", None), bool):
+                        self.observation_dataset = config.observation_dataset
                     else:
                         coord_sys = self._global_metadata.get("coord_system")
                         if coord_sys and hasattr(coord_sys, "is_observation_dataset"):
@@ -230,6 +232,14 @@ class BaseDataset:
                     self._paths = self.catalog.list_paths()
                     self.catalog_type = "from_catalog_file"
                     self._global_metadata = self.catalog.get_global_metadata()
+                    # Config-level override for is_observation takes priority over catalog
+                    # metadata.  Explicit `observation_dataset: false` in the YAML must
+                    # override a stale `is_observation: True` that was auto-detected and
+                    # written to the catalog on a previous run.
+                    _cfg_obs = getattr(config, "observation_dataset", None)
+                    if isinstance(_cfg_obs, bool):
+                        self.observation_dataset = _cfg_obs
+                        self._global_metadata["is_observation"] = _cfg_obs
                     loaded_from_catalog = True
                 except Exception as exc:
                     logger.warning(
@@ -273,12 +283,23 @@ class BaseDataset:
                 self.catalog_type = ""
 
         if not loaded_from_catalog:
-            logger.info("No local catalog found. Loading metadata from remote source.")
+            _label = f"📡  Building catalog  —  {config.alias}"
+            _body  = "Fetching metadata from remote source …"
+            _w = max(len(_label), len(_body)) + 4
+            logger.opt(colors=True).info(
+                f"\n<cyan>┌{'─' * _w}┐\n"
+                f"│  <bold>{_label}</bold>{' ' * (_w - 2 - len(_label))}│\n"
+                f"│  <dim>{_body}</dim>{' ' * (_w - 2 - len(_body))}│\n"
+                f"└{'─' * _w}┘</cyan>"
+            )
             self._metadata = self.connection_manager.list_files_with_metadata()  # Retrieve metadata
             self._global_metadata = self.get_global_metadata()
             if self._global_metadata is None:
                 self._global_metadata = {}
             if config.observation_dataset:
+                self.observation_dataset = config.observation_dataset
+            elif isinstance(getattr(config, "observation_dataset", None), bool):
+                # Explicit `observation_dataset: false` in config — do not auto-detect
                 self.observation_dataset = config.observation_dataset
             else:
                 self.observation_dataset = self.get_coord_system().is_observation_dataset()

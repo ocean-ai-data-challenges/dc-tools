@@ -610,6 +610,22 @@ def _worker_full_cleanup() -> bool:
     return True
 
 
+def _get_worker_rss_bytes() -> int:
+    """Return the RSS (Resident Set Size) of the current worker process in bytes.
+
+    Reads ``/proc/self/status`` on Linux.  Returns 0 on any error or on
+    platforms where the file is unavailable (macOS, Windows).
+    """
+    try:
+        with open("/proc/self/status") as _f:
+            for _line in _f:
+                if _line.startswith("VmRSS:"):
+                    return int(_line.split()[1]) * 1024  # kB → bytes
+    except Exception:
+        pass
+    return 0
+
+
 def _cap_worker_threads(max_threads: int = 1) -> None:
     """Limit per-worker thread parallelism for BLAS/OpenMP/pyinterp.
 
@@ -1263,9 +1279,29 @@ def compute_metric(
                                         n_points_dim,
                                         _time_var.size,
                                     )
+                                    # per-chunk zarr I/O timeout (seconds)
+                                    _CHUNK_TIMEOUT_S = int(os.environ.get(
+                                        "DCTOOLS_SIDECAR_CHUNK_TIMEOUT", "60"
+                                    ))
                                     try:
+                                        # ── Atomic write: tmp + rename ──────
+                                        # Multiple workers (4 for SWOT) may
+                                        # enter this fallback simultaneously
+                                        # when time_index.npy is absent.
+                                        # Writing directly to _time_npy with
+                                        # open_memmap(mode="w+") truncates the
+                                        # file, so concurrent workers see a
+                                        # partial/empty file → silent
+                                        # corruption.  Write to a per-PID temp
+                                        # file first, then os.replace() (atomic
+                                        # on POSIX) so readers always see a
+                                        # complete file.
+                                        _time_npy_tmp = (
+                                            _time_npy
+                                            + f".tmp.{os.getpid()}"
+                                        )
                                         _time_mmap = np.lib.format.open_memmap(
-                                            _time_npy,
+                                            _time_npy_tmp,
                                             mode="w+",
                                             dtype="datetime64[ns]",
                                             shape=(_n_total,),
@@ -1276,13 +1312,14 @@ def compute_metric(
                                             _chunk = _time_var.isel(
                                                 {n_points_dim: slice(_s, _e)}
                                             )
-                                            _cv = (
-                                                _chunk.compute(
-                                                    scheduler="synchronous"
+                                            if hasattr(_chunk, "compute"):
+                                                _cv = _compute_with_timeout(
+                                                    _chunk,
+                                                    timeout_s=_CHUNK_TIMEOUT_S,
+                                                    scheduler="synchronous",
                                                 ).values
-                                                if hasattr(_chunk, "compute")
-                                                else _chunk.values
-                                            )
+                                            else:
+                                                _cv = _chunk.values
                                             _cv = np.asarray(_cv)
                                             if np.issubdtype(
                                                 _cv.dtype, np.integer
@@ -1299,6 +1336,10 @@ def compute_metric(
                                             _time_mmap[_s:_e] = _cv
                                             del _cv, _chunk
                                         del _time_mmap
+                                        # Atomic rename; if another worker
+                                        # already wrote the file, we just
+                                        # overwrite it (same content).
+                                        os.replace(_time_npy_tmp, _time_npy)
                                         # Now mmap the freshly-built sidecar.
                                         _time_vals = np.load(
                                             _time_npy, mmap_mode="r"
@@ -1636,6 +1677,13 @@ def compute_metric(
 
         if ref_data is not None and ref_transform is not None:
             ref_data = ref_transform(ref_data)
+            # Unify chunks after transform to avoid "inconsistent chunks" errors
+            # (transforms like standardize/rename can produce mismatched chunk sizes).
+            if hasattr(ref_data, 'unify_chunks'):
+                try:
+                    ref_data = ref_data.unify_chunks()
+                except Exception:
+                    pass
             # Apply float32 reduction lazily *before* compute so the cast is
             # fused into the single compute pass — no separate in-memory copy
             # of the materialised arrays is needed afterwards.
@@ -1989,6 +2037,7 @@ class Evaluator:
         restart_frequency: int = 1,
         max_p_memory_increase: float = 0.2, # 20% increase default
         max_worker_memory_fraction: float = 0.85,
+        max_worker_rss_fraction: float = 1.0,
         resume: bool = False,
     ):
         """
@@ -2037,6 +2086,7 @@ class Evaluator:
         self.restart_frequency = restart_frequency
         self.max_p_memory_increase = max_p_memory_increase
         self.max_worker_memory_fraction = max_worker_memory_fraction
+        self.max_worker_rss_fraction = max_worker_rss_fraction
         # self.results = []
         self.ref_aliases = ref_aliases
         self.results_dir = results_dir
@@ -3130,11 +3180,43 @@ class Evaluator:
                                 >= float(self.max_p_memory_increase or 1.0)
                             )
 
-                            if _abs_exceeded or _rel_exceeded:
+                            # ── RSS-based check (unmanaged memory) ───────────
+                            # Dask's managed-memory tracker misses zarr/blosc
+                            # decompression buffers and xarray internals.
+                            # Reading /proc/self/status on each worker captures
+                            # the true footprint regardless of how the memory
+                            # was allocated.
+                            _rss_exceeded = False
+                            _rss_reason = ""
+                            _rss_threshold = float(self.max_worker_rss_fraction or 1.0)
+                            if _rss_threshold < 1.0:
+                                try:
+                                    _worker_rss = _client.run(_get_worker_rss_bytes)
+                                    _sched_info = _client.scheduler_info().get("workers", {})
+                                    for _waddr, _rss_b in _worker_rss.items():
+                                        _mem_lim = _sched_info.get(_waddr, {}).get("memory_limit", 0)
+                                        if _mem_lim > 0:
+                                            _rss_frac = _rss_b / _mem_lim
+                                            if _rss_frac >= _rss_threshold:
+                                                _rss_exceeded = True
+                                                _rss_reason = (
+                                                    f"RSS {_rss_b // (1024 ** 2)} MB / "
+                                                    f"{_mem_lim // (1024 ** 2)} MB "
+                                                    f"= {_rss_frac:.1%} >= "
+                                                    f"{_rss_threshold:.1%} "
+                                                    f"(worker {_waddr})"
+                                                )
+                                                break
+                                except Exception as _exc_rss:
+                                    logger.debug(f"RSS check failed: {_exc_rss!r}")
+
+                            if _abs_exceeded or _rel_exceeded or _rss_exceeded:
                                 _reason = (
                                     f"absolute {_cur_frac:.2%} >= "
                                     f"{self.max_worker_memory_fraction:.2%}"
                                     if _abs_exceeded
+                                    else _rss_reason
+                                    if _rss_exceeded
                                     else f"relative +{_rel_increase:.0%} >= "
                                     f"+{self.max_p_memory_increase:.0%} "
                                     f"(baseline={self.baseline_memory:.2%})"
@@ -3689,7 +3771,32 @@ class Evaluator:
                 _ref_fs_params = getattr(_ref_mgr, "params", None) if _ref_mgr is not None else None
                 _ref_s3fs = getattr(_ref_fs_params, "fs", None)
                 if _ref_s3fs is None:
-                    return
+                    # params.fs may have been nullified by clean_for_serialization
+                    # (which mutates the original when deep_copy fails for non-picklable
+                    # objects like s3fs).  Re-create the filesystem from stored credentials.
+                    _r_key = getattr(_ref_fs_params, "key", None) or getattr(_ref_fs_params, "s3_key", None)
+                    _r_secret = getattr(_ref_fs_params, "secret_key", None) or getattr(_ref_fs_params, "s3_secret_key", None)
+                    _r_ep = getattr(_ref_fs_params, "endpoint_url", None)
+                    if _r_key and _r_secret:
+                        try:
+                            import s3fs as _s3fs_mod
+                            _client_kw: dict = {}
+                            if _r_ep:
+                                _client_kw["endpoint_url"] = _r_ep
+                            _ref_s3fs = _s3fs_mod.S3FileSystem(
+                                key=_r_key,
+                                secret=_r_secret,
+                                client_kwargs=_client_kw,
+                            )
+                        except Exception as _fs_err:
+                            logger.warning(
+                                f"Could not recreate s3fs for ref prefetch ({ref_alias}): {_fs_err!r}"
+                            )
+                    if _ref_s3fs is None:
+                        logger.debug(
+                            f"Skipping ref prefetch for '{ref_alias}': no s3fs filesystem available."
+                        )
+                        return
 
                 from pathlib import Path as _PfRef
                 import shutil as _sh_ref
@@ -4894,8 +5001,13 @@ class Evaluator:
             # Track the last time a task completed (initialised to start).
             _last_progress: list = [time.time()]
             # After this many seconds with zero new completions -> cancel all.
-            _STALL_TIMEOUT = 1200  # 20 minutes — SWOT per-worker preprocessing can be slow
-            _MAX_WATCHDOG_RETRIES = 3  # max times a single task can be resubmitted after watchdog cancel
+            _STALL_TIMEOUT = 600  # 10 minutes — SWOT per-worker preprocessing can be slow; but 20 min was too long to wait per hung-task cycle
+            # After this many seconds for a *single* task -> cancel it proactively,
+            # even if other tasks are still making progress (catches frozen workers
+            # that stop heartbeating but whose process stays alive, which the
+            # batch-level stall watchdog cannot see).
+            _TASK_TIMEOUT = 900  # 15 minutes per task
+            _MAX_WATCHDOG_RETRIES = 2  # max times a single task can be resubmitted after watchdog cancel (total dead time ≤ (2+2)×600s=2400s)
             _retry_count: Dict[int, int] = {}  # task_index -> number of watchdog retries so far
 
             # Log the inevitable "tail" once: when pending tasks <= execution slots,
@@ -4908,7 +5020,7 @@ class Evaluator:
                     return
                 _last_state_log_s[0] = elapsed_s
                 try:
-                    info = _client.scheduler_info()
+                    info = _client.scheduler_info(timeout=10)
                     workers = info.get("workers", {})
                     paused = 0
                     max_frac = 0.0
@@ -4956,7 +5068,40 @@ class Evaluator:
                                 "CPU drop is expected here; remaining time is dominated by the slowest tasks."  # noqa: E501
                             )
 
-                        _maybe_log_cluster_state(_elapsed, _pending)
+                        # ── Per-task watchdog: cancel any single future running too long ──
+                        # Catches workers that freeze mid-task (stop heartbeating) while
+                        # other workers keep completing tasks — invisible to the batch-level
+                        # stall watchdog below.
+                        # NOTE: runs BEFORE _maybe_log_cluster_state so that a blocked
+                        # scheduler_info() call can never delay the watchdogs.
+                        _now_mono = time.monotonic()
+                        _per_task_cancelled: List[Any] = []
+                        for _tf, _ti in list(_active.items()):
+                            _age = _now_mono - _submitted_at.get(_tf, _now_mono)
+                            if _age >= _TASK_TIMEOUT:
+                                _prev = _retry_count.get(_ti, 0)
+                                if _prev < _MAX_WATCHDOG_RETRIES:
+                                    logger.warning(
+                                        f"{ref_alias}: task {_ti} has been running for "
+                                        f"{_age:.0f}s — cancelling (per-task timeout, "
+                                        f"will resubmit attempt {_prev + 2}/{_MAX_WATCHDOG_RETRIES + 1})"
+                                    )
+                                else:
+                                    logger.error(
+                                        f"{ref_alias}: task {_ti} has been running for "
+                                        f"{_age:.0f}s — cancelling (per-task timeout, "
+                                        f"retries exhausted)"
+                                    )
+                                _per_task_cancelled.append(_tf)
+                        if _per_task_cancelled:
+                            for _tf in _per_task_cancelled:
+                                try:
+                                    _tf.cancel()
+                                except Exception:
+                                    pass
+                            # Reset the batch-level stall timer so it does not
+                            # fire immediately after these per-task cancellations.
+                            _last_progress[0] = time.time()
 
                         # ── Watchdog: cancel futures if no progress ──────────
                         _stall_s = time.time() - _last_progress[0]
@@ -4986,6 +5131,13 @@ class Evaluator:
                                     pass
                             # Reset timer so we don't cancel again immediately.
                             _last_progress[0] = time.time()
+
+                        # ── Cluster state log (non-critical, runs last) ──────
+                        # Intentionally placed AFTER both watchdogs: if
+                        # scheduler_info() blocks (e.g. scheduler unreachable),
+                        # it cannot delay the per-task or batch stall watchdogs
+                        # above.  scheduler_info() is also given a short timeout.
+                        _maybe_log_cluster_state(_elapsed, _pending)
                     except Exception as _exc_hb:
                         logger.error(f"Heartbeat/watchdog thread error: {_exc_hb!r}")
 
