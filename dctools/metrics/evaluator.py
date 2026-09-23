@@ -3666,6 +3666,7 @@ class Evaluator:
                         and hasattr(_ref_mgr, "params")
                         and hasattr(_ref_mgr.params, "fs")
                         and _ref_mgr.params.fs is not None
+                        and getattr(_ref_mgr.params, "protocol", None) != "cmems"
                     )
                     if _has_fs:
                         # Collect all unique remote paths across the batch
@@ -4669,6 +4670,7 @@ class Evaluator:
                                 and hasattr(_la_mgr, "params")
                                 and hasattr(_la_mgr.params, "fs")
                                 and _la_mgr.params.fs is not None
+                                and getattr(_la_mgr.params, "protocol", None) != "cmems"
                             )
                             if _la_has_fs:
                                 _la_paths: List[str] = []

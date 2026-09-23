@@ -9,6 +9,7 @@ import fsspec
 from loguru import logger
 
 from dctools.utilities.misc_utils import get_home_path
+from dctools_core.storage import make_filesystem
 
 
 class BaseConnectionConfig(ABC):
@@ -221,6 +222,7 @@ class S3ConnectionConfig(BaseConnectionConfig):
     dataset_processor: Optional[Any] = None
     filter_values: Optional[Dict] = None
     full_day_data: bool = False
+    date_from_filename_pattern: Optional[str] = None
 
     def __init__(
         self,
@@ -250,32 +252,19 @@ class S3ConnectionConfig(BaseConnectionConfig):
             dataset_processor=self.dataset_processor or None,
             filter_values=self.filter_values or None,
             full_day_data=self.full_day_data or False,
+            date_from_filename_pattern=getattr(self, "date_from_filename_pattern", None) or None,
         )
 
     def create_fs(self):
-        """Create filesystem."""
-        # Use config_kwargs for s3fs to create the Config object internaly
-        # instead of passing a constructed Config object in client_kwargs which causes
-        # "multiple values for keyword argument 'config'" error with recent aiobotocore/s3fs.
-        config_kwargs = {"connect_timeout": 30, "read_timeout": 60}
-
-        client_kwargs: Dict[str, Any] = {}
-        if self.endpoint_url:
-            client_kwargs["endpoint_url"] = self.endpoint_url
-
-        if not self.key or not self.secret_key:
-            fs = fsspec.filesystem(
-                "s3", anon=True, client_kwargs=client_kwargs, config_kwargs=config_kwargs
-            )
-        else:
-            fs = fsspec.filesystem(
-                "s3",
-                key=self.key,
-                secret=self.secret_key,
-                client_kwargs=client_kwargs,
-                config_kwargs=config_kwargs,
-            )
-        return fs
+        """Create filesystem (implementation in dctools_core.storage)."""
+        # anon is decided here, not from AWS_* env vars: a missing key in the YAML means public read.
+        return make_filesystem(
+            "s3",
+            endpoint_url=self.endpoint_url or None,
+            key=self.key or None,
+            secret_key=self.secret_key or None,
+            anon=not (self.key and self.secret_key),
+        )
 
 
 class WasabiS3ConnectionConfig(S3ConnectionConfig):
@@ -296,6 +285,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
     dataset_processor: Optional[Any] = None
     filter_values: Optional[Dict] = None
     full_day_data: bool = False
+    date_from_filename_pattern: Optional[str] = None
 
     def __init__(
         self,
@@ -320,6 +310,7 @@ class WasabiS3ConnectionConfig(S3ConnectionConfig):
             "dataset_processor": self.dataset_processor or None,
             "filter_values": self.filter_values or None,
             "full_day_data": self.full_day_data or False,
+            "date_from_filename_pattern": getattr(self, "date_from_filename_pattern", None) or None,
             "protocol": "wasabi",
         }
         super().__init__(s3_params)

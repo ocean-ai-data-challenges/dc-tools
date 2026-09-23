@@ -88,8 +88,8 @@ class CatalogEntry:
         """Convert catalog entry to dictionary."""
         try:
             dct = asdict(self)
-            dct["date_start"] = self.date_start.isoformat() if self.date_start is not None else None
-            dct["date_end"] = self.date_end.isoformat() if self.date_end is not None else None
+            dct["date_start"] = self.date_start.isoformat() if isinstance(self.date_start, (datetime, pd.Timestamp)) else None
+            dct["date_end"] = self.date_end.isoformat() if isinstance(self.date_end, (datetime, pd.Timestamp)) else None
             normalized_geometry = self._normalize_geometry(self.geometry)
             if normalized_geometry is not None:
                 dct["geometry"] = mapping(normalized_geometry)
@@ -482,7 +482,10 @@ class DatasetCatalog:
 
         # Store bounds before filtering for diagnostics
         original_data_bounds = self.gdf.total_bounds if not self.gdf.empty else None
-        region_bounds = region.bounds
+        # region.bounds returns a DataFrame when region is a GeoSeries; defer
+        # extraction until after union_all() converts it to a single geometry.
+        _region_for_bounds = region.union_all() if isinstance(region, (gpd.GeoSeries, gpd.GeoDataFrame)) else region
+        region_bounds = _region_for_bounds.bounds
 
         # Geometry diagnostics
         self.check_geometries_compatibility(self.gdf, region)

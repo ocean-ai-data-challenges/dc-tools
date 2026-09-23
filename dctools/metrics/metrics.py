@@ -122,4 +122,16 @@ class MetricComputer(OceanbenchMetrics):
         except Exception as exc:
             logger.error(f"Error while computing metrics: {repr(exc)}")
             traceback.print_exc()
+            try:
+                import os
+                import datetime as _dt
+                with open("/tmp/dc2_metric_debug.log", "a") as _f:
+                    _f.write(f"\n=== {_dt.datetime.now().isoformat()} pid={os.getpid()} EXCEPTION ===\n")
+                    _f.write(f"eval_variables={self.eval_variables!r} is_class4={self.is_class4!r} class4_kwargs={self.class4_kwargs!r}\n")
+                    _f.write(f"pred_data vars={list(pred_data.data_vars) if pred_data is not None else None} dims={dict(pred_data.dims) if pred_data is not None else None}\n")
+                    _f.write(f"ref_data vars={list(ref_data.data_vars) if ref_data is not None else None} dims={dict(ref_data.dims) if ref_data is not None else None}\n")
+                    _f.write(traceback.format_exc())
+                    _f.write("\n")
+            except Exception:
+                pass
             return None

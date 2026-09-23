@@ -303,7 +303,16 @@ def _iter_batch_items(path: str):
         else:
             with open(path, "rb") as f:
                 raw = f.read()
-        data = _json_lib.loads(raw)  # type: ignore[union-attr]
+        try:
+            data = _json_lib.loads(raw)  # type: ignore[union-attr]
+        except Exception as exc:
+            _file_size = len(raw)
+            del raw
+            logger.warning(
+                f"Skipping corrupted batch file {path!r} "
+                f"({_file_size:,} bytes): {exc}"
+            )
+            return
         del raw
         if not isinstance(data, list):
             return
@@ -786,14 +795,63 @@ class BaseDCEvaluation:
 
         local_catalog_path = os.path.join(local_catalog_dir, f"{dataset_name}.json")
 
-        # Special case: ARGO uses a directory master index.
+        # Special case: ARGO uses a directory master index (master_index.json
+        # + one *.json.zst Kerchunk reference file per month), not a single
+        # flat JSON file. Mirror it from the remote catalog_connection bucket
+        # (s3://<bucket>/<folder>/argo_index/) when missing locally, instead
+        # of always falling through to a from-scratch Kerchunk index build.
         if dataset_name == "argo_profiles":
             argo_index_path = os.path.join(local_catalog_dir, "argo_index")
-            if os.path.isdir(argo_index_path) and os.path.exists(
-                os.path.join(argo_index_path, "master_index.json")
-            ):
+            master_index_local = os.path.join(argo_index_path, "master_index.json")
+            if os.path.isdir(argo_index_path) and os.path.exists(master_index_local):
                 logger.info(f"Local ARGO catalog directory found at {argo_index_path}")
                 return
+
+            remote_argo_index_prefix = (
+                f"s3://{catalog_cfg['s3_bucket']}/{catalog_cfg['s3_folder']}/argo_index"
+            )
+            fs = create_fs(catalog_cfg)
+            try:
+                remote_files = [
+                    f for f in fs.find(remote_argo_index_prefix)
+                    if f.endswith((".json", ".json.zst"))
+                ]
+            except Exception as exc:
+                logger.warning(
+                    f"Could not list remote ARGO index at {remote_argo_index_prefix}: {exc}"
+                )
+                remote_files = []
+
+            if remote_files and any(f.endswith("master_index.json") for f in remote_files):
+                os.makedirs(argo_index_path, exist_ok=True)
+                logger.info(
+                    f"Downloading remote ARGO index mirror ({len(remote_files)} files) "
+                    f"from {remote_argo_index_prefix} ..."
+                )
+                download_ok = True
+                for remote_file in remote_files:
+                    local_file = os.path.join(argo_index_path, os.path.basename(remote_file))
+                    try:
+                        with fs.open(remote_file, "rb") as rf, open(local_file, "wb") as lf:
+                            while True:
+                                chunk = rf.read(8 * 1024 * 1024)
+                                if not chunk:
+                                    break
+                                lf.write(chunk)
+                    except Exception as exc:
+                        logger.warning(f"Failed to download {remote_file}: {exc}")
+                        download_ok = False
+                if download_ok and os.path.exists(master_index_local):
+                    logger.info(f"Remote ARGO index mirror downloaded to {argo_index_path}")
+                    return
+                logger.warning(
+                    "Remote ARGO index download incomplete; falling back to "
+                    "building the index from scratch."
+                )
+            else:
+                logger.warning(
+                    f"No remote ARGO index mirror found at {remote_argo_index_prefix}."
+                )
 
         if os.path.isfile(local_catalog_path) and os.path.getsize(local_catalog_path) > 0:
             return
@@ -1401,12 +1459,35 @@ class BaseDCEvaluation:
                 pred_eval_vars = dataset_manager.datasets[alias].get_eval_variables()
                 ref_eval_vars = dataset_manager.datasets[ref_alias].get_eval_variables()
 
+                # Build standardised-name sets for both sides, then intersect.
+                # Raw-name comparison (``var in ref_eval_vars``) fails when pred
+                # and ref use different naming conventions for the same physical
+                # quantity (e.g. thetao vs sea_surface_temperature).
+                _pred_std: Dict[str, Optional[str]] = {
+                    v: get_standardized_var_name(v) for v in pred_eval_vars
+                }
+                _ref_std: Dict[str, Optional[str]] = {
+                    v: get_standardized_var_name(v) for v in ref_eval_vars
+                }
+                _ref_std_set = {sv for sv in _ref_std.values() if sv is not None}
                 common_vars = [
-                    get_standardized_var_name(var) for var in pred_eval_vars if var in ref_eval_vars
+                    sv
+                    for sv in (get_standardized_var_name(v) for v in pred_eval_vars)
+                    if sv is not None and sv in _ref_std_set
+                ]
+                # Remove duplicates while preserving order.
+                _seen: set = set()
+                common_vars = [
+                    sv for sv in common_vars
+                    if sv not in _seen and not _seen.add(sv)
                 ]
                 if not common_vars:
                     logger.warning(
-                        "No common variables found between pred_data and ref_data for evaluation."
+                        f"No common variables found between pred_data and ref_data for evaluation. "
+                        f"[{alias} vs {ref_alias}] "
+                        f"pred_eval_vars={pred_eval_vars!r}, "
+                        f"ref_eval_vars={ref_eval_vars!r}, "
+                        f"ref_std_set={_ref_std_set!r}"
                     )
                     continue
 
@@ -1482,35 +1563,47 @@ class BaseDCEvaluation:
 
             # ── Determine obs_batch_size ───────────────────────────────
             # Look for per-dataset obs_batch_size first, then global, then default.
-            _obs_batch_size = None
+            # NOTE: built as a {ref_alias: size} dict (DataLoader.get_batches
+            # already supports dict-form obs_batch_size/gridded_batch_size) so
+            # every observation reference dataset gets ITS OWN configured batch
+            # size. Previously this used a single scalar taken from whichever
+            # ref_alias happened to be first in effective_references with an
+            # explicit obs_batch_size set -- that one dataset's value silently
+            # overrode every other observation dataset's batch size for the
+            # entire run (e.g. argo_velocities' own obs_batch_size override was
+            # ignored whenever another dataset listed earlier also set one).
+            _global_obs_batch_size = getattr(self.args, "obs_batch_size", None)
+            _obs_batch_size: Optional[Dict[str, int]] = {}
             for _ref_alias in effective_references:
                 _ref_src: Dict[str, Any] = next(
                     (s for s in self.args.sources if s.get("dataset") == _ref_alias), {}
                 )
-                if _ref_src.get("obs_batch_size") is not None:
-                    _obs_batch_size = int(_ref_src["obs_batch_size"])
-                    break
-            if _obs_batch_size is None:
-                _obs_batch_size = getattr(self.args, "obs_batch_size", None)
-                if _obs_batch_size is not None:
-                    _obs_batch_size = int(_obs_batch_size)
+                _bs = _ref_src.get("obs_batch_size")
+                if _bs is None:
+                    _bs = _global_obs_batch_size
+                if _bs is not None:
+                    _obs_batch_size[_ref_alias] = int(_bs)
+            if not _obs_batch_size:
+                _obs_batch_size = None
 
             # ── Determine gridded_batch_size ───────────────────────────
             # Per-reference gridded_batch_size overrides the global batch_size
             # for non-observation (gridded) reference datasets such as GLORYS.
             # A small value (e.g. 6) limits per-batch I/O + RAM pressure.
-            _gridded_batch_size = None
+            # Same {ref_alias: size} dict fix as obs_batch_size above.
+            _global_gridded_batch_size = getattr(self.args, "gridded_batch_size", None)
+            _gridded_batch_size: Optional[Dict[str, int]] = {}
             for _ref_alias in effective_references:
                 _ref_src = next(
                     (s for s in self.args.sources if s.get("dataset") == _ref_alias), {}
                 )
-                if _ref_src.get("gridded_batch_size") is not None:
-                    _gridded_batch_size = int(_ref_src["gridded_batch_size"])
-                    break
-            if _gridded_batch_size is None:
-                _gridded_batch_size = getattr(self.args, "gridded_batch_size", None)
-                if _gridded_batch_size is not None:
-                    _gridded_batch_size = int(_gridded_batch_size)
+                _bs = _ref_src.get("gridded_batch_size")
+                if _bs is None:
+                    _bs = _global_gridded_batch_size
+                if _bs is not None:
+                    _gridded_batch_size[_ref_alias] = int(_bs)
+            if not _gridded_batch_size:
+                _gridded_batch_size = None
 
             dataloaders[alias] = dataset_manager.get_dataloader(
                 pred_alias=alias,

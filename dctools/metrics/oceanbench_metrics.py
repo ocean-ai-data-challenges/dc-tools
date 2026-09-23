@@ -607,30 +607,40 @@ def _run_class4_with_raw_per_bins(
                     # obs_da_active is always 1-D here (depth already sliced out).
                     with _dask.config.set(scheduler="synchronous"):
                         _val_arr = obs_da_active.isel(_sl).values.ravel()
-                        _lat_raw = (
-                            obs_ds[_lat_coord].isel(_sl).values.ravel()
-                            if _lat_coord and _lat_coord in obs_ds
-                            and _n_pts_dim in obs_ds[_lat_coord].dims
-                            else (obs_da_active.coords[_lat_coord].isel(_sl).values.ravel()
-                                  if _lat_coord and _lat_coord in obs_da_active.coords
-                                  else None)
-                        )
-                        _lon_raw = (
-                            obs_ds[_lon_coord].isel(_sl).values.ravel()
-                            if _lon_coord and _lon_coord in obs_ds
-                            and _n_pts_dim in obs_ds[_lon_coord].dims
-                            else (obs_da_active.coords[_lon_coord].isel(_sl).values.ravel()
-                                  if _lon_coord and _lon_coord in obs_da_active.coords
-                                  else None)
-                        )
-                        _time_raw = (
-                            obs_ds[_time_coord].isel(_sl).values.ravel()
-                            if _time_coord and _time_coord in obs_ds
-                            and _n_pts_dim in obs_ds[_time_coord].dims
-                            else (obs_da_active.coords[_time_coord].isel(_sl).values.ravel()
-                                  if _time_coord and _time_coord in obs_da_active.coords
-                                  else None)
-                        )
+                        _chunk_len = len(_val_arr)
+
+                        def _read_point_coord(_coord_name: Optional[str]) -> Optional[np.ndarray]:
+                            """Read a chunk of a coordinate, indexed by the point
+                            dimension when possible.
+
+                            Some observation snapshots (e.g. gridded CMEMS
+                            SST/SSS products converted to points via
+                            swath_to_points) carry "time" as a single global
+                            coordinate over a "time" dim of size 1 -- shared
+                            by every point -- rather than a per-point array
+                            aligned with ``_n_pts_dim``.  Indexing such a
+                            coordinate with ``{_n_pts_dim: slice(...)}`` raises
+                            ``ValueError: Dimensions {...} do not exist``.
+                            Broadcast the scalar value across the chunk in
+                            that case instead of raising.
+                            """
+                            if not _coord_name:
+                                return None
+                            if _coord_name in obs_ds and _n_pts_dim in obs_ds[_coord_name].dims:
+                                return obs_ds[_coord_name].isel(_sl).values.ravel()
+                            if _coord_name in obs_da_active.coords:
+                                _coord_da = obs_da_active.coords[_coord_name]
+                                if _n_pts_dim in _coord_da.dims:
+                                    return _coord_da.isel(_sl).values.ravel()
+                                # Global/scalar coordinate (no per-point
+                                # dimension) -- broadcast its value.
+                                _scalar_val = np.asarray(_coord_da.values).reshape(-1)[0]
+                                return np.full(_chunk_len, _scalar_val)
+                            return None
+
+                        _lat_raw = _read_point_coord(_lat_coord)
+                        _lon_raw = _read_point_coord(_lon_coord)
+                        _time_raw = _read_point_coord(_time_coord)
 
                     if len(_val_arr) == 0:
                         del _val_arr, _lat_raw, _lon_raw, _time_raw
@@ -1125,6 +1135,36 @@ class OceanbenchMetrics(DCMetric):
                 if promote:
                     ref_data = ref_data.set_coords(promote)  # type: ignore[union-attr]
 
+                # ── Normalize longitude convention to [-180, 180] ──
+                # Class4Evaluator's pyinterp-based grid-to-track interpolation
+                # builds a *non-circular* pyinterp.Axis from the model's
+                # longitude values and evaluates observation longitudes
+                # against it. If model (pred) longitude uses [-180, 180]
+                # (e.g. glonet) while an observation dataset's raw longitude
+                # is natively [0, 360] (e.g. Sentinel SRAL, Jason3 — common
+                # for per-granule/per-pass altimetry products), any obs point
+                # with lon > 180 falls outside the axis domain and silently
+                # yields no match. Some products (e.g. Jason3) only lose a
+                # small fraction of points this way (their per-granule track
+                # happens to mostly fall within [0, 180], which is valid in
+                # both conventions), while others (e.g. Sentinel, whose
+                # track can sit entirely within e.g. [199, 336]) lose 100%
+                # of points. Wrap both datasets' longitude unconditionally
+                # and idempotently — this is a no-op for values already in
+                # [-180, 180] and fixes values in [0, 360].
+                for _lon_ds, _lon_name in (
+                    (pred_data, next((c for c in ("lon", "longitude") if c in pred_data.coords or c in pred_data.data_vars), None)),
+                    (ref_data, next((c for c in ("lon", "longitude", "LON", "LONGITUDE") if c in ref_data.coords or c in ref_data.data_vars), None) if ref_data is not None else None),
+                ):
+                    if _lon_ds is None or _lon_name is None:
+                        continue
+                    _lon_da = _lon_ds[_lon_name]
+                    _lon_wrapped = ((_lon_da + 180) % 360) - 180
+                    if _lon_name in _lon_ds.coords:
+                        _lon_ds.coords[_lon_name] = _lon_wrapped.assign_attrs(_lon_da.attrs)
+                    else:
+                        _lon_ds[_lon_name] = _lon_wrapped.assign_attrs(_lon_da.attrs)
+
                 # ── Harmonize variable names between datasets ──
                 # Class4Evaluator.run() uses the same variable name to
                 # index into *both* model_ds and obs_ds.  When prediction
@@ -1191,6 +1231,17 @@ class OceanbenchMetrics(DCMetric):
                         f"({sorted(str(v) for v in ref_vars)}) for eval_variables="
                         f"{variables}. Cannot compute class4 metrics."
                     )
+                    try:
+                        import os
+                        import datetime as _dt
+                        with open("/tmp/dc2_metric_debug.log", "a") as _f:
+                            _f.write(f"\n=== {_dt.datetime.now().isoformat()} pid={os.getpid()} NO_RESOLVED_VARS ===\n")
+                            _f.write(f"eval_variables={variables!r}\n")
+                            _f.write(f"pred_vars={sorted(str(v) for v in pred_vars)}\n")
+                            _f.write(f"ref_vars={sorted(str(v) for v in ref_vars)}\n")
+                            _f.write(f"pred_rename={pred_rename!r} ref_rename={ref_rename!r}\n")
+                    except Exception:
+                        pass
                     return None
 
                 matching_type = extra_kwargs.get("matching_type", self.class4_matching_type)
@@ -1243,6 +1294,44 @@ class OceanbenchMetrics(DCMetric):
                     add_kwargs_list = metric_info.get("kwargs_with_ref", [])
                     if "preprocess_ref" in metric_info:
                         ref_data = metric_info["preprocess_ref"]([ref_data])
+                    # Ensure variables in pred/ref have standard_name attrs so that
+                    # oceanbench's variable_name_from_dataset_standard_names() can
+                    # resolve them.  When variables are renamed (e.g. 'sea_surface_
+                    # temperature' → 'temperature') their original standard_name attr
+                    # may no longer match the Variable enum being searched.  Patch the
+                    # attrs so the lookup succeeds.
+                    if self.oceanbench_eval_variables:
+                        for _ov in self.oceanbench_eval_variables:
+                            _expected_std = (
+                                _ov.value.value
+                                if hasattr(_ov, "value") and hasattr(_ov.value, "value")
+                                else None
+                            )
+                            if _expected_std is None:
+                                continue
+                            for _ds in (pred_data, ref_data):
+                                if _ds is None:
+                                    continue
+                                # Variable already found by standard_name — nothing to do.
+                                try:
+                                    from oceanbench.core.dataset_utils import Variable as _OBVar
+                                    _found = _ov.variable_name_from_dataset(_ds) if isinstance(_ov, _OBVar) else None
+                                except Exception:
+                                    _found = None
+                                if _found is not None:
+                                    continue
+                                # Look up by raw variable name matching OCEANBENCH_VARIABLES keys.
+                                for _raw_name, _alias_var in OCEANBENCH_VARIABLES.items():
+                                    if _alias_var == _ov and _raw_name in _ds.data_vars:
+                                        _ds[_raw_name].attrs["standard_name"] = _expected_std
+                                        break
+                                # Also try eval_variables (standardized names like 'temperature').
+                                if self.eval_variables:
+                                    for _ev in self.eval_variables:
+                                        if isinstance(_ev, str) and _ev in _ds.data_vars:
+                                            if OCEANBENCH_VARIABLES.get(_ev) == _ov:
+                                                _ds[_ev].attrs["standard_name"] = _expected_std
+                                                break
                     kwargs = {
                         "challenger_datasets": [pred_data],
                         "reference_datasets": [ref_data],
@@ -1263,6 +1352,13 @@ class OceanbenchMetrics(DCMetric):
                 has_depth_coord = "depth" in pred_data.coords
                 if not has_depth_dim and not has_depth_coord:
                     kwargs["depth_levels"] = None
+                # If reference has no depth (e.g. CMEMS SST is 2D lat×lon),
+                # select only surface layer from pred so grids can be aligned.
+                elif ref_data is not None and "depth" not in getattr(ref_data, "dims", []):
+                    kwargs["depth_levels"] = None
+                    if has_depth_dim:
+                        pred_data = pred_data.isel(depth=0)
+                        kwargs["challenger_datasets"] = [pred_data]
                 add_kwargs: Dict[Any, Any] = {}
                 if add_kwargs_list:
                     if "vars" in add_kwargs_list:
@@ -1305,5 +1401,23 @@ class OceanbenchMetrics(DCMetric):
 
                 return result
             except Exception as exc:
+                # When no reference dataset was provided, the fallback metric
+                # tries to download glorys from CMEMS.  If that remote dataset
+                # no longer exists (DatasetNotFound / product retired), skip
+                # gracefully rather than crashing the whole evaluation batch.
+                exc_name = type(exc).__name__.lower()
+                exc_str = str(exc).lower()
+                is_cmems_missing = (
+                    "datasetnotfound" in exc_name
+                    or "datasetnotfound" in exc_str
+                    or "dataset not found" in exc_str
+                    or "product not found" in exc_str
+                )
+                if ref_data is None and is_cmems_missing:
+                    logger.warning(
+                        f"Metric '{metric_name}': no-ref fallback skipped — CMEMS dataset "
+                        f"unavailable ({exc}). Returning None."
+                    )
+                    return None
                 logger.error(f"Failed to compute metric {self.metric_name}: {repr(exc)}")
                 raise
