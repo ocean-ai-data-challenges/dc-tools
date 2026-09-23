@@ -4,8 +4,10 @@ from abc import ABC, abstractmethod
 import gc
 import math
 import os
+import random
 import shutil
 import tempfile
+import time
 import traceback
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -27,7 +29,8 @@ if not hasattr(_xr, "_original_open_dataset"):
 
     def _open_dataset_scipy_for_inmem(filename_or_obj, *args, **kwargs):
         """Wrapper that forces engine='scipy' for in-memory data."""
-        if isinstance(filename_or_obj, (bytes, _io.BytesIO, _io.BufferedIOBase)):
+        _is_inmem = isinstance(filename_or_obj, (bytes, _io.BytesIO, _io.BufferedIOBase))
+        if _is_inmem:
             kwargs.setdefault("engine", "scipy")
         # When using SciPy's netcdf_file backend, disable mmap to avoid
         # RuntimeWarning on close/eviction when arrays still reference
@@ -41,10 +44,19 @@ if not hasattr(_xr, "_original_open_dataset"):
             _bk.setdefault("mmap", False)
             kwargs["backend_kwargs"] = _bk
         # Keep ARGO profile opens lightweight and deterministic:
-        # skip CF/time decoding on every small file (thousands per batch).
-        kwargs.setdefault("decode_timedelta", False)
-        kwargs.setdefault("decode_times", False)
-        kwargs.setdefault("decode_cf", False)
+        # skip CF/time decoding on every small in-memory file (thousands per
+        # batch). IMPORTANT: this must stay scoped to the in-memory ARGO case
+        # only. Previously these setdefault() calls ran unconditionally for
+        # EVERY xr.open_dataset() call process-wide (since importing this
+        # module patches xr.open_dataset globally), which silently forced
+        # decode_cf=False on ALL other opens (S3/local zarr & netcdf loads),
+        # breaking CF "coordinates"-attribute auxiliary-coordinate promotion
+        # (e.g. dropping a "time" aux-coordinate to a plain data_var) for any
+        # file relying on it.
+        if _is_inmem:
+            kwargs.setdefault("decode_timedelta", False)
+            kwargs.setdefault("decode_times", False)
+            kwargs.setdefault("decode_cf", False)
         return _xr._original_open_dataset(filename_or_obj, *args, **kwargs)  # type: ignore[attr-defined]
 
     _xr.open_dataset = _open_dataset_scipy_for_inmem
@@ -62,6 +74,36 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import json
+import logging
+
+if copernicusmarine is not None:
+
+    class _CopernicusMarineDedupFilter(logging.Filter):
+        """Suppress repeated copernicusmarine log messages.
+
+        copernicusmarine emits the same "subset selection exceeds dataset
+        coordinates" warning on every open_dataset() call (once per date
+        opened via CMEMSManager.open_remote()), which floods the console
+        with hundreds of identical lines during an evaluation run.
+        Keep only the first occurrence of each distinct message.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._seen: set = set()
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            key = (record.levelno, record.getMessage())
+            if key in self._seen:
+                return False
+            self._seen.add(key)
+            return True
+
+    _cmems_logger = logging.getLogger("copernicusmarine")
+    if not any(
+        isinstance(_f, _CopernicusMarineDedupFilter) for _f in _cmems_logger.filters
+    ):
+        _cmems_logger.addFilter(_CopernicusMarineDedupFilter())
 import xarray as xr
 
 
@@ -86,6 +128,7 @@ from dctools.data.coordinates import get_target_depth_values
 
 from dctools.data.datasets.dc_catalog import GLOBAL_METADATA
 from dctools.dcio.loader import FileLoader
+from dctools_core.storage import is_transient_remote_error
 from dctools.utilities.file_utils import empty_folder
 from dctools.utilities.misc_utils import (
     deep_copy_object,
@@ -93,18 +136,15 @@ from dctools.utilities.misc_utils import (
 )
 
 
-# List of possible names for the time dimension
-TIME_NAMES = [
-    "time",
-    "Time",
-    "TIME",
-    "date",
-    "datetime",
-    "valid_time",
-    "forecast_time",
-    "time_counter",
-    "profile_date",
-]
+from dctools_core.timebounds import (  # noqa: F401  (moved to dctools-core, re-exported)
+    TIME_NAMES,
+    _TIME_SANITY_MIN_YEAR,
+    _TIME_SANITY_MAX_YEAR,
+    _TIME_COVERAGE_ATTRS,
+    _is_sane_timestamp,
+    _time_coverage_attrs_fallback,
+    get_time_bound_values,
+)
 # List of possible names for the n_points dimension
 POINT_DIM_NAMES = ("N_POINTS", "n_points", "points", "obs")
 
@@ -127,6 +167,59 @@ def _invalidate_local_dataset_cache(local_path: str) -> bool:
     except Exception as exc:
         logger.warning(f"Could not remove corrupted cache entry {local_path}: {exc!r}")
         return False
+
+
+# Moved to dctools-core; kept under its historical name for the call sites below and the tests.
+_is_transient_remote_error = is_transient_remote_error
+
+
+def _open_dataset_auto_with_retry(
+    path: str,
+    *,
+    groups: Optional[Any],
+    variables: Optional[Any],
+    file_storage: Optional[Any],
+):
+    """Open a remote zarr store via ``FileLoader.open_dataset_auto`` with retry/backoff.
+
+    Remote zarr opens perform S3 directory-listing calls (ListObjectsV2) to
+    build the store mapping. Transient gateway errors (e.g. HTTP 499 under
+    load) otherwise abort the open immediately and force a much more
+    expensive full-store download fallback (see ``download_file`` /
+    ``_download_zarr_store``). Retrying a few times with backoff — and
+    invalidating the fsspec directory cache first, in case it cached a
+    broken/stale listing — lets the open recover from these blips instead
+    of silently dropping the file from the catalog.
+    """
+    max_attempts = int(os.environ.get("DCTOOLS_ZARR_OPEN_RETRIES", "3"))
+    base_delay = float(os.environ.get("DCTOOLS_ZARR_OPEN_RETRY_DELAY", "3"))
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return FileLoader.open_dataset_auto(
+                path,
+                adaptive_chunking=False,
+                groups=groups,
+                variables=variables,
+                file_storage=file_storage,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not _is_transient_remote_error(exc):
+                break
+            if file_storage is not None:
+                try:
+                    file_storage.invalidate_cache()
+                except Exception:
+                    pass
+            wait_s = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+            logger.debug(
+                f"Transient error opening remote zarr {path} "
+                f"(attempt {attempt}/{max_attempts}): {exc!r}. Retrying in {wait_s:.1f}s..."
+            )
+            time.sleep(wait_s)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _is_valid_local_dataset_cache(local_path: str) -> bool:
@@ -201,96 +294,6 @@ def _is_valid_local_dataset_cache(local_path: str) -> bool:
                 ds.close()
         except Exception:
             pass
-
-
-def get_time_bound_values(ds: xr.Dataset) -> tuple:
-    """
-    Returns the time bounds (min, max) of an xarray dataset.
-
-    Regardless of the structure (dimension, coordinate, variable).
-    """
-    time_vals = None
-
-    try:
-        # Search for the time variable in dims, coords, data_vars
-        for time_name in TIME_NAMES:
-            if time_name in ds.dims:
-                time_vals = ds[time_name] if time_name in ds.data_vars else ds.coords.get(time_name)
-                if time_vals is not None:
-                    break
-        if time_vals is None:
-            for time_name in TIME_NAMES:
-                if time_name in ds.coords:
-                    time_vals = ds.coords[time_name]
-                    break
-        if time_vals is None:
-            for time_name in TIME_NAMES:
-                if time_name in ds.data_vars:
-                    time_vals = ds[time_name]
-                    break
-
-        # If nothing found, search for a variable with datetime64 dtype
-        if time_vals is None:
-            for _, var in ds.data_vars.items():
-                if np.issubdtype(var.dtype, np.datetime64):
-                    time_vals = var
-                    break
-
-        if time_vals is not None:
-            # If array is empty
-            if time_vals.size == 0:
-                return (None, None)
-            # If datetime
-            if np.issubdtype(time_vals.dtype, np.datetime64):
-                dt_vals: Any = pd.to_datetime(time_vals.values)
-                # If array, take min/max
-                if hasattr(dt_vals, "min") and hasattr(dt_vals, "max"):
-                    dt_min = dt_vals.min()
-                    dt_max = dt_vals.max()
-                else:
-                    dt_min = dt_max = dt_vals
-                return (pd.Timestamp(dt_min), pd.Timestamp(dt_max))
-            # If numeric
-            elif np.issubdtype(time_vals.dtype, np.floating) or np.issubdtype(
-                time_vals.dtype, np.integer
-            ):
-                num_vals = np.asarray(time_vals.values)
-                with np.errstate(all="ignore"):
-                    num_min = float(np.nanmin(num_vals))
-                    num_max = float(np.nanmax(num_vals))
-                if np.isnan(num_min) or np.isnan(num_max):
-                    return (None, None)
-                return (num_min, num_max)
-            elif time_vals.dtype == object:
-                # cftime objects (from use_cftime=True) or other object arrays
-                try:
-                    values = np.asarray(time_vals.values).ravel()
-                    if len(values) == 0:
-                        return (None, None)
-                    t_min = values.min()
-                    t_max = values.max()
-                    return (pd.Timestamp(t_min.isoformat()), pd.Timestamp(t_max.isoformat()))
-                except Exception:
-                    try:
-                        converted = pd.to_datetime(
-                            [str(v) for v in values], errors="coerce"
-                        )
-                        valid = converted.dropna()
-                        if len(valid) > 0:
-                            return (valid.min(), valid.max())
-                    except Exception:
-                        pass
-                    return (None, None)
-            else:
-                logger.warning(f"Unsupported time data type: {time_vals.dtype}")
-                return (None, None)
-        else:
-            logger.debug("No temporal data found in dataset")
-            return (None, None)
-    except Exception as exc:
-        logger.warning(f"Failed to get time bounds for DS: {ds} : {repr(exc)}")
-        traceback.print_exc()
-        return (None, None)
 
 
 def clean_for_serialization(obj):
@@ -408,6 +411,7 @@ class BaseConnectionManager(ABC):
         self,
         path: str,
         mode: str = "rb",
+        skip_download_fallback: bool = False,
     ) -> Optional[xr.Dataset]:
         """
         Open a file, prioritizing local then remote access.
@@ -418,13 +422,31 @@ class BaseConnectionManager(ABC):
         Args:
             path (str): Remote path of the file.
             mode (str): Mode to open the file (default is "rb").
+            skip_download_fallback (bool): If True, skip the expensive
+                full-store download fallback for **Zarr** paths only when
+                the lazy remote open fails (return None instead). A Zarr
+                store's fallback recursively downloads every chunk file (a
+                full ListObjectsV2 + GetObject per chunk) purely to extract
+                catalog metadata (a couple of timestamps + a bounding
+                geometry) — when the remote gateway is already struggling
+                (e.g. transient 499s), this expensive retry piles even more
+                requests onto it, turning a brief blip into a sustained
+                collapse. Non-Zarr formats (e.g. single `.nc` files) are
+                NOT affected: their "fallback" is the only way to read them
+                at all (S3Manager.open_remote() only supports `.zarr`) and
+                is a cheap single-file download, not a recursive multi-chunk
+                one, so skipping it would make those datasets unreadable.
 
         Returns:
             xr.Dataset: Opened dataset.
         """
+        _is_zarr_path = str(path).endswith(".zarr") or str(path).endswith(".zarr/")
         # Attempt to open the file locally
         if LocalConnectionManager.supports(path):
-            dataset = self.open_local(path)
+            try:
+                dataset = self.open_local(path)
+            except Exception:
+                dataset = None
             if dataset:
                 return dataset
         # Attempt to open the file online
@@ -432,6 +454,8 @@ class BaseConnectionManager(ABC):
             dataset = self.open_remote(path, mode)
             if dataset:
                 return dataset
+            if skip_download_fallback and _is_zarr_path:
+                return None
 
         # Download the file locally, then open it
         try:
@@ -441,7 +465,22 @@ class BaseConnectionManager(ABC):
 
             local_exists = Path(local_path).exists()
             if local_exists:
-                ds = self.open_local(local_path)
+                # NOTE: open_local() can raise (e.g. zarr's
+                # FSPathExistNotDir when a corrupted/incomplete download
+                # left a regular file where a Zarr store directory is
+                # expected). Catch here — not just a None return — so the
+                # self-healing "invalidate + redownload" logic below still
+                # triggers instead of the exception bypassing it and
+                # bubbling up as an unhandled, unrepeatable failure on
+                # every future run.
+                try:
+                    ds = self.open_local(local_path)
+                except Exception as exc_local:
+                    logger.warning(
+                        f"Cached local copy for {path} raised an error "
+                        f"while opening ({local_path}): {exc_local!r}"
+                    )
+                    ds = None
                 if ds is not None:
                     return ds
 
@@ -457,8 +496,18 @@ class BaseConnectionManager(ABC):
             if not self.supports(path):
                 return None
 
+            if skip_download_fallback and _is_zarr_path:
+                return None
+
             self.download_file(path, local_path)
-            ds = self.open_local(local_path)
+            try:
+                ds = self.open_local(local_path)
+            except Exception as exc_local2:
+                logger.warning(
+                    f"Freshly downloaded cache for {path} raised an error "
+                    f"while opening ({local_path}): {exc_local2!r}"
+                )
+                ds = None
             if ds is None:
                 logger.warning(
                     f"Downloaded cache is unreadable for {path}; removing {local_path}."
@@ -520,9 +569,8 @@ class BaseConnectionManager(ABC):
             if extension != ".zarr":
                 return None
 
-            return FileLoader.open_dataset_auto(
+            return _open_dataset_auto_with_retry(
                 path,
-                adaptive_chunking=False,
                 groups=self.params.groups,
                 variables=self.params.keep_variables,
                 file_storage=self.params.fs,
@@ -539,12 +587,103 @@ class BaseConnectionManager(ABC):
             remote_path (str): Remote path of the file.
             local_path (str): Local path to save the file.
         """
+        # Zarr stores are directories of many chunk files, not a single
+        # blob. Reading them with fs.open(remote_path, "rb") silently
+        # succeeds with 0 bytes (fsspec resolves the "directory" prefix
+        # to an empty read) and writes a 0-byte *file* at local_path,
+        # which then makes every subsequent open attempt fail with
+        # zarr.errors.FSPathExistNotDir ("path exists but is not a
+        # directory"). Use a recursive directory download instead.
+        if str(remote_path).endswith(".zarr") or str(remote_path).endswith(".zarr/"):
+            self._download_zarr_store(remote_path, local_path)
+            return
+
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with self.params.fs.open(remote_path, "rb") as remote_file:
             with open(local_path, "wb") as local_file:
                 local_file.write(remote_file.read())
                 if self.file_cache is not None:
                     self.file_cache.add(local_path)
+
+    def _download_zarr_store(self, remote_path: str, local_path: str):
+        """
+        Recursively download a Zarr store (a directory of chunk files) to local disk.
+
+        Downloads into a temporary sibling directory first, then atomically
+        renames it into place, so concurrent readers never observe a
+        partially-downloaded store.
+
+        Args:
+            remote_path (str): Remote path of the Zarr store.
+            local_path (str): Local directory path to save the store.
+        """
+        import errno
+        import threading
+
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        s3_key = remote_path[len("s3://"):] if str(remote_path).startswith("s3://") else remote_path
+        tmp_path = f"{local_path}.downloading.{threading.get_ident()}"
+        if os.path.isdir(tmp_path):
+            shutil.rmtree(tmp_path, ignore_errors=True)
+
+        # The recursive get() below first lists the whole store (many
+        # ListObjectsV2 calls for large zarrs) before fetching chunk files.
+        # Under load (e.g. host RAM/swap pressure slowing down the async
+        # event loop), the remote gateway can drop the connection mid-list
+        # with a transient error (e.g. HTTP 499 "client closed request").
+        # Retry a few times with backoff instead of failing the whole file
+        # outright, invalidating the fsspec cache first since it may have
+        # cached a partial/stale listing from the failed attempt.
+        max_attempts = int(os.environ.get("DCTOOLS_ZARR_DOWNLOAD_RETRIES", "4"))
+        base_delay = float(os.environ.get("DCTOOLS_ZARR_DOWNLOAD_RETRY_DELAY", "5"))
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.params.fs.get(s3_key, tmp_path, recursive=True)
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if os.path.isdir(tmp_path):
+                    shutil.rmtree(tmp_path, ignore_errors=True)
+                if attempt >= max_attempts or not _is_transient_remote_error(exc):
+                    break
+                try:
+                    self.params.fs.invalidate_cache()
+                except Exception:
+                    pass
+                wait_s = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                logger.warning(
+                    f"Zarr store download failed for {remote_path} "
+                    f"(attempt {attempt}/{max_attempts}): {exc!r}. "
+                    f"Retrying in {wait_s:.1f}s..."
+                )
+                time.sleep(wait_s)
+        # Always invalidate afterwards (success or failure): a full
+        # recursive store listing populates the shared fs instance's
+        # DirCache with every chunk path in the store, and that cache never
+        # expires/caps by default (see extract_metadata_worker for details).
+        try:
+            self.params.fs.invalidate_cache()
+        except Exception:
+            pass
+
+        if last_exc is not None:
+            raise last_exc
+
+        if os.path.isdir(local_path):
+            shutil.rmtree(local_path, ignore_errors=True)
+        try:
+            os.rename(tmp_path, local_path)
+        except OSError as exc:
+            if exc.errno == errno.ENOTEMPTY and os.path.isdir(local_path):
+                # Race condition: another thread/process cached this zarr
+                # store first. The existing directory is valid; discard ours.
+                shutil.rmtree(tmp_path, ignore_errors=True)
+            else:
+                raise
+        if self.file_cache is not None:
+            self.file_cache.add(local_path)
 
     def _get_local_path(self, remote_path: str) -> str:
         """
@@ -718,6 +857,7 @@ class BaseConnectionManager(ABC):
         Returns:
             CatalogEntry: Metadata for the specific file as a CatalogEntry.
         """
+        open_func = None
         try:
             open_func = create_worker_connect_config(
                 connection_params,
@@ -729,7 +869,14 @@ class BaseConnectionManager(ABC):
                 with dask.config.set(scheduler="synchronous"):
                     ds = open_func(path, "rb")
             else:
-                ds = open_func(path, "rb")
+                # Metadata extraction only needs a couple of timestamps and
+                # a bounding geometry, never the actual data. Skip the
+                # expensive full Zarr-store download fallback: it amplifies
+                # load on an already-struggling S3 gateway (each retry is a
+                # full recursive ListObjectsV2 + GetObject-per-chunk),
+                # which is precisely what turned a transient 499 blip into
+                # a sustained, ever-worsening collapse in production.
+                ds = open_func(path, "rb", skip_download_fallback=True)
 
             if ds is None:
                 logger.warning(f"Could not open {path}")
@@ -738,6 +885,38 @@ class BaseConnectionManager(ABC):
             time_bounds = get_time_bound_values(ds)
             date_start = time_bounds[0]
             date_end = time_bounds[1]
+
+            # Some products (e.g. gridded L3 satellite fields) carry no time
+            # variable/coordinate inside the file at all -- the observation
+            # timestamp is only encoded in the file name (e.g.
+            # "..._20230101T000000_20230101T235959_...nc"). Without this,
+            # date_start/date_end stay None, the CatalogEntry is created but
+            # gets dropped by filter_catalog_by_date later, and the whole
+            # dataset ends up "empty after filtering". Opt-in fallback via
+            # the "date_from_filename_pattern" config key (regex with either
+            # named groups "start"+"end", or a single "date" group expanded
+            # to a full day) -- only used when the file itself yielded
+            # nothing, so datasets with real time variables are unaffected.
+            if date_start is None and date_end is None:
+                _date_pattern = getattr(connection_params, "date_from_filename_pattern", None)
+                if _date_pattern:
+                    try:
+                        import re as _re
+
+                        _match = _re.search(_date_pattern, path)
+                        if _match:
+                            _groups = _match.groupdict()
+                            if _groups.get("start") and _groups.get("end"):
+                                date_start = pd.to_datetime(_groups["start"], format="%Y%m%dT%H%M%S")
+                                date_end = pd.to_datetime(_groups["end"], format="%Y%m%dT%H%M%S")
+                            elif _groups.get("date"):
+                                _day = pd.to_datetime(_groups["date"], format="%Y%m%dT%H%M%S")
+                                date_start = _day.replace(hour=0, minute=0, second=0, microsecond=0)
+                                date_end = _day.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    except Exception:
+                        logger.debug(
+                            f"Failed to parse date from filename for {path}: {traceback.format_exc()}"
+                        )
 
             coord_sys = global_metadata.get("coord_system")
             if not coord_sys:
@@ -766,6 +945,26 @@ class BaseConnectionManager(ABC):
         except Exception:
             logger.warning(f"Failed to extract metadata for file {path}: {traceback.format_exc()}")
             return None
+        finally:
+            # fsspec's DirCache has NO size cap and NEVER expires by default
+            # (max_paths=None, listings_expiry_time=None). Because fsspec
+            # also caches filesystem *instances* by connection kwargs, the
+            # SAME S3 filesystem object (and its ever-growing dircache) is
+            # reused across every one of the hundreds of files processed by
+            # this worker process (e.g. 731 glorys zarrs). Each recursive
+            # store listing adds thousands of chunk-path entries that are
+            # never evicted, causing RSS to climb until the host starts
+            # swapping — observed as batches going from ~0.4 s/file to
+            # tens of seconds/file after a few hundred files. Invalidate
+            # after every single file: entries are per-store/unique to the
+            # file just processed, so this has no caching downside here.
+            _mgr = getattr(open_func, "__self__", None)
+            _fs = getattr(getattr(_mgr, "params", None), "fs", None)
+            if _fs is not None:
+                try:
+                    _fs.invalidate_cache()
+                except Exception:
+                    pass
 
     def estimate_resolution(
         self,
@@ -796,6 +995,16 @@ class BaseConnectionManager(ABC):
             except Exception:
                 return None
             if values.ndim != 1:
+                return None
+            # Some products (e.g. Glorys 2023 legacy source files) carry a
+            # single stray NaN coordinate label (the underlying data at that
+            # grid line is unaffected -- only the lat/lon value itself is
+            # corrupted). np.median does not skip NaNs, so a lone bad label
+            # would otherwise poison the whole resolution estimate. Drop NaN
+            # labels before estimating spacing.
+            if np.issubdtype(values.dtype, np.floating):
+                values = values[~np.isnan(values)]
+            if len(values) == 0:
                 return None
             if len(values) == 1:
                 return float(values[0])  # Return the unique value
@@ -901,9 +1110,84 @@ class BaseConnectionManager(ABC):
                     f"Batch {i + 1}/{n_batches} processed ({percent}%) : {len(valid_results)} files"
                 )
 
-                # Memory cleanup
+                # Memory cleanup.  Beyond freeing the batch's Python objects,
+                # invalidate the shared fsspec filesystem's directory-listing
+                # cache: each zarr store open/list adds entries that are
+                # never evicted, and across hundreds of files (e.g. glorys'
+                # 731 zarrs) this cache — plus underlying connection pool
+                # state — can grow enough to cause noticeable RAM pressure
+                # and a creeping per-batch slowdown over a long catalog
+                # build (observed: batches taking tens of minutes instead of
+                # seconds after several hundred files).
                 del batch_results, valid_results
+                fs = getattr(self.params, "fs", None)
+                if fs is not None:
+                    try:
+                        fs.invalidate_cache()
+                    except Exception:
+                        pass
                 gc.collect()
+
+                # Periodic Dask worker restart.  OFF by default: it turned
+                # out to be a net negative in practice — it did not prevent
+                # a real slowdown for glorys (root cause there was the
+                # expensive full-store download fallback, now fixed via
+                # skip_download_fallback above, not per-worker memory
+                # growth), and for datasets with many batches (e.g. jason3:
+                # ~298 catalog-build batches) it repeatedly killed/respawned
+                # workers mid-run, and tasks were sometimes dispatched to a
+                # worker before its post-restart nanny had a working network
+                # stack, causing EndpointConnectionError. Prefer capping
+                # concurrency via `n_parallel_workers` in the dataset's
+                # config instead (lower, steadier load on the S3 gateway,
+                # no disruptive respawn). Set
+                # DCTOOLS_CATALOG_RESTART_EVERY_N_BATCHES to a positive
+                # value to opt back in for a specific troubleshooting run.
+                # Skipped when a scattered ARGO index is in play (argo_index
+                # is not None -> scattered_argo_index broadcast to workers):
+                # restart_workers() would drop that broadcast data from the
+                # respawned workers, breaking subsequent batches.
+                _restart_every = int(
+                    os.environ.get("DCTOOLS_CATALOG_RESTART_EVERY_N_BATCHES", "0")
+                )
+                if (
+                    scattered_argo_index is None
+                    and _restart_every > 0
+                    and (i + 1) % _restart_every == 0
+                    and (i + 1) < n_batches
+                ):
+                    _client = getattr(self.dataset_processor, "client", None)
+                    if _client is not None:
+                        try:
+                            import logging as _log_restart
+
+                            _dist_logger = _log_restart.getLogger("distributed")
+                            _dist_lvl = _dist_logger.level
+                            _dist_logger.setLevel(_log_restart.CRITICAL)
+                            try:
+                                logger.info(
+                                    f"Restarting Dask workers after batch {i + 1}/{n_batches} "
+                                    "to bound long-running catalog-build memory growth."
+                                )
+                                # raise_for_error=False + a short timeout: if
+                                # workers can't reconnect quickly (e.g. the
+                                # host/gateway is already under stress) we'd
+                                # rather fail fast and keep going with the
+                                # existing workers than block the whole
+                                # catalog build for minutes waiting on a
+                                # restart that may never complete cleanly.
+                                _restart_timeout = os.environ.get(
+                                    "DCTOOLS_CATALOG_RESTART_TIMEOUT", "60s"
+                                )
+                                _client.restart_workers(
+                                    list(_client.scheduler_info()["workers"]),
+                                    timeout=_restart_timeout,
+                                    raise_for_error=False,
+                                )
+                            finally:
+                                _dist_logger.setLevel(_dist_lvl)
+                        except Exception as exc_restart:
+                            logger.warning(f"Dask worker restart failed: {exc_restart!r}")
 
             metadata_entries: List[Any] = []
             for batch_file in temp_files:
@@ -1042,7 +1326,7 @@ class CMEMSManager(BaseConnectionManager):
             raise ImportError("copernicusmarine is required for CMEMS access but failed to import.")
         try:
             if not isinstance(dt, datetime.datetime):
-                dt = datetime.datetime.strptime(dt, "%Y-%m-%dT%H:%M:%S")
+                dt = pd.Timestamp(dt).to_pydatetime()
             start_datetime = datetime.datetime.combine(dt.date(), datetime.time.min)  # 00:00:00
             end_datetime = datetime.datetime.combine(
                 dt.date(), datetime.time.max
@@ -1108,7 +1392,10 @@ class CMEMSManager(BaseConnectionManager):
         # We use the date (datetime format) as identifier for individual files
         dt: Any = path
         if not isinstance(dt, datetime.datetime):
-            dt = datetime.datetime.strptime(dt, "%Y-%m-%dT%H:%M:%S")
+            try:
+                dt = pd.Timestamp(dt).to_pydatetime()
+            except (ValueError, TypeError):
+                return False
         return isinstance(dt, datetime.datetime)
 
 
@@ -1249,9 +1536,8 @@ class S3Manager(BaseConnectionManager):
             extension = Path(path).suffix
             if extension != ".zarr":
                 return None
-            return FileLoader.open_dataset_auto(
+            return _open_dataset_auto_with_retry(
                 path,
-                adaptive_chunking=False,
                 groups=self.params.groups,
                 variables=self.params.keep_variables,
                 file_storage=self.params.fs,
@@ -1294,9 +1580,8 @@ class S3WasabiManager(S3Manager):
             extension = Path(path).suffix
             if extension != ".zarr":
                 return None
-            return FileLoader.open_dataset_auto(
+            return _open_dataset_auto_with_retry(
                 path,
-                adaptive_chunking=False,
                 groups=self.params.groups,
                 variables=self.params.keep_variables,
                 file_storage=self.params.fs,

@@ -126,21 +126,35 @@ def detect_and_normalize_longitude_system(ds: xr.Dataset, lon_name: str = "lon")
 
 
 def _detect_longitude_system(lon_min: float, lon_max: float) -> str:
-    """Detects the longitude coordinate system based on min/max values."""
-    # System [0, 360]
-    if lon_min >= -5 and lon_max >= 355:  # Tolerance for rounding
+    """Detects the longitude coordinate system based on min/max values.
+
+    NOTE: this must be robust to per-file/per-granule datasets (e.g. a single
+    satellite-pass swath/track file) whose longitude values only span a
+    narrow sub-range and never approach the 0deg or 360deg boundary. A
+    previous version required lon_max to be near 355 to recognize the
+    [0, 360] system, which silently misclassified such narrow-range files as
+    "unknown" and left them unconverted -- e.g. a Sentinel granule with
+    lon in [199, 336] was left as-is instead of being wrapped to [-180, 180],
+    causing 100% of its points to fall outside model grids using the
+    [-180, 180] convention (e.g. glonet) during matching/interpolation.
+
+    The only thing that actually matters is whether any value exceeds 180deg,
+    since that is never valid in the [-180, 180] system regardless of how
+    much of the 0-360 range the file spans.
+    """
+    # Values below -180 (beyond rounding tolerance) aren't valid longitudes
+    # in either system; don't guess.
+    if lon_min < -185:
+        return "unknown"
+
+    # Any value above 180 (beyond rounding tolerance) can only occur in the
+    # [0, 360] system -- conversion is needed regardless of how narrow the
+    # file's own longitude range is.
+    if lon_max > 185:
         return "[0, 360]"
 
-    # System [-180, 180]
-    elif lon_min >= -185 and lon_max <= 185:  # Tolerance for rounding
-        return "[-180, 180]"
-
-    # Mixed system or other
-    elif lon_min < -5 and lon_max > 185:
-        return "mixed"
-
-    else:
-        return "unknown"
+    # Otherwise all values already fit within [-180, 180]; nothing to do.
+    return "[-180, 180]"
 
 
 def _convert_longitude_to_180(ds: xr.Dataset, lon_name: str) -> xr.Dataset:
@@ -522,6 +536,42 @@ class ToSurfaceTransform:
         return filled.isel({depth_dim: slice(0, 1)})
 
 
+@register_transform("add_surface_aliases")
+class AddSurfaceAliasVarsTransform:
+    """Derives sst/sss surface variables from full-depth temperature/salinity.
+
+    "sst" and "sss" are the first value along the depth dimension of
+    "temperature" and "salinity" respectively. This adds them as EXTRA
+    variables (the original full-depth temperature/salinity are left
+    untouched) so that 3-D prediction datasets (e.g. glonet) can be matched
+    against surface-only observation products (e.g. SST_fields/SSS_fields)
+    without affecting full-depth comparisons (e.g. glorys/argo_profiles).
+    A no-op when temperature/salinity are absent or already 2-D (no depth
+    dimension), or when sst/sss already exist.
+    """
+
+    _SURFACE_ALIASES = {"temperature": "sst", "salinity": "sss"}
+
+    def __init__(self, depth_coord_name: str = "depth"):
+        """Initialize."""
+        self.depth_coord_name = depth_coord_name
+
+    def __call__(self, ds: xr.Dataset) -> xr.Dataset:
+        """Apply transform."""
+        depth_dim = self.depth_coord_name
+        if depth_dim not in ds.dims:
+            return ds
+
+        new_vars = {}
+        for src, dst in self._SURFACE_ALIASES.items():
+            if src in ds.data_vars and dst not in ds.data_vars and depth_dim in ds[src].dims:
+                new_vars[dst] = ds[src].isel({depth_dim: 0}, drop=True)
+
+        if not new_vars:
+            return ds
+        return ds.assign(new_vars)
+
+
 @register_transform("std_percentage")
 class StdPercentageTransform:
     """Transform percentage variables in the [0, 100] range to [0,1]."""
@@ -650,6 +700,13 @@ def get_dataset_transform(
             },
         },
         {"name": "detect_normalize_longitude", "kwargs": {}},
+        # Adds derived sst/sss surface variables (first depth value) when
+        # temperature/salinity + a depth dimension are present, so 3-D
+        # prediction datasets (e.g. glonet) can be evaluated against
+        # surface-only observation products (SST_fields/SSS_fields). No-op
+        # otherwise (e.g. datasets without temperature/salinity, or already
+        # 2-D data).
+        {"name": "add_surface_aliases", "kwargs": {"depth_coord_name": "depth"}},
     ]
 
     # Infer default transform name if not provided

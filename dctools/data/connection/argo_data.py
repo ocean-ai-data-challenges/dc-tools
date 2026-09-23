@@ -973,7 +973,17 @@ class ArgoInterface:
                 "Install/fix argopy (and its optional deps) to enable this feature."
             )
         start = f"{year}-{month:02d}-01"
-        end_date = pd.Timestamp(start) + pd.offsets.MonthEnd(0)
+        # argopy's IndexFetcher(...).region(box) treats the datim_max bound
+        # as EXCLUSIVE (start is inclusive, end is strictly-less-than) --
+        # confirmed empirically: querying with end="2024-01-31" returns 0
+        # profiles dated 2024-01-31, while end="2024-02-01" correctly
+        # returns all of them (max date 2024-01-31 23:58:20). Using the
+        # month's own last calendar day (MonthEnd(0), i.e. midnight of that
+        # day) as `end` therefore silently drops every profile from the
+        # LAST day of every month. Use the first day of the *next* month
+        # instead so the window is the correct half-open
+        # [month_start, next_month_start).
+        end_date = pd.Timestamp(start) + pd.DateOffset(months=1)
         end = end_date.strftime("%Y-%m-%d")
 
         # argopy accepts region boxes with either:

@@ -1,0 +1,59 @@
+target_period:
+  start: "2023-01-01"
+  end: "2024-12-31"
+
+datasets:
+  saral:
+    mode: netcdf_to_zarr
+    staging_subdir: "DC2/Nadir_altimetry/Saral"
+    file_pattern: "**/*.nc"
+    target_wasabi_subdir: "DC2/ZARR/Saral"
+    missing_ranges:
+      - {start: "2023-01-30", end: "2023-02-07"}
+      - {start: "2024-12-10", end: "2024-12-31"}
+
+  swot:
+    mode: netcdf_to_zarr
+    staging_subdir: "DC2/Nadir_altimetry/Swot"
+    file_pattern: "**/*.nc"
+    target_wasabi_subdir: "DC2/ZARR/Swot"
+    missing_ranges:
+      - {start: "2023-01-01", end: "2023-03-27"}
+      - {start: "2023-05-20", end: "2023-05-21"}
+      - {start: "2023-07-11", end: "2023-07-25"}
+      - {start: "2023-09-22", end: "2023-09-26"}
+      - {start: "2023-12-24", end: "2023-12-27"}
+      - {start: "2024-01-12", end: "2024-01-13"}
+      - {start: "2024-01-15", end: "2024-01-16"}
+      - {start: "2024-01-24", end: "2024-01-24"}
+      - {start: "2024-05-11", end: "2024-05-11"}
+
+  jason3:
+    mode: netcdf_to_zarr
+    staging_subdir: "DC2/Nadir_altimetry/Jason-3"
+    file_pattern: "**/*.nc"
+    target_wasabi_subdir: "DC2/ZARR/Jason3"
+    missing_ranges:
+      - {start: "2024-10-28", end: "2024-12-31"}
+
+  SSS_fields:
+    mode: netcdf_to_zarr
+    staging_subdir: "DC2/SSS_fields"
+    file_pattern: "**/*.nc"
+    target_wasabi_subdir: "DC2/SSS_fields"
+    missing_ranges:
+      - {start: "2023-01-29", end: "2023-01-29"}
+      - {start: "2023-02-05", end: "2023-02-05"}
+      - {start: "2024-12-30", end: "2024-12-31"}
+
+  argo_velocities:
+    mode: skip
+    reason: "already complete on target period"
+
+  glorys:
+    mode: skip
+    reason: "source expected as zarr in current pipeline; no netcdf conversion plan here"
+
+  glonet:
+    mode: skip
+    reason: "source expected as zarr in current pipeline; no netcdf conversion plan here"

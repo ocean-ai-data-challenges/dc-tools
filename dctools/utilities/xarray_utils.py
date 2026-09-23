@@ -425,7 +425,7 @@ def filter_variables(ds: xr.Dataset, keep_vars: List[str]) -> xr.Dataset:
     keep_present = [v for v in keep_vars if v in present]
     not_found = [v for v in keep_vars if v not in present]
     if not_found:
-        print(f"Warning: these names were not found in dataset and will be ignored: {not_found}")
+        logger.warning(f"filter_variables: these names were not found in dataset and will be ignored: {not_found}")
 
     # Data variables to keep (intersection with ds.data_vars)
     data_vars_to_keep = [v for v in keep_present if v in ds.data_vars]

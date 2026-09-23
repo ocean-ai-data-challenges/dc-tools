@@ -503,6 +503,8 @@ class BaseDataset:
         Args:
             bbox (Tuple[float, float, float, float]): (lon_min, lat_min, lon_max, lat_max).
         """
+        if getattr(self, "ignore_geometry", False):
+            return
         self.catalog.filter_by_region(region)
 
     def filter_catalog_by_variable(self, variables: List[str]):
@@ -726,6 +728,7 @@ def get_dataset_from_config(
                 "filter_values": filter_values,
                 "full_day_data": full_day_data,
                 "groups": source.get("groups"),
+                "date_from_filename_pattern": source.get("date_from_filename_pattern"),
             }
 
             s3_connection_config: BaseConnectionConfig

@@ -59,6 +59,11 @@ Repository = "https://github.com/ppr-ocean-ia/dc-tools/tree/main"
 [tool.poetry]
 version = "0.0.1"
 
+# The low-level layer lives in packages/dctools-core (pip-installable on its own, no torch/dask/oceanbench).
+# dctools re-exports its names from their historical modules (dcio.loader, data.coordinates, ...).
+[tool.poetry.dependencies]
+dctools-core = { path = "packages/dctools-core", develop = true }
+
 [tool.poetry.group.dev]
 optional = true
 

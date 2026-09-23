@@ -158,10 +158,24 @@ def swath_to_points(
     # Save important Coordinates before removal
     coords_to_reassign: Dict[Any, Any] = {}
     for coord in coords_to_keep:
+        if coord in ds_flat.coords and n_points_dim in ds_flat[coord].dims:
+            # Already correctly flattened by the ds.stack()/reset_index() call
+            # above.  This is the common case for grid-style axis coordinates
+            # (e.g. a 1D "latitude"/"longitude" coordinate that is itself one
+            # of the stacked dims): stacking a MultiIndex over the dims and
+            # resetting it already reconstructs the per-point coordinate
+            # values, so nothing more needs to be done here.
+            continue
         if coord in ds.coords:
             arr = ds.coords[coord]
-            # If the coordinate depends on swath dims, we reindex it on n_points
-            if set(arr.dims) <= set(swath_dims):
+            # If the coordinate depends on *all* swath dims (e.g. a genuine
+            # 2D lat/lon field spanning num_lines x num_pixels), flatten it
+            # the same way as the data variables. Coordinates that only
+            # depend on a strict subset of swath_dims (like the axis case
+            # above) are intentionally skipped here — stacking them against
+            # the full swath_dims list would fail since they lack the other
+            # dim(s) entirely.
+            if set(arr.dims) == set(swath_dims):
                 # Use .data to preserve dask arrays instead of .values (which forces compute)
                 coords_to_reassign[coord] = arr.stack(n_points=swath_dims).data
             elif n_points_dim in arr.dims:
@@ -221,9 +235,14 @@ def add_time_dim(
         # Fallback: use metadata mid_time
         file_info = input_df.iloc[idx]
         mid_time = file_info["date_start"] + (file_info["date_end"] - file_info["date_start"]) / 2
+        # assign_coords already creates a per-point "time" coordinate indexed
+        # by n_points_dim (guaranteed present here -- preprocess_one_npoints
+        # checks n_points_dim is in ds.dims before ever calling add_time_dim).
+        # A subsequent expand_dims(time=...) would always raise ValueError
+        # ("time already exists as coordinate or variable name") since
+        # assign_coords just created that exact variable -- it was never a
+        # separate/reachable case and is not needed for the n_points shape.
         ds = ds.assign_coords(time=(n_points_dim, np.full(ds.sizes[n_points_dim], mid_time)))
-        if "time" not in ds.dims:
-            ds = ds.expand_dims(time=[mid_time])
         return ds
 
     # Check if time_coord is a dask array (lazy)
@@ -476,22 +495,41 @@ def preprocess_one_npoints(
                 coordinates.get("lon", None),
             ]
             coords_to_keep = list(filter(lambda x: x is not None, coords_to_keep))
+            # NOTE: pass the actual mapped coordinate/variable names
+            # (e.g. "latitude"/"longitude" for CMEMS SST L3S), not the
+            # canonical dict keys — swath_to_points() looks up coords by
+            # their real name in ds.coords, so passing coordinates.keys()
+            # ("lat"/"lon"/...) silently failed to preserve lat/lon whenever
+            # the actual variable name differed from the canonical key.
             ds = swath_to_points(
                 ds,
-                coords_to_keep=list(coordinates.keys()),
+                coords_to_keep=coords_to_keep,
                 n_points_dim=n_points_dim,
             )
 
-        time_name = coordinates["time"]
-        if time_name in ds.variables and time_name not in ds.coords:
+        # Some datasets (e.g. SSS_fields / SMOS L3G) have NO time variable/
+        # coordinate at all in the raw file -- the observation date is only
+        # known via catalog metadata (date_start/date_end, possibly derived
+        # from the filename via date_from_filename_pattern). For those,
+        # "time" is legitimately absent from the coordinates mapping.
+        # add_time_dim() already handles time_coord=None by falling back to
+        # the catalog's mid_time, so resolve time_name/time_coord defensively
+        # instead of assuming a real time coordinate always exists.
+        time_name = coordinates.get("time")
+        if time_name is not None and time_name in ds.variables and time_name not in ds.coords:
             ds = ds.set_coords(time_name)
 
-        time_coord = ds.coords[time_name]
+        time_coord = ds.coords[time_name] if time_name is not None and time_name in ds.coords else None
 
-        if n_points_dim not in ds.dims and "time" in ds.dims and len(ds.dims) == 1:
-            ds = ds.assign_coords({n_points_dim: ("time", np.arange(ds.sizes["time"]))})
-            ds = ds.swap_dims({"time": n_points_dim})
-            if time_name in ds.coords:
+        # The sole dimension may not literally be named "time" (e.g. Sentinel
+        # SRAL L2's "time_01"). Any single-dim dataset is structurally
+        # npoints-like, so rename whichever dim it actually is instead of
+        # assuming it's literally named "time".
+        if n_points_dim not in ds.dims and len(ds.dims) == 1:
+            _sole_dim = next(iter(ds.dims))
+            ds = ds.assign_coords({n_points_dim: (_sole_dim, np.arange(ds.sizes[_sole_dim]))})
+            ds = ds.swap_dims({_sole_dim: n_points_dim})
+            if time_name is not None and time_name in ds.coords:
                 time_coord = ds.coords[time_name]
 
         if n_points_dim not in ds.dims:
@@ -2091,9 +2129,22 @@ class ObservationDataViewer:
         # SWOT file (often 50-300 MB) and can double-open the first file.
         _probe_has_npoints = (
             self.n_points_dim in first_ds.dims
-            or ("time" in first_ds.dims and len(first_ds.dims) == 1)
+            or len(first_ds.dims) == 1
         )
-        _probe_is_swath = reduced_swath_dims.issubset(first_ds.dims)
+        # ── Generic grid detection ──────────────────────────────────────
+        # Some observation_dataset references are genuinely gridded fields
+        # (e.g. CMEMS SST L3S on (time, latitude, longitude), or SMOS SSS
+        # L3 on (lat, lon) with no time dim) rather than along-track swaths
+        # named num_lines/num_pixels.  swath_to_points() already stacks ANY
+        # non-time dims into n_points generically, so treat any dataset with
+        # 2+ non-time spatial dims (that isn't already n_points-flat) the
+        # same way as a named num_lines/num_pixels swath instead of falling
+        # through to "unsupported dimensions" and silently producing 0 pts.
+        _non_time_dims = set(first_ds.dims) - {"time", self.n_points_dim}
+        _probe_is_swath = (
+            reduced_swath_dims.issubset(first_ds.dims)
+            or (not _probe_has_npoints and len(_non_time_dims) >= 2)
+        )
         _probe_dims = dict(first_ds.sizes)  # lightweight copy
         del first_ds
         gc.collect()
@@ -2121,18 +2172,61 @@ class ObservationDataViewer:
                         delayed_tasks, sync=False
                     )
                 else:
-                    batch_results_sync: List[Any] = []
-                    for idx, dataset_path in enumerate(dataset_paths):
-                        result = preprocess_one_npoints(
-                            dataset_path, False, self.n_points_dim, dataframe, idx,
-                            self.alias, self.load_fn,
-                            self.keep_vars, self.target_dimensions,
-                            self.coordinates,
-                            self.time_bounds,
-                            load_to_memory,
-                        )
-                        if result is not None:
-                            batch_results_sync.append(result)
+                    _n_files = len(dataset_paths)
+                    _max_prep_workers = max(
+                        1,
+                        min(
+                            _n_files,
+                            int(os.environ.get("DCTOOLS_OBS_PREP_WORKERS", "6")),
+                        ),
+                    )
+                    batch_results_sync = []
+                    if _n_files > 1 and _max_prep_workers > 1:
+                        # Parallelize with threads: each call is I/O-bound
+                        # (e.g. a copernicusmarine network request per date
+                        # for CMEMS-protocol observation datasets), so this
+                        # gives real concurrency within a single worker task
+                        # instead of opening files one at a time.
+                        from concurrent.futures import ThreadPoolExecutor as _ObsPrepPool
+                        _results_by_idx: Dict[int, Any] = {}
+                        with _ObsPrepPool(max_workers=_max_prep_workers) as _pool:
+                            _futures = {
+                                _pool.submit(
+                                    preprocess_one_npoints,
+                                    dataset_path, False, self.n_points_dim, dataframe, idx,
+                                    self.alias, self.load_fn,
+                                    self.keep_vars, self.target_dimensions,
+                                    self.coordinates,
+                                    self.time_bounds,
+                                    load_to_memory,
+                                ): idx
+                                for idx, dataset_path in enumerate(dataset_paths)
+                            }
+                            for _fut in _futures:
+                                _idx = _futures[_fut]
+                                try:
+                                    _results_by_idx[_idx] = _fut.result()
+                                except Exception as _exc_prep:
+                                    logger.warning(
+                                        f"Preprocessing failed for {self.alias} "
+                                        f"file {_idx}: {_exc_prep!r}"
+                                    )
+                        batch_results_sync = [
+                            _results_by_idx[i] for i in range(_n_files)
+                            if _results_by_idx.get(i) is not None
+                        ]
+                    else:
+                        for idx, dataset_path in enumerate(dataset_paths):
+                            result = preprocess_one_npoints(
+                                dataset_path, False, self.n_points_dim, dataframe, idx,
+                                self.alias, self.load_fn,
+                                self.keep_vars, self.target_dimensions,
+                                self.coordinates,
+                                self.time_bounds,
+                                load_to_memory,
+                            )
+                            if result is not None:
+                                batch_results_sync.append(result)
 
                     batch_results = batch_results_sync
 
@@ -2171,18 +2265,56 @@ class ObservationDataViewer:
                         delayed_tasks_swath, sync=False
                     )
                 else:
-                    batch_results_sync2: List[Any] = []
-                    for idx, dataset_path in enumerate(dataset_paths):
-                        result = preprocess_one_npoints(
-                            dataset_path, True, self.n_points_dim, dataframe, idx,
-                            self.alias, self.load_fn,
-                            self.keep_vars, self.target_dimensions,
-                            self.coordinates,
-                            self.time_bounds,
-                            load_to_memory,
-                        )
-                        if result is not None:
-                            batch_results_sync2.append(result)
+                    _n_files2 = len(dataset_paths)
+                    _max_prep_workers2 = max(
+                        1,
+                        min(
+                            _n_files2,
+                            int(os.environ.get("DCTOOLS_OBS_PREP_WORKERS", "6")),
+                        ),
+                    )
+                    batch_results_sync2 = []
+                    if _n_files2 > 1 and _max_prep_workers2 > 1:
+                        from concurrent.futures import ThreadPoolExecutor as _ObsPrepPool2
+                        _results_by_idx2: Dict[int, Any] = {}
+                        with _ObsPrepPool2(max_workers=_max_prep_workers2) as _pool2:
+                            _futures2 = {
+                                _pool2.submit(
+                                    preprocess_one_npoints,
+                                    dataset_path, True, self.n_points_dim, dataframe, idx,
+                                    self.alias, self.load_fn,
+                                    self.keep_vars, self.target_dimensions,
+                                    self.coordinates,
+                                    self.time_bounds,
+                                    load_to_memory,
+                                ): idx
+                                for idx, dataset_path in enumerate(dataset_paths)
+                            }
+                            for _fut2 in _futures2:
+                                _idx2 = _futures2[_fut2]
+                                try:
+                                    _results_by_idx2[_idx2] = _fut2.result()
+                                except Exception as _exc_prep2:
+                                    logger.warning(
+                                        f"Preprocessing failed for {self.alias} "
+                                        f"file {_idx2}: {_exc_prep2!r}"
+                                    )
+                        batch_results_sync2 = [
+                            _results_by_idx2[i] for i in range(_n_files2)
+                            if _results_by_idx2.get(i) is not None
+                        ]
+                    else:
+                        for idx, dataset_path in enumerate(dataset_paths):
+                            result = preprocess_one_npoints(
+                                dataset_path, True, self.n_points_dim, dataframe, idx,
+                                self.alias, self.load_fn,
+                                self.keep_vars, self.target_dimensions,
+                                self.coordinates,
+                                self.time_bounds,
+                                load_to_memory,
+                            )
+                            if result is not None:
+                                batch_results_sync2.append(result)
 
                     batch_results = batch_results_sync2
 
