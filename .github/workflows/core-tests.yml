@@ -1,0 +1,27 @@
+# Tests of dctools-core, the dependency-light layer shared with oceanml3d-eval (pip only: no
+# conda, ESMF, torch or oceanbench). The full dctools suite needs the conda environment of
+# docker/ and runs locally.
+name: dctools-core tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dctools-core
+        run: pip install -e "packages/dctools-core[s3,argo,dev]"
+      - name: Ruff
+        run: ruff check --select F,E9 packages/dctools-core
+      - name: Tests
+        run: pytest -q packages/dctools-core/tests

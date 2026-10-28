@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-10-28, branch `dc2-optimisation`: DC2 scores against observations)
+
+Measured on GloNet's 2024-01-03 forecast (lead 0) against the SARAL passes of that day: SSH RMSE
+7.99 m (bias 3.46 m) before, 0.41 m (bias -0.31 m, centred 0.27 m) after.
+
+- **SSH anomaly vs absolute height** (`metrics/evaluator.py`, `_anomaly_to_absolute_height`): the
+  aliases map `ssha`, `sla`, `ssha_filtered`, `data_01__ku__ssha` and `zos` all to `ssh`, so an
+  along-track anomaly was scored against a model's height above the geoid. The observation's MDT is
+  now added back (ADT = SLA + MDT) before scoring, and the MDT is kept through the variable slimming.
+  An anomaly without its MDT stops the evaluation (`sla_to_adt: false` for an absolute reference).
+  Anomalies beyond `max_abs_sla` (2 m) are dropped: the DC2 along-track stores are unedited L2 (values
+  of +-30 m over land and ice).
+- **Class 4 scores pooled over bins** (`metrics/oceanbench_metrics.py`, with oceanbench's `pool_bins`):
+  a variable's score was the unweighted mean of its bins' RMSE (a 1-point bin weighed as much as a full
+  one; `count` was the mean count per bin). Scores are now those of all the points; bins carry `w_sum`;
+  new `crmse` (bias removed), the SSH score to read.
+- **Argo depth levels** (`metrics/oceanbench_metrics.py`): the levels of a profile were all binned
+  together and reported as "Surface". Each level is now its own bin (`depth_bin`), matched to the
+  model level by depth (not by index), and reported at the GLORYS12 levels.
+- **Argo standard mode** (`dctools_core.argo_qc`, `data/connection/argo_data.py`): the loader dropped
+  the QC flags and `DATA_MODE` (character variables) and read raw values. Now: adjusted values in A/D
+  mode, QC flags 1-2 per variable, depth from pressure (TEOS-10; 21 m at 2000 dbar), in-situ ->
+  potential temperature (0.16 degC at 2000 m), the shallowest value (<= 10 m) filling the levels above.
+  The rules are those of oceanml3d-eval's GDAC reader.
+
+### Added
+
+- `dctools.submission` (`SubmissionValidator`, `ModelSubmission`), which DC2's `submit.py` imports and
+  `main` did not have: ported from `performance_and_code_quality`, configs resolved by
+  `resolve_dc_config` (a path, `$DC_CONFIG_DIR`, or `<cwd>/*/config`) instead of a path relative to
+  the dctools install.
+- `target_time_values: auto` (`data/coordinates.py`): lead times `0 .. n_days_forecast - 1`; an explicit
+  list whose length differs from `n_days_forecast` is now an error.
+- `gsw` dependency; CI for `dctools-core` (`.github/workflows/core-tests.yml`).
+- Tests: `tests/test_dc2_scores.py`, `tests/test_submission_config.py`,
+  `packages/dctools-core/tests/test_argo_qc.py` (synthetic: perfect forecast 0, offset = bias, noisier
+  worse, points pooled not bins, profile levels apart).
+
 ### Changed
 
 - **`dctools-core` extracted** (2026-09-23, `packages/dctools-core/`): the dependency-light data layer is

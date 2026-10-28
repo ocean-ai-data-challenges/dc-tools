@@ -138,16 +138,32 @@ def get_target_depth_values(cfg: Any, *, surface: bool = False) -> Optional[List
 
 
 def get_target_time_values(cfg: Any) -> Optional[List[Any]]:
-    """Extract configured target time values from a global config dict."""
+    """Extract configured target time values (the forecast lead times) from a global config dict.
+
+    ``target_time_values: auto`` is ``0 .. n_days_forecast - 1``, so the horizon is set by
+    ``n_days_forecast`` alone. An explicit list must have ``n_days_forecast`` values when both are
+    given: a horizon changed in one place only would otherwise score lead times that do not exist.
+    """
     cfg_dict = _as_dict(cfg)
     vals = cfg_dict.get("target_time_values")
+    n_days = cfg_dict.get("n_days_forecast")
+    if isinstance(vals, str) and vals.strip().lower() == "auto":
+        if n_days is None:
+            raise ValueError("target_time_values: auto needs n_days_forecast")
+        return list(range(int(n_days)))
     if vals is None:
         return None
     if isinstance(vals, range):
-        return list(vals)
-    if isinstance(vals, (list, tuple)):
-        return list(vals)
-    return None
+        vals = list(vals)
+    if not isinstance(vals, (list, tuple)):
+        return None
+    vals = list(vals)
+    if n_days is not None and len(vals) != int(n_days):
+        raise ValueError(
+            f"target_time_values has {len(vals)} lead times but n_days_forecast is {n_days}: "
+            "set target_time_values: auto, or make them agree"
+        )
+    return vals
 
 
 """GLONET_ENCODING = {"depth": {"dtype": "float32"},

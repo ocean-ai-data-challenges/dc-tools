@@ -116,6 +116,70 @@ def _mask_invalid_obs_values(
     return ds, masked_counts
 
 
+# Along-track and swath altimetry give the sea level ANOMALY (above a mean sea surface); a model's
+# zos is the height above the geoid (an absolute dynamic topography). The two are only comparable
+# once the observation's mean dynamic topography is added back: ADT = SLA + MDT.
+_SSH_ANOMALY_NAMES = {
+    "ssha", "ssha_filtered", "ssha_unfiltered", "ssha_noiseless", "sla", "sla_filtered",
+    "sla_unfiltered", "data_01__ku__ssha", "ssha_01_ku",
+}
+DEFAULT_MAX_ABS_SLA = 2.0   # m, the along-track editing threshold of oceanml3d-eval's SARAL reference
+
+
+def _anomaly_to_absolute_height(ds: Any, source_config: Any) -> Any:
+    """Add the mean dynamic topography to an observed sea level anomaly (ADT = SLA + MDT).
+
+    Applies when one of the source's ``eval_variables`` is an anomaly (``_SSH_ANOMALY_NAMES``),
+    unless the source sets ``sla_to_adt: false``. Anomalies beyond ``max_abs_sla`` (source
+    option, default ``DEFAULT_MAX_ABS_SLA``; ``null`` keeps all) are dropped first.
+    Variables are found by their standardized name
+    (``ssh``, ``mean_dynamic_topography``), so this works before or after renaming. The MDT
+    variable is dropped once used. Raises when the anomaly is there but its MDT is not: an
+    anomaly scored against a model's zos measures the mean dynamic topography, not the forecast.
+    """
+    if ds is None or getattr(source_config, "sla_to_adt", True) is False:
+        return ds
+    eval_vars = {str(v) for v in (getattr(source_config, "eval_variables", None) or [])}
+    if not eval_vars & _SSH_ANOMALY_NAMES:
+        return ds
+    if isinstance(ds, list):
+        return [_anomaly_to_absolute_height(d, source_config) for d in ds]
+    if not hasattr(ds, "data_vars"):
+        return ds
+
+    from dctools.data.coordinates import get_standardized_var_name
+
+    ssh_var = next((v for v in ds.data_vars if get_standardized_var_name(str(v)) == "ssh"), None)
+    if ssh_var is None:
+        return ds
+    if ds[ssh_var].attrs.get("dctools_ssh_reference") == "adt":
+        return ds
+    mdt_var = next(
+        (v for v in ds.data_vars
+         if get_standardized_var_name(str(v)) == "mean_dynamic_topography"),
+        None,
+    )
+    if mdt_var is None:
+        raise ValueError(
+            f"'{ssh_var}' is a sea level anomaly but the observation has no mean dynamic "
+            "topography to turn it into the absolute height a model's zos is: keep the MDT "
+            "variable (mdt, mean_topography, data_01__mean_dynamic_topography) in "
+            "keep_variables, or set sla_to_adt: false for a reference that is already absolute."
+        )
+    sla = ds[ssh_var]
+    # Unedited (L2) anomalies hold land, ice and rain values of tens of metres; drop what no
+    # ocean anomaly reaches (a threshold on the observation alone, never on its misfit to the
+    # model). Edited L3 products (sla_filtered) are untouched by it.
+    max_abs_sla = getattr(source_config, "max_abs_sla", DEFAULT_MAX_ABS_SLA)
+    if max_abs_sla is not None:
+        sla = sla.where(np.abs(sla) <= float(max_abs_sla))
+    adt = sla + ds[mdt_var]
+    adt.attrs = {**ds[ssh_var].attrs, "dctools_ssh_reference": "adt",
+                 "comment": f"absolute dynamic topography: {ssh_var} + {mdt_var}"
+                            + (f", |{ssh_var}| <= {max_abs_sla} m" if max_abs_sla is not None else "")}
+    return ds.assign({ssh_var: adt}).drop_vars(mdt_var)
+
+
 def _parse_memory_limit(value: Any) -> int:
     """Parse a human-readable memory string (e.g. ``"6GB"``) into bytes.
 
@@ -904,6 +968,9 @@ def compute_metric(
 
             required_std = {get_standardized_var_name(var) for var in required_vars}
             required_std.discard(None)
+            # an observed SSH anomaly needs its MDT (see _anomaly_to_absolute_height)
+            if "ssh" in required_std:
+                required_std.add("mean_dynamic_topography")
 
             keep_data_vars: list[str] = []
             for var_name in ds.data_vars:
@@ -1790,6 +1857,9 @@ def compute_metric(
                 f"[{ref_alias}] valid_time={valid_time} — preprocessing done, "
                 f"{n_points_raw} obs points — starting metric computation…"
             )'''
+
+            # Observed SSH anomaly -> absolute height, the quantity of a model's zos.
+            ref_data = _anomaly_to_absolute_height(ref_data, ref_source_config)
 
             # Re-cap C-library threads before metric computation using
             # the per-dataset value from the YAML config.

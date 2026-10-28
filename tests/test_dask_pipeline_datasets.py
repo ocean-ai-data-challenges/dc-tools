@@ -91,8 +91,12 @@ def _obs_track_ds(
     time_vals = np.sort(
         rng.choice(times.values, size=n_points, replace=True)
     )
+    data_vars = {var_name: ("n_points", rng.standard_normal(n_points).astype(np.float32))}
+    if var_name == "sla":
+        # an anomaly is scored against zos once its mean dynamic topography is added back
+        data_vars["mdt"] = ("n_points", np.full(n_points, 0.5, dtype=np.float32))
     return xr.Dataset(
-        {var_name: ("n_points", rng.standard_normal(n_points).astype(np.float32))},
+        data_vars,
         coords={
             "time": ("n_points", time_vals),
             "lat": ("n_points", rng.uniform(-5, 5, n_points).astype(np.float64)),
@@ -481,7 +485,7 @@ class TestDaskPipelineSaral:
 
         ref_entry: Dict[str, Any] = {
             "source": FakeCatalog(),
-            "keep_vars": ["sla"],
+            "keep_vars": ["sla", "mdt"],
             "target_dimensions": {"lat": [-5, 5], "lon": [-10, 10]},
             "time_bounds": (
                 pd.Timestamp("2025-01-01"),
@@ -503,7 +507,7 @@ class TestDaskPipelineSaral:
         }
 
         pred_cfg = _source_config("local", keep_variables=["zos"], eval_variables=["zos"])
-        ref_cfg = _source_config("local", keep_variables=["sla"], eval_variables=["sla"])
+        ref_cfg = _source_config("local", keep_variables=["sla", "mdt"], eval_variables=["sla"])
 
         # We need to mock both create_worker_connect_config and
         # ObservationDataViewer since we have inline data

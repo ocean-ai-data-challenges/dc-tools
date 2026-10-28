@@ -333,6 +333,55 @@ def _compute_spatial_per_bins(
     return per_bins
 
 
+DEPTH_MATCH_TOLERANCE_M = 2.0
+
+
+def _profile_level_depth(obs_da: xr.DataArray, depth_dim: str, idx: int) -> Optional[float]:
+    """Depth (m) of level ``idx`` of a profile observation, from its depth coordinate if any."""
+    if depth_dim in obs_da.coords:
+        try:
+            return float(np.asarray(obs_da[depth_dim].values)[idx])
+        except (TypeError, ValueError, IndexError):
+            return None
+    return None
+
+
+def _model_level(
+    model_da: xr.DataArray,
+    model_depth_dim: Optional[str],
+    idx: int,
+    depth: Optional[float],
+) -> Optional[xr.DataArray]:
+    """The model field at the depth of an observation level.
+
+    By depth when both sides have one: the nearest model level, None when it is further than
+    ``DEPTH_MATCH_TOLERANCE_M`` (or 5 %) from the observation's. By index otherwise, the
+    observations being then assumed to be on the model's levels.
+    """
+    if model_depth_dim is None:
+        return model_da
+    if depth is not None and model_depth_dim in model_da.coords:
+        levels = np.asarray(model_da[model_depth_dim].values, dtype=float)
+        j = int(np.argmin(np.abs(levels - depth)))
+        if abs(levels[j] - depth) > max(DEPTH_MATCH_TOLERANCE_M, 0.05 * abs(depth)):
+            return None
+        return model_da.isel({model_depth_dim: j})
+    if idx < model_da.sizes.get(model_depth_dim, 0):
+        return model_da.isel({model_depth_dim: idx})
+    return None
+
+
+def _pool_bins(bins: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Scores of the union of the points of ``bins`` (oceanbench's pool_bins)."""
+    pool = getattr(oceanbench_class4_module, "pool_bins", None)
+    if pool is None:
+        raise RuntimeError(
+            "the installed oceanbench has no class4_evaluator.pool_bins: install the fork's "
+            "dc2-optimisation branch (scores pooled over bins, not averaged)"
+        )
+    return dict(pool(bins))
+
+
 def _build_class4_bin_specs(bin_resolution: int) -> Dict[str, Any]:
     """Build the spatial binning config expected by Class4Evaluator."""
     import numpy as np
@@ -536,15 +585,19 @@ def _run_class4_with_raw_per_bins(
 
             # ── Outer loop: one iteration per depth level (1 for surface obs) ──
             for _d_idx in range(_n_depth_levels):
+                _level_depth: Optional[float] = None
                 if _obs_depth_dim is not None:
                     obs_da_active = obs_da.isel({_obs_depth_dim: _d_idx})
-                    if (
-                        _model_depth_dim is not None
-                        and _d_idx < model_da.sizes.get(_model_depth_dim, 0)
-                    ):
-                        model_da_active = model_da.isel({_model_depth_dim: _d_idx})
-                    else:
-                        model_da_active = model_da
+                    _level_depth = _profile_level_depth(obs_da, _obs_depth_dim, _d_idx)
+                    model_da_active = _model_level(
+                        model_da, _model_depth_dim, _d_idx, _level_depth,
+                    )
+                    if model_da_active is None:
+                        logger.debug(
+                            f"[class4] '{var}': no model level at {_level_depth} m "
+                            f"(observation level {_d_idx}) — skipped"
+                        )
+                        continue
                 else:
                     obs_da_active = obs_da
                     model_da_active = model_da
@@ -663,6 +716,11 @@ def _run_class4_with_raw_per_bins(
                         chunk_df,
                         getattr(evaluator, "bin_specs", None),
                     )
+                    # Profiles: each level is its own bin, reported at its depth
+                    # (format_class4_results), never pooled with the other levels.
+                    if _level_depth is not None:
+                        chunk_df["depth_bin"] = _level_depth
+                        groupby_cols = list(groupby_cols) + ["depth_bin"]
                     if _groupby_cols_resolved is None:
                         _groupby_cols_resolved = list(groupby_cols)
 
@@ -852,17 +910,11 @@ def _run_class4_with_raw_per_bins(
                 res["bias"] = float(s["w_err"] / ws)
                 res["me"] = res["bias"]
                 res["count"] = float(n)
+                res["w_sum"] = float(ws)   # what the bin weighs when bins are pooled
                 bin_results.append(res)
 
-            # Global aggregation
-            global_stats: Dict[str, float] = {}
-            if bin_results:
-                df_res = pd.DataFrame(bin_results)
-                for m in ("rmse", "mse", "mae", "bias", "me"):
-                    if m in df_res.columns:
-                        global_stats[f"{m}_mean"] = float(df_res[m].mean())
-                        global_stats[f"{m}_median"] = float(df_res[m].median())
-                        global_stats[f"{m}_std"] = float(df_res[m].std())
+            # Global aggregation: the scores of all the points, not the mean of the bins' scores
+            global_stats: Dict[str, float] = _pool_bins(bin_results)
 
             scores_result: Any = {
                 "per_bins": bin_results,

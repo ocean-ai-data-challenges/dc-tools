@@ -87,6 +87,53 @@ except ImportError:
     pass
 
 
+# ---- Helper: standard mode (QC, adjusted values, depth, potential temperature) ----
+_STANDARD_MODE_INPUTS = frozenset({
+    "DATA_MODE", "POSITION_QC", "JULD_QC", "LATITUDE", "LONGITUDE",
+    "PRES_QC", "TEMP_QC", "PSAL_QC",
+    "PRES_ADJUSTED", "TEMP_ADJUSTED", "PSAL_ADJUSTED",
+    "PRES_ADJUSTED_QC", "TEMP_ADJUSTED_QC", "PSAL_ADJUSTED_QC",
+})
+
+
+def _to_standard_mode(ds: xr.Dataset, arrays: Dict[str, np.ndarray]) -> xr.Dataset:
+    """A GDAC profile file in Argo's standard mode (``dctools_core.argo_qc.standard_mode``).
+
+    Adjusted values where ``DATA_MODE`` is A or D, levels with a bad flag blanked, a ``DEPTH`` (m)
+    computed from pressure, and ``TEMP`` converted to potential temperature (the kind of a model's
+    thetao). The raw-pressure and adjusted variables are dropped: ``DEPTH`` is the vertical
+    coordinate the profiles are interpolated on. A file without ``PRES`` is returned as is.
+    """
+    if "PRES" not in ds.data_vars:
+        return ds
+    from dctools_core.argo_qc import standard_mode
+
+    inputs = dict(arrays)
+    for name in ("PRES", "TEMP", "PSAL", "LATITUDE", "LONGITUDE"):
+        if name in ds.data_vars:
+            inputs[name] = np.asarray(ds[name].values)
+    pres = np.asarray(inputs["PRES"], dtype=float)
+    if pres.ndim != 2:
+        return ds
+    clean = standard_mode(inputs)
+    dims = ds["PRES"].dims
+    out = ds.drop_vars([v for v in ("PRES_ADJUSTED",) if v in ds.data_vars])
+    for name in ("PRES", "TEMP", "PSAL"):
+        if name in out.data_vars:
+            out[name] = (dims, clean[name].astype(np.float32), out[name].attrs)
+    out["DEPTH"] = (dims, clean["DEPTH"].astype(np.float32),
+                    {"units": "m", "long_name": "depth from pressure (TEOS-10)"})
+    if "TEMP" in out.data_vars:
+        out["TEMP"].attrs = {**out["TEMP"].attrs, "long_name": "sea water potential temperature",
+                             "comment": "from in-situ TEMP (TEOS-10 pt0_from_t), QC 1-2, adjusted in A/D mode"}
+    out.attrs["dctools_argo_mode"] = "standard"
+    return out
+
+
+# A profile's shallowest value fills the levels above it when it is at most this deep (m).
+SURFACE_EXTRAPOLATION_M = 10.0
+
+
 # ---- Helper: per-profile 2D pressure -> standard-depth interpolation ------
 def _interpolate_profiles_to_depth(
     ds: xr.Dataset,
@@ -165,8 +212,8 @@ def _interpolate_profiles_to_depth(
     # Interpolate each data variable that has vert_dim --------------------
     new_data_vars: Dict[str, tuple] = {}
     for var_name in ds.data_vars:
-        if var_name == pres_var:
-            continue  # drop the source pressure variable
+        if var_name in (pres_var, "PRES", "PRES_ADJUSTED", "DEPTH"):
+            continue  # drop the source vertical coordinates
 
         var = ds[var_name]
         if vert_dim in var.dims:
@@ -189,27 +236,20 @@ def _interpolate_profiles_to_depth(
                 if np.array_equal(joint, fin_mask):
                     # All pressure-valid points also have valid values:
                     # reuse the pre-computed sort order directly (fast path)
-                    v_sorted = v_col[fin_mask][order]
-                    result[i, :] = np.interp(
-                        depth_levels,
-                        sorted_p,
-                        v_sorted,
-                        left=np.nan,
-                        right=np.nan,
-                    )
+                    p_s = sorted_p
+                    v_s = v_col[fin_mask][order]
                 else:
                     # Some values are NaN where pressure is valid:
                     # must re-sort on the joint subset (rare path)
                     p_j = pres[i, :][joint] if pres.ndim == 2 else pres[0, :][joint]
                     v_j = v_col[joint]
                     j_order = np.argsort(p_j)
-                    result[i, :] = np.interp(
-                        depth_levels,
-                        p_j[j_order],
-                        v_j[j_order],
-                        left=np.nan,
-                        right=np.nan,
-                    )
+                    p_s, v_s = p_j[j_order], v_j[j_order]
+                result[i, :] = np.interp(depth_levels, p_s, v_s, left=np.nan, right=np.nan)
+                # A float's shallowest measurement is a few metres down: within the mixed layer
+                # it stands for the levels above it (the model's 0.5 m surface level).
+                if p_s[0] <= SURFACE_EXTRAPOLATION_M:
+                    result[i, depth_levels < p_s[0]] = v_s[0]
 
             new_dims = tuple(d if d != vert_dim else "depth" for d in var.dims)
             new_data_vars[var_name] = xr.Variable(new_dims, result, attrs=var.attrs)  # type: ignore[index,assignment]
@@ -222,7 +262,7 @@ def _interpolate_profiles_to_depth(
         "depth": xr.Variable(
             ("depth",),
             depth_levels,
-            attrs={"units": "dbar", "long_name": "Depth / pressure level"},
+            attrs={"units": "m", "long_name": "depth (from pressure, TEOS-10, when the profiles carry DEPTH)"},
         ),
     }
     for cname, cvar in ds.coords.items():
@@ -513,7 +553,8 @@ class ArgoInterface:
         robust.
         """
         keep_vars_set = set(variables) if variables else None
-        always_keep = {"PRES", "PRES_ADJUSTED", "TIME", "JULD"}
+        always_keep = {"PRES", "PRES_ADJUSTED", "TIME", "JULD"} | _STANDARD_MODE_INPUTS
+        qc_arrays: Dict[str, np.ndarray] = {}
 
         with netcdf_file(local_path, mmap=False) as nc:
             global_attrs = {
@@ -527,6 +568,11 @@ class ArgoInterface:
                     continue
 
                 values = np.array(var[:])
+                if var_name in _STANDARD_MODE_INPUTS:
+                    # flags, data mode and adjusted values: inputs of the standard mode below
+                    qc_arrays[var_name] = values
+                    if values.dtype.kind in {"S", "U", "V"} or var_name.endswith("_ADJUSTED"):
+                        continue
                 if values.dtype.kind in {"S", "U", "V"}:
                     continue
 
@@ -541,7 +587,7 @@ class ArgoInterface:
                 }
                 data_vars[output_name] = xr.Variable(dims, values, attrs=attrs)
 
-        return xr.Dataset(data_vars=data_vars, attrs=global_attrs)
+        return _to_standard_mode(xr.Dataset(data_vars=data_vars, attrs=global_attrs), qc_arrays)
 
     def _batch_download_and_open_profiles(
         self,
@@ -1639,7 +1685,7 @@ class ArgoInterface:
                     if not _do_early_interp:
                         return chunk_ds
                     # Detect the best pressure variable
-                    for _pv in ("PRES_ADJUSTED", "PRES"):
+                    for _pv in ("DEPTH", "PRES_ADJUSTED", "PRES"):
                         if _pv in chunk_ds.data_vars or _pv in chunk_ds.coords:
                             return _interpolate_profiles_to_depth(
                                 chunk_ds, _depth_arr, _pv
@@ -1806,7 +1852,7 @@ class ArgoInterface:
             # --- Find the best pressure variable --------------------------
             # Prefer PRES_ADJUSTED (quality-controlled), fall back to PRES.
             pres_var: Optional[str] = None
-            for candidate in ("PRES_ADJUSTED", "PRES"):
+            for candidate in ("DEPTH", "PRES_ADJUSTED", "PRES"):
                 if candidate in ds_final.data_vars or candidate in ds_final.coords:
                     pres_var = candidate
                     break
