@@ -107,7 +107,7 @@ _PB_COORD_DP: int = 2   # decimal places for bin boundary coordinates
 _PB_METRIC_DP: int = 6  # decimal places for metric values
 _PB_SKIP: frozenset = frozenset({
     "lat_bin", "lon_bin", "depth_bin",
-    "count", "n", "n_points", "time_bin",
+    "count", "n", "n_points", "time_bin", "w_sum",
 })
 
 _GEO_LABEL_PAT = re.compile(r'^(\d+(?:\.\d+)?[SNWEsnwe]|0)-(\d+(?:\.\d+)?[SNWEsnwe]|0)$')
@@ -208,6 +208,10 @@ def _pb_raw_to_v2_row(
             if "depth_bin" in b:
                 has_depth = True
                 db = b["depth_bin"]
+                if isinstance(db, (int, float)):        # a level (profiles, point depths)
+                    db = {"left": float(db), "right": float(db)}
+                elif hasattr(db, "left"):               # pandas Interval
+                    db = {"left": float(db.left), "right": float(db.right)}
                 dl.append(round(db["left"], _PB_COORD_DP))
                 dr.append(round(db["right"], _PB_COORD_DP))
         col: Dict[str, List] = {"yl": yl, "yr": yr, "xl": xl, "xr": xr}
@@ -1224,11 +1228,13 @@ class BaseDCEvaluation:
                     act_time = np.asarray(actual_time)
 
                     if expected_is_numeric and not np.issubdtype(act_time.dtype, np.number):
-                        if act_time.size != exp_time.size:
+                        # A forecast longer than the horizon is scored on its first
+                        # n_days_forecast lead times; a shorter one cannot be.
+                        if act_time.size < exp_time.size:
                             ds_report["missing"][time_axis_name] = {
                                 "reason": (
                                     "time axis is datetime-like but target_time_values"
-                                    " is numeric; horizon length mismatch"
+                                    " is numeric; fewer lead times than the horizon"
                                 ),
                                 "expected_count": int(exp_time.size),
                                 "actual_count": int(act_time.size),
@@ -1239,6 +1245,8 @@ class BaseDCEvaluation:
                                 "reason": (
                                     "time axis is datetime-like;"
                                     " validated horizon length only"
+                                    + (f" (lead times beyond the first {exp_time.size} ignored)"
+                                       if act_time.size > exp_time.size else "")
                                 ),
                                 "count": int(act_time.size),
                             }

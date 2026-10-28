@@ -334,6 +334,32 @@ def _compute_spatial_per_bins(
 
 
 DEPTH_MATCH_TOLERANCE_M = 2.0
+# Point observations at most this deep (m) are surface observations; deeper ones are scored at
+# their depth, grouped by 5 m down to 100 m (15 m drogued drifters) and by POINT_DEPTH_STEP_M below.
+POINT_SURFACE_M = 10.0
+POINT_DEPTH_STEP_M = 25.0
+
+
+def _point_depth_groups(depths: np.ndarray) -> Dict[float, np.ndarray]:
+    """Indices of point observations by depth: 0 for the surface ones, else rounded to the step."""
+    d = np.asarray(depths, dtype=float)
+    step = np.where(d <= 100.0, 5.0, POINT_DEPTH_STEP_M)
+    z = np.where(d <= POINT_SURFACE_M, 0.0, np.round(d / step) * step)
+    ok = np.isfinite(z)
+    return {float(v): np.flatnonzero(ok & (z == v)) for v in np.unique(z[ok])}
+
+
+def _model_at_depth(
+    model_da: xr.DataArray, depth_dim: str, depth: float,
+) -> "tuple[Optional[xr.DataArray], Optional[float]]":
+    """The model field at ``depth`` (its first level for the surface, linear between levels),
+    and the depth to report it at; (None, None) below the deepest level."""
+    levels = np.asarray(model_da[depth_dim].values, dtype=float)
+    if depth <= POINT_SURFACE_M or depth <= levels.min():
+        return model_da.isel({depth_dim: int(np.argmin(levels))}), float(levels.min())
+    if depth > levels.max():
+        return None, None
+    return model_da.interp({depth_dim: depth}).drop_vars(depth_dim, errors="ignore"), float(depth)
 
 
 def _profile_level_depth(obs_da: xr.DataArray, depth_dim: str, idx: int) -> Optional[float]:
@@ -583,10 +609,38 @@ def _run_class4_with_raw_per_bins(
 
             _CHUNK_SZ = 500_000
 
+            # Point observations with a depth of their own (Argo parking-depth velocities, drogued
+            # drifters): grouped by depth, each group scored against the model interpolated
+            # vertically to that depth (instead of all of them against the surface).
+            _point_groups = None
+            _model_depth_dim_pts = next((d for d in model_da.dims if "depth" in d.lower()), None)
+            if _obs_depth_dim is None and _model_depth_dim_pts is not None and _depth_coord:
+                _pt_src = obs_ds if _depth_coord in obs_ds.variables else obs_da.coords
+                _pt_depth = np.asarray(_pt_src[_depth_coord].values, dtype=float).ravel()
+                if (
+                    _pt_depth.size == obs_da.sizes[_n_pts_dim]
+                    and np.nanmax(np.where(np.isfinite(_pt_depth), _pt_depth, 0.0)) > POINT_SURFACE_M
+                ):
+                    _point_groups = _point_depth_groups(_pt_depth)
+
+            if _point_groups is not None:
+                _levels = [(z, idx) for z, idx in sorted(_point_groups.items())]
+            else:
+                _levels = [(None, None)] * _n_depth_levels
+
             # ── Outer loop: one iteration per depth level (1 for surface obs) ──
-            for _d_idx in range(_n_depth_levels):
+            for _d_idx, (_group_depth, _group_idx) in enumerate(_levels):
                 _level_depth: Optional[float] = None
-                if _obs_depth_dim is not None:
+                obs_ds_active = obs_ds
+                if _point_groups is not None:
+                    obs_ds_active = obs_ds.isel({_n_pts_dim: _group_idx})
+                    obs_da_active = obs_da.isel({_n_pts_dim: _group_idx})
+                    model_da_active, _level_depth = _model_at_depth(
+                        model_da, _model_depth_dim_pts, _group_depth,
+                    )
+                    if model_da_active is None:
+                        continue
+                elif _obs_depth_dim is not None:
                     obs_da_active = obs_da.isel({_obs_depth_dim: _d_idx})
                     _level_depth = _profile_level_depth(obs_da, _obs_depth_dim, _d_idx)
                     model_da_active = _model_level(
@@ -679,8 +733,11 @@ def _run_class4_with_raw_per_bins(
                             """
                             if not _coord_name:
                                 return None
-                            if _coord_name in obs_ds and _n_pts_dim in obs_ds[_coord_name].dims:
-                                return obs_ds[_coord_name].isel(_sl).values.ravel()
+                            if (
+                                _coord_name in obs_ds_active
+                                and _n_pts_dim in obs_ds_active[_coord_name].dims
+                            ):
+                                return obs_ds_active[_coord_name].isel(_sl).values.ravel()
                             if _coord_name in obs_da_active.coords:
                                 _coord_da = obs_da_active.coords[_coord_name]
                                 if _n_pts_dim in _coord_da.dims:

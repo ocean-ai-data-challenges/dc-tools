@@ -139,7 +139,8 @@ def _anomaly_to_absolute_height(ds: Any, source_config: Any) -> Any:
     """
     if ds is None or getattr(source_config, "sla_to_adt", True) is False:
         return ds
-    eval_vars = {str(v) for v in (getattr(source_config, "eval_variables", None) or [])}
+    eval_vars = {str(v) for v in (getattr(source_config, "source_eval_variables", None)
+                                  or getattr(source_config, "eval_variables", None) or [])}
     if not eval_vars & _SSH_ANOMALY_NAMES:
         return ds
     if isinstance(ds, list):
@@ -149,14 +150,19 @@ def _anomaly_to_absolute_height(ds: Any, source_config: Any) -> Any:
 
     from dctools.data.coordinates import get_standardized_var_name
 
-    ssh_var = next((v for v in ds.data_vars if get_standardized_var_name(str(v)) == "ssh"), None)
+    ssh_var = next((v for v in ds.data_vars if str(v) in eval_vars & _SSH_ANOMALY_NAMES), None)
     if ssh_var is None:
-        return ds
+        ssh_var = next((v for v in ds.data_vars if get_standardized_var_name(str(v)) == "ssh"), None)
+    if ssh_var is None:
+        raise ValueError(
+            f"the source evaluates the sea level anomaly {sorted(eval_vars & _SSH_ANOMALY_NAMES)} but "
+            f"the observation has no such variable (has {sorted(map(str, ds.data_vars))})"
+        )
     if ds[ssh_var].attrs.get("dctools_ssh_reference") == "adt":
         return ds
     mdt_var = next(
         (v for v in ds.data_vars
-         if get_standardized_var_name(str(v)) == "mean_dynamic_topography"),
+         if v != ssh_var and get_standardized_var_name(str(v)) == "mean_dynamic_topography"),
         None,
     )
     if mdt_var is None:
@@ -178,6 +184,36 @@ def _anomaly_to_absolute_height(ds: Any, source_config: Any) -> Any:
                  "comment": f"absolute dynamic topography: {ssh_var} + {mdt_var}"
                             + (f", |{ssh_var}| <= {max_abs_sla} m" if max_abs_sla is not None else "")}
     return ds.assign({ssh_var: adt}).drop_vars(mdt_var)
+
+
+def _select_point_depths(ds: Any, source_config: Any) -> Any:
+    """Keep the point observations whose per-point ``depth`` is within the source's
+    ``depth_range: [min, max]`` (m); the others are blanked. No option, or no per-point depth:
+    unchanged. (Argo velocities: the surface drift of a float during its transmission is pushed by
+    the wind; ``depth_range: [100, 3000]`` keeps the parking-depth drift.)"""
+    rng = getattr(source_config, "depth_range", None)
+    if ds is None or not rng:
+        return ds
+    if isinstance(ds, list):
+        return [_select_point_depths(d, source_config) for d in ds]
+    if not hasattr(ds, "variables") or "depth" not in ds.variables or "depth" in ds.dims:
+        return ds
+    lo, hi = float(rng[0]), float(rng[1])
+    keep = (ds["depth"] >= lo) & (ds["depth"] <= hi)
+    return ds.assign({v: ds[v].where(keep) for v in ds.data_vars if ds[v].dims == ds["depth"].dims})
+
+
+def _has_subsurface_point_depth(ds: Any, surface_m: float = 10.0) -> bool:
+    """True when ``ds`` is point observations with a per-point ``depth`` below ``surface_m``."""
+    if ds is None or not hasattr(ds, "variables") or "depth" not in ds.variables:
+        return False
+    if "depth" in getattr(ds, "dims", {}):
+        return False
+    try:
+        d = np.asarray(ds["depth"].values, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(d).any() and np.nanmax(d) > surface_m)
 
 
 def _parse_memory_limit(value: Any) -> int:
@@ -1718,9 +1754,13 @@ def compute_metric(
             and hasattr(ref_data, "dims")
             and "depth" in ref_data.dims
         )
+        # Point observations with a depth of their own below the surface (Argo parking-depth
+        # velocities) are scored at that depth: keep the model's levels for them.
+        _ref_has_point_depth = _has_subsurface_point_depth(ref_data)
         if (
             ref_is_observation
             and not _ref_has_depth_dim
+            and not _ref_has_point_depth
             and pred_data is not None
             and "depth" in getattr(pred_data, "dims", [])
         ):
@@ -1860,6 +1900,7 @@ def compute_metric(
 
             # Observed SSH anomaly -> absolute height, the quantity of a model's zos.
             ref_data = _anomaly_to_absolute_height(ref_data, ref_source_config)
+            ref_data = _select_point_depths(ref_data, ref_source_config)
 
             # Re-cap C-library threads before metric computation using
             # the per-dataset value from the YAML config.

@@ -107,6 +107,7 @@ VARIABLES_ALIASES = {
             "sea_level",
             "surface_height",
             "ssha_filtered",
+            "sla_filtered",   # DUACS L3 along-track (edited, noise-filtered); not sla_unfiltered, its twin
             "zos",
             "data_01__ku__ssha",
             "ssha",

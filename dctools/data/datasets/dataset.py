@@ -777,4 +777,26 @@ def get_dataset_from_config(
         case _:
             raise ValueError(f"Unknown dataset config name: {config_name}")
 
+    _attach_evaluation_options(dataset, source)
     return dataset
+
+
+# Source options read when a reference is scored (dctools.metrics.evaluator.compute_metric), carried
+# by the connection parameters, the configuration compute_metric receives.
+EVALUATION_OPTIONS = ("sla_to_adt", "max_abs_sla", "depth_range")
+
+
+def _attach_evaluation_options(dataset: Any, source: Dict[str, Any]) -> None:
+    """Copy the source's evaluation options, and its ``eval_variables`` as written in the YAML
+    (``source_eval_variables``: the dataset's own get standardized), onto its connection parameters."""
+    try:
+        params = dataset.get_connection_config()
+    except Exception:
+        return
+    if params is None:
+        return
+    if source.get("eval_variables"):
+        params.source_eval_variables = list(source["eval_variables"])
+    for key in EVALUATION_OPTIONS:
+        if key in source:
+            setattr(params, key, source[key])

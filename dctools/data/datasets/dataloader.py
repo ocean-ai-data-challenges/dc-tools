@@ -455,6 +455,34 @@ def preprocess_argo_profiles(
     return ds_window
 
 
+def _points_in_time_bounds(
+    ds: xr.Dataset, n_points_dim: str, time_bounds: Optional[Tuple[Any, Any]],
+) -> Optional[xr.Dataset]:
+    """The points of ``ds`` whose time is within ``time_bounds`` (inclusive); None when none is.
+
+    A file is selected from the catalog when its time span meets the task's window, but its points
+    were all kept: a two-year file (Argo velocities) was scored whole at every lead time, and a daily
+    file widened the +-time_tolerance window to its whole day. Datasets without a per-point time are
+    returned as they are.
+    """
+    if time_bounds is None or ds is None:
+        return ds
+    tname = next((c for c in ("time", "TIME") if c in ds.coords or c in ds.variables), None)
+    if tname is None or n_points_dim not in ds[tname].dims:
+        return ds
+    t = np.asarray(ds[tname].values)
+    if not np.issubdtype(t.dtype, np.datetime64):
+        return ds
+    t0 = np.datetime64(pd.Timestamp(time_bounds[0]).tz_localize(None), "ns")
+    t1 = np.datetime64(pd.Timestamp(time_bounds[1]).tz_localize(None), "ns")
+    keep = (t >= t0) & (t <= t1)
+    if keep.all():
+        return ds
+    if not keep.any():
+        return None
+    return ds.isel({n_points_dim: np.flatnonzero(keep)})
+
+
 def preprocess_one_npoints(
     source,
     is_swath,
@@ -543,6 +571,9 @@ def preprocess_one_npoints(
             time_coord=time_coord,
             idx=idx,
         )
+        ds_with_time = _points_in_time_bounds(ds_with_time, n_points_dim, time_bounds)
+        if ds_with_time is None:
+            return None
 
         ds_interp = ds_with_time.chunk({n_points_dim: 100000})
 

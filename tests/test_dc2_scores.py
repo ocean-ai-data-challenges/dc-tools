@@ -89,6 +89,21 @@ def test_anomaly_after_renaming_and_group_prefixed_names():
     np.testing.assert_allclose(jason["data_01__ku__ssha"].values, 0.60)
 
 
+def test_l3_anomaly_names():
+    # DUACS L3 along-track: sla_filtered + mdt (sla_filtered was not an "ssh" alias: no conversion)
+    out = _anomaly_to_absolute_height(_alongtrack(("sla_filtered", "mdt")),
+                                      Namespace(eval_variables=["sla_filtered"]))
+    np.testing.assert_allclose(out["sla_filtered"].values, 0.60)
+    from dctools.data.coordinates import get_standardized_var_name
+    assert get_standardized_var_name("sla_filtered") == "ssh"
+
+
+def test_a_declared_anomaly_that_is_not_found_is_an_error():
+    with pytest.raises(ValueError, match="no such variable"):
+        _anomaly_to_absolute_height(_alongtrack(("adt_like", "mdt")),
+                                    Namespace(eval_variables=["sla_filtered"]))
+
+
 def test_unedited_anomalies_are_dropped():
     ds = _alongtrack()
     ds["ssha"][:3] = [25.0, -30.0, 1.9]           # land/ice values of an L2 product, and a real one
@@ -205,6 +220,61 @@ def test_profile_levels_match_the_model_by_depth():
     assert s[("rmse", "550m temperature")] < 1e-3
 
 
+def test_point_observations_are_scored_at_their_own_depth():
+    """Argo velocities: surface drift and parking-depth (~1000 m) drift in one table."""
+    depths = np.array([0.494025, 47.37369, 541.0889, 902.3393, 1245.291])
+    model = _model_field(depths)                    # linear in depth: vertical interpolation is exact
+    lat, lon = _points(400, seed=5)
+    pt_depth = np.where(np.arange(400) % 2 == 0, 0.0, 1000.0)
+    truth_at = {0.0: _sample(model.isel(depth=0), lat, lon),
+                1000.0: _sample(model.interp(depth=1000.0), lat, lon)}
+    vals = np.where(pt_depth == 0.0, truth_at[0.0], truth_at[1000.0])
+    vals = vals + np.where(pt_depth == 1000.0, 0.2, 0.0)       # an offset at depth only
+    obs = xr.Dataset(
+        {"u_current": ("n_points", vals)},
+        coords={"lat": ("n_points", lat), "lon": ("n_points", lon),
+                "depth": ("n_points", pt_depth), "time": ("n_points", np.full(400, VALID))},
+    )
+    s = _scores(_run_class4_with_raw_per_bins(
+        _evaluator(), xr.Dataset({"u_current": model}), obs, ["u_current"]))
+    assert s[("rmse", "Surface u_current")] < 1e-3
+    assert s[("count", "Surface u_current")] == 200
+    assert s[("bias", "1000m u_current")] == pytest.approx(-0.2, abs=1e-3)
+    assert s[("count", "1000m u_current")] == 200
+
+
+def test_depth_range_keeps_the_parking_depth_drift():
+    from dctools.metrics.evaluator import _has_subsurface_point_depth, _select_point_depths
+    ds = xr.Dataset({"U": ("n_points", [0.3, 0.05, 0.04])},
+                    coords={"depth": ("n_points", [0.0, 1000.0, 980.0])})
+    out = _select_point_depths(ds, Namespace(depth_range=[100, 3000]))
+    assert np.isnan(out["U"].values[0]) and np.isfinite(out["U"].values[1:]).all()
+    assert _select_point_depths(ds, Namespace()) is ds
+    assert _has_subsurface_point_depth(ds)
+    assert not _has_subsurface_point_depth(ds.assign_coords(depth=("n_points", [0.0, 0.5, 0.0])))
+
+
+def test_evaluation_options_reach_the_connection_parameters():
+    from types import SimpleNamespace
+
+    from dctools.data.datasets.dataset import _attach_evaluation_options
+
+    params = SimpleNamespace(protocol="s3")
+
+    class FakeDataset:
+        def get_connection_config(self):
+            return params
+
+    _attach_evaluation_options(FakeDataset(), {"eval_variables": ["ssha_filtered"], "max_abs_sla": 1.5,
+                                               "depth_range": [100, 3000], "keep_variables": ["x"]})
+    assert params.source_eval_variables == ["ssha_filtered"]
+    assert params.max_abs_sla == 1.5 and params.depth_range == [100, 3000]
+    assert not hasattr(params, "keep_variables")
+    # what compute_metric then does with them: the raw YAML name triggers the conversion
+    out = _anomaly_to_absolute_height(_alongtrack(("ssh", "mean_dynamic_topography")), params)
+    np.testing.assert_allclose(out["ssh"].values, 0.60)
+
+
 def test_results_are_flat_rows():
     model = _model_field()
     lat, lon = _points(100)
@@ -215,3 +285,27 @@ def test_results_are_flat_rows():
     assert isinstance(df, pd.DataFrame)
     assert set(df.columns) == {"Metric", "Variable", "Value"}
     assert {"rmse", "mse", "mae", "bias", "crmse", "count"} <= set(df["Metric"])
+
+
+def test_per_bins_rows_take_numeric_depth_levels():
+    from dctools.processing.base import _pb_raw_to_v2_row
+
+    bins = [{"lat_bin": {"left": 0.0, "right": 2.0}, "lon_bin": {"left": 0.0, "right": 2.0},
+             "depth_bin": 541.0889, "rmse": 0.1, "count": 3.0, "w_sum": 2.9},
+            {"lat_bin": {"left": 0.0, "right": 2.0}, "lon_bin": {"left": 2.0, "right": 4.0},
+             "depth_bin": pd.Interval(10.0, 20.0), "rmse": 0.2, "count": 1.0, "w_sum": 1.0}]
+    row = _pb_raw_to_v2_row("argo_profiles", "obs", 0, "2024-01-03", {"temperature": bins})
+    col = row["pb"]["temperature"]
+    assert col["dl"] == [541.09, 10.0] and col["dr"] == [541.09, 20.0]
+    assert "w_sum" not in col and col["rmse"] == [0.1, 0.2]
+
+
+def test_observation_points_are_kept_within_the_task_window():
+    from dctools.data.datasets.dataloader import _points_in_time_bounds
+
+    t = pd.to_datetime(["2023-06-01", "2024-01-02T13:00", "2024-01-03", "2024-01-03T11:00", "2024-12-01"], format="ISO8601")
+    ds = xr.Dataset({"U": ("n_points", np.arange(5.0))}, coords={"time": ("n_points", t.values)})
+    out = _points_in_time_bounds(ds, "n_points", (pd.Timestamp("2024-01-02T12:00"), pd.Timestamp("2024-01-03T12:00")))
+    assert out["U"].values.tolist() == [1.0, 2.0, 3.0]
+    assert _points_in_time_bounds(ds, "n_points", (pd.Timestamp("2025-01-01"), pd.Timestamp("2025-01-02"))) is None
+    assert _points_in_time_bounds(ds, "n_points", None) is ds
