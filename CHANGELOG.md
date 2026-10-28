@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-10-28, branch `dc2-optimisation`: found by a real DC2 run)
+
+A one-forecast DC2 run (GloNet 2024-01-03, two lead times, SWOT, Argo profiles and velocities,
+GLORYS) on the EDITO data:
+
+- **Evaluation options never reached `compute_metric`**: its connection parameters had no
+  `eval_variables` (and the dataset's get standardized), so the SLA -> ADT conversion did not
+  trigger in a real run. `get_dataset_from_config` attaches `source_eval_variables` (the YAML names)
+  and `sla_to_adt`, `max_abs_sla`, `depth_range`. SWOT KaRIn: crmse 0.05 m.
+- **Observation points outside the task window** (`preprocess_one_npoints` ignored `time_bounds`):
+  the two-year Argo velocity file was scored whole at every lead time (207 183 points for a day;
+  264 now), and a daily file over its whole day instead of +-`time_tolerance`.
+- **Point observations at their own depth**: Argo parking-depth drift (and drogued drifters) were
+  scored against the model's surface (the model was cut to its first level for any observation
+  without a depth dimension). Grouped by depth, scored against the model interpolated to it,
+  reported at `1000m` / `15m`. `depth_range` selects them (`[100, 3000]`: the surface drift of a
+  float during its transmission is windage).
+- `sla_filtered` (DUACS L3) is an `ssh` alias; a declared anomaly that is absent is an error.
+- The per-bins output took only interval depth bins (it raised on levels); `w_sum` is not a map
+  metric. A forecast longer than the horizon passes the conformance check.
+
 ### Fixed (2026-10-28, branch `dc2-optimisation`: DC2 scores against observations)
 
 Measured on GloNet's 2024-01-03 forecast (lead 0) against the SARAL passes of that day: SSH RMSE
