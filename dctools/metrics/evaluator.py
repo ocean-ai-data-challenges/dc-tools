@@ -826,6 +826,17 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
             pass
 
 
+def _nan_to_none(obj: Any) -> Any:
+    """``obj`` with its float NaN/inf replaced by None (strict JSON)."""
+    if isinstance(obj, float):
+        return obj if np.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _nan_to_none(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_nan_to_none(v) for v in obj]
+    return obj
+
+
 def _gridded_ensemble_results(
     pred_members: Any, ref_data: Any, metric: MetricComputer,
 ) -> Dict[str, Dict[str, float]]:
@@ -3187,7 +3198,9 @@ class Evaluator:
 
                 # Save batch by batch (gzip: 15-20× smaller than plain JSON)
                 with gzip.open(batch_file, "wt", encoding="utf-8", compresslevel=6) as f:
-                    json.dump(serial_results, f, separators=(',', ':'), ensure_ascii=False)
+                    # NaN -> null: the consolidation's orjson rejects NaN tokens
+                    json.dump(_nan_to_none(serial_results), f, separators=(',', ':'),
+                              ensure_ascii=False)
                 logger.debug(f"[batch {batch_idx}] checkpoint written")
 
                 # ── Accumulate per-ref stats ─────────────────────────

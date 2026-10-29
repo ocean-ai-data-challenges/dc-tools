@@ -16,11 +16,15 @@ from dctools.metrics.ensemble import (
     point_sums,
     scores_from_sums,
 )
-from dctools.metrics.oceanbench_metrics import _build_class4_bin_specs, _run_class4_with_raw_per_bins
+from dctools.metrics.oceanbench_metrics import (
+    _build_class4_bin_specs,
+    _run_class4_with_raw_per_bins,
+)
 
 oceanbench_class4 = pytest.importorskip("oceanbench.core.class4_metrics.class4_evaluator")
 if not hasattr(oceanbench_class4, "pool_bins"):
-    pytest.skip("oceanbench without pool_bins (fork branch dc2-optimisation)", allow_module_level=True)
+    pytest.skip("oceanbench without pool_bins (fork branch dc2-optimisation)",
+                allow_module_level=True)
 
 LAT = np.arange(-60.0, 60.25, 0.25)
 LON = np.arange(-180.0, 180.0, 0.25)
@@ -189,3 +193,60 @@ def test_gridded_scores_under_the_deterministic_labels():
     spread = np.sqrt(0.08)                      # variance (ddof 1) of (-0.1, 0.3)
     assert out["spread"]["Surface temperature"] == pytest.approx(spread)
     assert out["ssr"]["Surface temperature"] == pytest.approx(np.sqrt(3 / 2) * spread / 0.1)
+
+
+# ── centred scores (crps_c, ssr_c): the bias removed, as crmse ───────────────
+
+def test_centred_scores_remove_the_bias_only():
+    rng = np.random.default_rng(6)
+    n, m = 50_000, 10
+    centre = rng.standard_normal(n)
+    y = centre + rng.standard_normal(n)
+    members = centre + rng.standard_normal((m, n))
+    plain = scores_from_sums(point_sums(members, y))
+    shifted = scores_from_sums(point_sums(members + 0.7, y))      # a reference-surface offset
+    assert shifted["crps"] > plain["crps"] + 0.1
+    assert shifted["crps_c"] == pytest.approx(plain["crps_c"], rel=1e-9)
+    assert shifted["ssr_c"] == pytest.approx(plain["ssr_c"], rel=1e-9)
+    assert shifted["ssr"] < plain["ssr"]
+    # a pure offset: crps is the offset, the centred one is 0
+    pure = scores_from_sums(point_sums(np.tile(y + 0.3, (4, 1)), y))
+    assert pure["crps"] == pytest.approx(0.3) and pure["crps_c"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_class4_centred_scores():
+    field = _field()
+    obs = _obs(field)
+    rng = np.random.default_rng(7)
+    obs = obs.assign(ssh=obs["ssh"] + 0.1 * rng.standard_normal(obs.sizes["n_points"]))
+    members = _ensemble(field, [0.0] * 6) + 0.1 * rng.standard_normal((6,) + field.shape)
+    plain, _ = _class4(members, obs)
+    shifted, per_bins = _class4(members + 0.5, obs)
+    assert shifted["bias"] == pytest.approx(plain["bias"] + 0.5, abs=1e-6)
+    assert shifted["crps"] > plain["crps"] + 0.3
+    assert shifted["crps_c"] == pytest.approx(plain["crps_c"], rel=1e-6)
+    assert shifted["ssr_c"] == pytest.approx(plain["ssr_c"], rel=1e-6)
+    assert all("crps_c" in b for b in per_bins["ssh"])
+
+
+def test_a_nan_score_does_not_drop_its_batch(tmp_path):
+    """A NaN in a batch file made the consolidation's orjson reject (and skip) the whole batch."""
+    import gzip
+    import json
+
+    from dctools.metrics.evaluator import _nan_to_none
+    from dctools.processing.base import _iter_batch_items
+
+    rows = [{"ref_alias": "argo_velocities",
+             "result": [{"Metric": "ssr_c", "Variable": "550m u_current", "Value": float("nan")},
+                        {"Metric": "rmse", "Variable": "550m u_current", "Value": 0.1}]}]
+    old = tmp_path / "results_m_batch_0.json.gz"
+    with gzip.open(old, "wt") as f:
+        json.dump(rows, f)                       # what the writer did: a NaN token
+    assert [r["ref_alias"] for r in _iter_batch_items(str(old))] == ["argo_velocities"]
+    clean = _nan_to_none(rows)
+    assert clean[0]["result"][0]["Value"] is None and clean[0]["result"][1]["Value"] == 0.1
+    json.dumps(clean, allow_nan=False)           # strict JSON now
+    # undefined ratios are not emitted: a perfect ensemble mean has no ssr
+    assert "ssr" not in scores_from_sums(point_sums(np.array([[-1.0, 1.0], [1.0, -1.0]]),
+                                                    np.zeros(2)))

@@ -21,7 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a submitted model; it was missing from the port of the submission module, so `submit run` raised
   "Unknown dataset config name: local".
 
+### Added (2026-10-29)
+
+- `crps_c` and `ssr_c`: the ensemble scores once the bias (that of `crmse`, the ensemble mean's
+  over the pooled points) is removed, for every variable; a second pass over the observation
+  points in the Class 4 runner (~1.5x its time). What SSH reads (its reference-surface offset).
+
 ### Fixed (2026-10-29)
+
+- **A NaN score dropped its whole batch**: `json.dump` wrote a NaN token, the consolidation's
+  orjson rejected the file and skipped it as corrupted (all of a reference's results lost for a
+  one-point level with a perfect ensemble mean). Batches are written with NaN as null, read back
+  with the standard parser when orjson fails; undefined ratios are not emitted.
 
 - **`submit run` evaluated nothing**: `run_from_config` imported its default evaluation class from
   `dc2.evaluation.evaluation`, which does not exist (`dc2.evaluation.dc2`); `ModelSubmission`

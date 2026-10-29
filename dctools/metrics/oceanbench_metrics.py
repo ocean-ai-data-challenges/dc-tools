@@ -725,145 +725,191 @@ def _run_class4_with_raw_per_bins(
                     + (f", depth_idx={_d_idx}/{_n_depth_levels}" if _obs_depth_dim else "")
                 )
 
-                for _start in range(0, _n_total, _CHUNK_SZ):
-                    _end = min(_start + _CHUNK_SZ, _n_total)
-                    _sl = {_n_pts_dim: slice(_start, _end)}
+                # Ensemble: a second pass over the chunks scores the members centred on the
+                # level's bias (crps_c), the bias of the ensemble mean over all the level's points
+                # (that of crmse); the deterministic scores and crps come from the first.
+                _lvl_w = 0.0
+                _lvl_werr = 0.0
+                _lvl_bias = 0.0
+                for _pass in ((1, 2) if _member_grids is not None else (1,)):
+                    if _pass == 2:
+                        if _lvl_w <= 0:
+                            break
+                        _lvl_bias = _lvl_werr / _lvl_w
+                    for _start in range(0, _n_total, _CHUNK_SZ):
+                        _end = min(_start + _CHUNK_SZ, _n_total)
+                        _sl = {_n_pts_dim: slice(_start, _end)}
 
-                    # Read observation arrays from dask → numpy (one at a time).
-                    # obs_da_active is always 1-D here (depth already sliced out).
-                    with _dask.config.set(scheduler="synchronous"):
-                        _val_arr = obs_da_active.isel(_sl).values.ravel()
-                        _chunk_len = len(_val_arr)
+                        # Read observation arrays from dask → numpy (one at a time).
+                        # obs_da_active is always 1-D here (depth already sliced out).
+                        with _dask.config.set(scheduler="synchronous"):
+                            _val_arr = obs_da_active.isel(_sl).values.ravel()
+                            _chunk_len = len(_val_arr)
 
-                        def _read_point_coord(_coord_name: Optional[str]) -> Optional[np.ndarray]:
-                            """Read a chunk of a coordinate, indexed by the point
-                            dimension when possible.
+                            def _read_point_coord(_coord_name: Optional[str]) -> Optional[np.ndarray]:
+                                """Read a chunk of a coordinate, indexed by the point
+                                dimension when possible.
 
-                            Some observation snapshots (e.g. gridded CMEMS
-                            SST/SSS products converted to points via
-                            swath_to_points) carry "time" as a single global
-                            coordinate over a "time" dim of size 1 -- shared
-                            by every point -- rather than a per-point array
-                            aligned with ``_n_pts_dim``.  Indexing such a
-                            coordinate with ``{_n_pts_dim: slice(...)}`` raises
-                            ``ValueError: Dimensions {...} do not exist``.
-                            Broadcast the scalar value across the chunk in
-                            that case instead of raising.
-                            """
-                            if not _coord_name:
+                                Some observation snapshots (e.g. gridded CMEMS
+                                SST/SSS products converted to points via
+                                swath_to_points) carry "time" as a single global
+                                coordinate over a "time" dim of size 1 -- shared
+                                by every point -- rather than a per-point array
+                                aligned with ``_n_pts_dim``.  Indexing such a
+                                coordinate with ``{_n_pts_dim: slice(...)}`` raises
+                                ``ValueError: Dimensions {...} do not exist``.
+                                Broadcast the scalar value across the chunk in
+                                that case instead of raising.
+                                """
+                                if not _coord_name:
+                                    return None
+                                if (
+                                    _coord_name in obs_ds_active
+                                    and _n_pts_dim in obs_ds_active[_coord_name].dims
+                                ):
+                                    return obs_ds_active[_coord_name].isel(_sl).values.ravel()
+                                if _coord_name in obs_da_active.coords:
+                                    _coord_da = obs_da_active.coords[_coord_name]
+                                    if _n_pts_dim in _coord_da.dims:
+                                        return _coord_da.isel(_sl).values.ravel()
+                                    # Global/scalar coordinate (no per-point
+                                    # dimension) -- broadcast its value.
+                                    _scalar_val = np.asarray(_coord_da.values).reshape(-1)[0]
+                                    return np.full(_chunk_len, _scalar_val)
                                 return None
-                            if (
-                                _coord_name in obs_ds_active
-                                and _n_pts_dim in obs_ds_active[_coord_name].dims
-                            ):
-                                return obs_ds_active[_coord_name].isel(_sl).values.ravel()
-                            if _coord_name in obs_da_active.coords:
-                                _coord_da = obs_da_active.coords[_coord_name]
-                                if _n_pts_dim in _coord_da.dims:
-                                    return _coord_da.isel(_sl).values.ravel()
-                                # Global/scalar coordinate (no per-point
-                                # dimension) -- broadcast its value.
-                                _scalar_val = np.asarray(_coord_da.values).reshape(-1)[0]
-                                return np.full(_chunk_len, _scalar_val)
-                            return None
 
-                        _lat_raw = _read_point_coord(_lat_coord)
-                        _lon_raw = _read_point_coord(_lon_coord)
-                        _time_raw = _read_point_coord(_time_coord)
+                            _lat_raw = _read_point_coord(_lat_coord)
+                            _lon_raw = _read_point_coord(_lon_coord)
+                            _time_raw = _read_point_coord(_time_coord)
 
-                    if len(_val_arr) == 0:
-                        del _val_arr, _lat_raw, _lon_raw, _time_raw
-                        continue
+                        if len(_val_arr) == 0:
+                            del _val_arr, _lat_raw, _lon_raw, _time_raw
+                            continue
 
-                    # Build minimal DataFrame for apply_binning
-                    _data: Dict[str, Any] = {}
-                    if _lat_raw is not None:
-                        _data["lat"] = _lat_raw
-                    if _lon_raw is not None:
-                        _data["lon"] = _lon_raw
-                    if _time_raw is not None:
-                        _data["time"] = _time_raw
-                    _data[var] = _val_arr
-                    chunk_df = pd.DataFrame(_data)
-                    del _data, _val_arr, _lat_raw, _lon_raw, _time_raw
+                        # Build minimal DataFrame for apply_binning
+                        _data: Dict[str, Any] = {}
+                        if _lat_raw is not None:
+                            _data["lat"] = _lat_raw
+                        if _lon_raw is not None:
+                            _data["lon"] = _lon_raw
+                        if _time_raw is not None:
+                            _data["time"] = _time_raw
+                        _data[var] = _val_arr
+                        chunk_df = pd.DataFrame(_data)
+                        del _data, _val_arr, _lat_raw, _lon_raw, _time_raw
 
-                    # Spatial/temporal binning
-                    chunk_df, groupby_cols = oceanbench_class4_module.apply_binning(
-                        chunk_df,
-                        getattr(evaluator, "bin_specs", None),
-                    )
-                    # Profiles: each level is its own bin, reported at its depth
-                    # (format_class4_results), never pooled with the other levels.
-                    if _level_depth is not None:
-                        chunk_df["depth_bin"] = _level_depth
-                        groupby_cols = list(groupby_cols) + ["depth_bin"]
-                    if _groupby_cols_resolved is None:
-                        _groupby_cols_resolved = list(groupby_cols)
+                        # Spatial/temporal binning
+                        chunk_df, groupby_cols = oceanbench_class4_module.apply_binning(
+                            chunk_df,
+                            getattr(evaluator, "bin_specs", None),
+                        )
+                        # Profiles: each level is its own bin, reported at its depth
+                        # (format_class4_results), never pooled with the other levels.
+                        if _level_depth is not None:
+                            chunk_df["depth_bin"] = _level_depth
+                            groupby_cols = list(groupby_cols) + ["depth_bin"]
+                        if _groupby_cols_resolved is None:
+                            _groupby_cols_resolved = list(groupby_cols)
 
-                    if chunk_df.empty:
-                        continue
+                        if chunk_df.empty:
+                            continue
 
-                    # Resolve variable column name
-                    if var not in chunk_df.columns:
-                        for candidate in ("value", "variable"):
-                            if candidate in chunk_df.columns:
-                                chunk_df = chunk_df.rename(columns={candidate: var})
-                                break
-                    if var not in chunk_df.columns:
-                        continue
+                        # Resolve variable column name
+                        if var not in chunk_df.columns:
+                            for candidate in ("value", "variable"):
+                                if candidate in chunk_df.columns:
+                                    chunk_df = chunk_df.rename(columns={candidate: var})
+                                    break
+                        if var not in chunk_df.columns:
+                            continue
 
-                    chunk_df = chunk_df.dropna(subset=[var])
-                    if chunk_df.empty:
-                        continue
+                        chunk_df = chunk_df.dropna(subset=[var])
+                        if chunk_df.empty:
+                            continue
 
-                    obs_col = f"{var}_obs"
-                    model_col = f"{var}_model"
+                        obs_col = f"{var}_obs"
+                        model_col = f"{var}_model"
 
-                    # ── Interpolate model → observation locations ─────────
-                    if _grid2d is not None:
-                        # Fast path: direct pyinterp call (no xarray overhead)
-                        _obs_lon = chunk_df["lon"].values.astype(np.float64)
-                        _obs_lat = chunk_df["lat"].values.astype(np.float64)
-                        _members_vals = None
-                        if _member_grids is not None:
-                            _members_vals = np.stack([
-                                pyinterp.bivariate(_g, _obs_lon, _obs_lat,
-                                                   interpolator="bilinear", num_threads=1)
-                                for _g in _member_grids
-                            ])
-                            # NaN when a member is (an ensemble mean of all the members)
-                            _interp_vals = _members_vals.mean(axis=0)
+                        # ── Interpolate model → observation locations ─────────
+                        if _grid2d is not None:
+                            # Fast path: direct pyinterp call (no xarray overhead)
+                            _obs_lon = chunk_df["lon"].values.astype(np.float64)
+                            _obs_lat = chunk_df["lat"].values.astype(np.float64)
+                            _members_vals = None
+                            if _member_grids is not None:
+                                _members_vals = np.stack([
+                                    pyinterp.bivariate(_g, _obs_lon, _obs_lat,
+                                                       interpolator="bilinear", num_threads=1)
+                                    for _g in _member_grids
+                                ])
+                                # NaN when a member is (an ensemble mean of all the members)
+                                _interp_vals = _members_vals.mean(axis=0)
+                            else:
+                                _interp_vals = pyinterp.bivariate(
+                                    _grid2d, _obs_lon, _obs_lat,
+                                    interpolator="bilinear",
+                                    num_threads=1,
+                                )
+                            # Build minimal arrays for error computation
+                            obs_vals = chunk_df[var].values.astype(np.float64)
+                            mod_vals = _interp_vals
+
+                            # NaN mask (from interpolation boundary or missing obs)
+                            _valid = np.isfinite(obs_vals) & np.isfinite(mod_vals)
+                            if not _valid.all():
+                                obs_vals = obs_vals[_valid]
+                                mod_vals = mod_vals[_valid]
+                                if _members_vals is not None:
+                                    _members_vals = _members_vals[:, _valid]
+                                # Need lat for weights and bin cols for grouping
+                                _lat_arr = (
+                                    chunk_df["lat"].values[_valid]
+                                    if "lat" in chunk_df.columns
+                                    else None
+                                )
+                                _bin_df = (
+                                    chunk_df[_groupby_cols_resolved].iloc[
+                                        np.where(_valid)[0]
+                                    ]
+                                    if _groupby_cols_resolved
+                                    else None
+                                )
+                            else:
+                                _lat_arr = (
+                                    chunk_df["lat"].values
+                                    if "lat" in chunk_df.columns
+                                    else None
+                                )
+                                _bin_df = (
+                                    chunk_df[_groupby_cols_resolved]
+                                    if _groupby_cols_resolved
+                                    else None
+                                )
+                            del _obs_lon, _obs_lat, _interp_vals, _valid
                         else:
-                            _interp_vals = pyinterp.bivariate(
-                                _grid2d, _obs_lon, _obs_lat,
-                                interpolator="bilinear",
-                                num_threads=1,
+                            if _mdim is not None:
+                                raise RuntimeError(
+                                    f"ensemble forecast: no (lat, lon) grid for '{var}' to interpolate "
+                                    "its members to the observations"
+                                )
+                            _members_vals = None
+                            # Fallback: original xarray-based interpolation
+                            chunk_df = chunk_df.rename(columns={var: obs_col})
+                            chunk_df = oceanbench_class4_module.interpolate_model_on_obs(
+                                model_da_active,
+                                chunk_df,
+                                var,
+                                method=getattr(evaluator, "interp_method", "nearest"),
+                                cache=interp_cache,
                             )
-                        # Build minimal arrays for error computation
-                        obs_vals = chunk_df[var].values.astype(np.float64)
-                        mod_vals = _interp_vals
-
-                        # NaN mask (from interpolation boundary or missing obs)
-                        _valid = np.isfinite(obs_vals) & np.isfinite(mod_vals)
-                        if not _valid.all():
-                            obs_vals = obs_vals[_valid]
-                            mod_vals = mod_vals[_valid]
-                            if _members_vals is not None:
-                                _members_vals = _members_vals[:, _valid]
-                            # Need lat for weights and bin cols for grouping
-                            _lat_arr = (
-                                chunk_df["lat"].values[_valid]
-                                if "lat" in chunk_df.columns
-                                else None
-                            )
-                            _bin_df = (
-                                chunk_df[_groupby_cols_resolved].iloc[
-                                    np.where(_valid)[0]
-                                ]
-                                if _groupby_cols_resolved
-                                else None
-                            )
-                        else:
+                            if len(interp_cache) > 2:
+                                interp_cache.clear()
+                            chunk_df = chunk_df.dropna(subset=[obs_col, model_col])
+                            if chunk_df.empty:
+                                del chunk_df
+                                continue
+                            obs_vals = chunk_df[obs_col].values
+                            mod_vals = chunk_df[model_col].values
                             _lat_arr = (
                                 chunk_df["lat"].values
                                 if "lat" in chunk_df.columns
@@ -874,124 +920,114 @@ def _run_class4_with_raw_per_bins(
                                 if _groupby_cols_resolved
                                 else None
                             )
-                        del _obs_lon, _obs_lat, _interp_vals, _valid
-                    else:
-                        if _mdim is not None:
-                            raise RuntimeError(
-                                f"ensemble forecast: no (lat, lon) grid for '{var}' to interpolate "
-                                "its members to the observations"
-                            )
-                        _members_vals = None
-                        # Fallback: original xarray-based interpolation
-                        chunk_df = chunk_df.rename(columns={var: obs_col})
-                        chunk_df = oceanbench_class4_module.interpolate_model_on_obs(
-                            model_da_active,
-                            chunk_df,
-                            var,
-                            method=getattr(evaluator, "interp_method", "nearest"),
-                            cache=interp_cache,
-                        )
-                        if len(interp_cache) > 2:
-                            interp_cache.clear()
-                        chunk_df = chunk_df.dropna(subset=[obs_col, model_col])
-                        if chunk_df.empty:
-                            del chunk_df
+
+                        # ── Free the chunk DataFrame ASAP ─────────────────────
+                        del chunk_df
+
+                        if len(obs_vals) == 0:
+                            del obs_vals, mod_vals
                             continue
-                        obs_vals = chunk_df[obs_col].values
-                        mod_vals = chunk_df[model_col].values
-                        _lat_arr = (
-                            chunk_df["lat"].values
-                            if "lat" in chunk_df.columns
-                            else None
-                        )
-                        _bin_df = (
-                            chunk_df[_groupby_cols_resolved]
-                            if _groupby_cols_resolved
-                            else None
-                        )
 
-                    # ── Free the chunk DataFrame ASAP ─────────────────────
-                    del chunk_df
+                        diff = mod_vals - obs_vals
+                        if _members_vals is not None and _pass == 2:
+                            _crps_c = fair_crps(_members_vals - _lvl_bias, obs_vals)
+                            del _members_vals
+                        elif _members_vals is not None:
+                            _crps = fair_crps(_members_vals, obs_vals)
+                            _var = (_members_vals.var(axis=0, ddof=1) if _members_vals.shape[0] > 1
+                                    else np.zeros_like(diff))
+                            _n_members = float(_members_vals.shape[0])
+                            del _members_vals
 
-                    if len(obs_vals) == 0:
-                        del obs_vals, mod_vals
-                        continue
+                        if _lat_arr is not None:
+                            w = np.cos(np.deg2rad(_lat_arr.astype(np.float64)))
+                        else:
+                            w = np.ones(len(diff), dtype=np.float64)
 
-                    diff = mod_vals - obs_vals
-                    if _members_vals is not None:
-                        _crps = fair_crps(_members_vals, obs_vals)
-                        _var = (_members_vals.var(axis=0, ddof=1) if _members_vals.shape[0] > 1
-                                else np.zeros_like(diff))
-                        _n_members = float(_members_vals.shape[0])
-                        del _members_vals
+                        # Accumulate weighted partial stats per bin
+                        agg_cols = list(_groupby_cols_resolved) if _groupby_cols_resolved else []
 
-                    if _lat_arr is not None:
-                        w = np.cos(np.deg2rad(_lat_arr.astype(np.float64)))
-                    else:
-                        w = np.ones(len(diff), dtype=np.float64)
+                        if _pass == 2:
+                            if agg_cols and _bin_df is not None:
+                                df_agg = _bin_df.copy()
+                                df_agg["w_crps_c"] = w * _crps_c
+                                grouped = df_agg.groupby(
+                                    agg_cols, observed=True, dropna=True,
+                                ).sum(numeric_only=True)
+                                for name, row in grouped.iterrows():
+                                    s = bin_stats[name]
+                                    s["w_crps_c"] = s.get("w_crps_c", 0.0) + row["w_crps_c"]
+                                del df_agg, grouped
+                            else:
+                                s = bin_stats["global"]
+                                s["w_crps_c"] = s.get("w_crps_c", 0.0) + float((w * _crps_c).sum())
+                            del obs_vals, mod_vals, diff, w, _lat_arr, _bin_df, _crps_c
+                            gc.collect()
+                            if _malloc_trim is not None:
+                                _malloc_trim(0)
+                            continue
+                        _lvl_w += float(w.sum())
+                        _lvl_werr += float((w * diff).sum())
 
-                    # Accumulate weighted partial stats per bin
-                    agg_cols = list(_groupby_cols_resolved) if _groupby_cols_resolved else []
+                        if agg_cols and _bin_df is not None:
+                            df_agg = _bin_df.copy()
+                            df_agg["w_sq_err"] = w * diff ** 2
+                            df_agg["w_abs_err"] = w * np.abs(diff)
+                            df_agg["w_err"] = w * diff
+                            df_agg["w_sum"] = w
+                            df_agg["count"] = 1.0
+                            if _mdim is not None:
+                                df_agg["w_crps"] = w * _crps
+                                df_agg["w_var"] = w * _var
 
-                    if agg_cols and _bin_df is not None:
-                        df_agg = _bin_df.copy()
-                        df_agg["w_sq_err"] = w * diff ** 2
-                        df_agg["w_abs_err"] = w * np.abs(diff)
-                        df_agg["w_err"] = w * diff
-                        df_agg["w_sum"] = w
-                        df_agg["count"] = 1.0
-                        if _mdim is not None:
-                            df_agg["w_crps"] = w * _crps
-                            df_agg["w_var"] = w * _var
+                            grouped = df_agg.groupby(
+                                agg_cols, observed=True, dropna=True,
+                            ).sum(numeric_only=True)
 
-                        grouped = df_agg.groupby(
-                            agg_cols, observed=True, dropna=True,
-                        ).sum(numeric_only=True)
+                            for name, row in grouped.iterrows():
+                                if name not in bin_stats:
+                                    bin_stats[name] = {
+                                        "count": 0.0, "w_sum": 0.0,
+                                        "w_sq": 0.0, "w_abs": 0.0, "w_err": 0.0,
+                                    }
+                                s = bin_stats[name]
+                                s["count"] += row["count"]
+                                s["w_sum"] += row["w_sum"]
+                                s["w_sq"] += row["w_sq_err"]
+                                s["w_abs"] += row["w_abs_err"]
+                                s["w_err"] += row["w_err"]
+                                if _mdim is not None:
+                                    s["w_crps"] = s.get("w_crps", 0.0) + row["w_crps"]
+                                    s["w_var"] = s.get("w_var", 0.0) + row["w_var"]
+                                    s["n_members"] = _n_members
 
-                        for name, row in grouped.iterrows():
+                            del df_agg, grouped
+                        else:
+                            name = "global"
                             if name not in bin_stats:
                                 bin_stats[name] = {
                                     "count": 0.0, "w_sum": 0.0,
                                     "w_sq": 0.0, "w_abs": 0.0, "w_err": 0.0,
                                 }
                             s = bin_stats[name]
-                            s["count"] += row["count"]
-                            s["w_sum"] += row["w_sum"]
-                            s["w_sq"] += row["w_sq_err"]
-                            s["w_abs"] += row["w_abs_err"]
-                            s["w_err"] += row["w_err"]
+                            s["count"] += len(diff)
+                            s["w_sum"] += float(w.sum())
+                            s["w_sq"] += float((w * diff ** 2).sum())
+                            s["w_abs"] += float((w * np.abs(diff)).sum())
+                            s["w_err"] += float((w * diff).sum())
                             if _mdim is not None:
-                                s["w_crps"] = s.get("w_crps", 0.0) + row["w_crps"]
-                                s["w_var"] = s.get("w_var", 0.0) + row["w_var"]
+                                s["w_crps"] = s.get("w_crps", 0.0) + float((w * _crps).sum())
+                                s["w_var"] = s.get("w_var", 0.0) + float((w * _var).sum())
                                 s["n_members"] = _n_members
 
-                        del df_agg, grouped
-                    else:
-                        name = "global"
-                        if name not in bin_stats:
-                            bin_stats[name] = {
-                                "count": 0.0, "w_sum": 0.0,
-                                "w_sq": 0.0, "w_abs": 0.0, "w_err": 0.0,
-                            }
-                        s = bin_stats[name]
-                        s["count"] += len(diff)
-                        s["w_sum"] += float(w.sum())
-                        s["w_sq"] += float((w * diff ** 2).sum())
-                        s["w_abs"] += float((w * np.abs(diff)).sum())
-                        s["w_err"] += float((w * diff).sum())
-                        if _mdim is not None:
-                            s["w_crps"] = s.get("w_crps", 0.0) + float((w * _crps).sum())
-                            s["w_var"] = s.get("w_var", 0.0) + float((w * _var).sum())
-                            s["n_members"] = _n_members
-
-                    del obs_vals, mod_vals, diff, w, _lat_arr, _bin_df
-                    _chunk_count += 1
-                    gc.collect()
-                    # Release glibc malloc arenas back to the OS after every
-                    # chunk.  malloc_trim(0) is cheap (~1 ms) and essential
-                    # to avoid accumulating GiB of "unmanaged memory".
-                    if _malloc_trim is not None:
-                        _malloc_trim(0)
+                        del obs_vals, mod_vals, diff, w, _lat_arr, _bin_df
+                        _chunk_count += 1
+                        gc.collect()
+                        # Release glibc malloc arenas back to the OS after every
+                        # chunk.  malloc_trim(0) is cheap (~1 ms) and essential
+                        # to avoid accumulating GiB of "unmanaged memory".
+                        if _malloc_trim is not None:
+                            _malloc_trim(0)
 
                 # Clean up this depth level
                 del _grid2d, _member_grids
@@ -1027,6 +1063,8 @@ def _run_class4_with_raw_per_bins(
                     res["ens_var"] = float(s["w_var"] / ws)
                     res["spread"] = float(np.sqrt(res["ens_var"]))
                     res["n_members"] = float(s["n_members"])
+                    if "w_crps_c" in s:
+                        res["crps_c"] = float(s["w_crps_c"] / ws)
                 bin_results.append(res)
 
             # Global aggregation: the scores of all the points, not the mean of the bins' scores

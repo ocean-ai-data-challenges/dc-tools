@@ -311,13 +311,18 @@ def _iter_batch_items(path: str):
         try:
             data = _json_lib.loads(raw)  # type: ignore[union-attr]
         except Exception as exc:
-            _file_size = len(raw)
-            del raw
-            logger.warning(
-                f"Skipping corrupted batch file {path!r} "
-                f"({_file_size:,} bytes): {exc}"
-            )
-            return
+            # orjson rejects the NaN tokens json.dump writes (a NaN score dropped the whole
+            # batch): the standard parser reads them
+            try:
+                data = json.loads(raw)
+            except Exception:
+                _file_size = len(raw)
+                del raw
+                logger.warning(
+                    f"Skipping corrupted batch file {path!r} "
+                    f"({_file_size:,} bytes): {exc}"
+                )
+                return
         del raw
         if not isinstance(data, list):
             return

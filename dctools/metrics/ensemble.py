@@ -9,7 +9,12 @@ the deterministic models), and its members through
   (an M-member ensemble is not penalised for having M members). It is the MAE for one member;
 - ``spread``: the root of the mean ensemble variance (unbiased, ddof 1);
 - ``ssr``: the spread-skill ratio ``sqrt((M + 1) / M) * spread / rmse(ensemble mean)``
-  (Fortin et al. 2014), 1 for a reliable ensemble, < 1 under-dispersive.
+  (Fortin et al. 2014), 1 for a reliable ensemble, < 1 under-dispersive;
+- ``crps_c`` and ``ssr_c``: the same once the bias is removed, as ``crmse`` is the rmse once the
+  bias is removed. The bias is that of the ensemble mean over the points the scores pool (``bias``):
+  ``crps_c`` is the CRPS of the members minus it, ``ssr_c`` divides the spread by ``crmse``. They
+  are what an SSH score reads, the model's and the observations' reference surfaces differing by
+  a constant.
 
 The points are weighted as in the deterministic scores (cos(latitude)). Class 4 bins carry crps,
 ens_var and n_members, pooled over bins by oceanbench's ``pool_bins`` with the other scores.
@@ -23,7 +28,7 @@ import numpy as np
 import xarray as xr
 
 MEMBER_DIMS = ("member", "ens", "realization", "number")
-ENSEMBLE_SCORES = ("crps", "spread", "ssr")
+ENSEMBLE_SCORES = ("crps", "spread", "ssr", "crps_c", "ssr_c")
 
 
 def member_dim(ds: Any) -> Optional[str]:
@@ -61,8 +66,9 @@ def point_sums(members: np.ndarray, obs: np.ndarray, weights: Optional[np.ndarra
                ) -> Dict[str, float]:
     """Weighted sums over points (the members finite and the observation too) for pooling.
 
-    ``members`` (M, N), ``obs`` (N). Returns w_sum, w_crps, w_var, w_sq (squared error of the
-    ensemble mean), count, n_members.
+    ``members`` (M, N), ``obs`` (N). Returns w_sum, w_crps, w_var, w_sq and w_err (squared and
+    signed error of the ensemble mean), w_crps_c (crps of the members centred on the points' bias),
+    count, n_members.
     """
     x = np.asarray(members, dtype=np.float64)
     y = np.asarray(obs, dtype=np.float64).ravel()
@@ -72,34 +78,49 @@ def point_sums(members: np.ndarray, obs: np.ndarray, weights: Optional[np.ndarra
     x, y, w = x[:, ok], y[ok], w[ok]
     m = x.shape[0]
     out = {"w_sum": float(w.sum()), "count": float(y.size), "n_members": float(m),
-           "w_crps": 0.0, "w_var": 0.0, "w_sq": 0.0}
+           "w_crps": 0.0, "w_var": 0.0, "w_sq": 0.0, "w_err": 0.0, "w_crps_c": 0.0}
     if y.size == 0:
         return out
     out["w_crps"] = float((w * fair_crps(x, y)).sum())
     if m > 1:
         out["w_var"] = float((w * x.var(axis=0, ddof=1)).sum())
-    out["w_sq"] = float((w * (x.mean(axis=0) - y) ** 2).sum())
+    err = x.mean(axis=0) - y
+    out["w_sq"] = float((w * err ** 2).sum())
+    out["w_err"] = float((w * err).sum())
+    bias = out["w_err"] / out["w_sum"] if out["w_sum"] > 0 else 0.0
+    out["w_crps_c"] = float((w * fair_crps(x - bias, y)).sum())
     return out
 
 
 def add_sums(acc: Dict[str, float], sums: Dict[str, float]) -> Dict[str, float]:
-    for key in ("w_sum", "count", "w_crps", "w_var", "w_sq"):
+    for key in ("w_sum", "count", "w_crps", "w_var", "w_sq", "w_err", "w_crps_c"):
         acc[key] = acc.get(key, 0.0) + sums.get(key, 0.0)
     acc["n_members"] = sums.get("n_members", acc.get("n_members", 0.0))
     return acc
 
 
 def scores_from_sums(s: Dict[str, float]) -> Dict[str, float]:
-    """crps, spread, ssr (and ens_var, the bin's mean variance, for pooling) from weighted sums."""
+    """Ensemble scores from weighted sums.
+
+    crps, spread, ssr, crps_c, ssr_c, and ens_var (the mean variance, for pooling).
+    """
     ws = s.get("w_sum", 0.0)
     if not ws:
         return {}
     m = s.get("n_members", 0.0)
     out = {"crps": s["w_crps"] / ws, "ens_var": s["w_var"] / ws, "n_members": m}
     out["spread"] = float(np.sqrt(out["ens_var"]))
-    rmse = float(np.sqrt(s["w_sq"] / ws))
-    out["ssr"] = (float(np.sqrt((m + 1.0) / m) * out["spread"] / rmse)
-                  if m > 1 and rmse > 0 else float("nan"))
+    mse = s["w_sq"] / ws
+    bias = s.get("w_err", 0.0) / ws
+    rmse, crmse = float(np.sqrt(mse)), float(np.sqrt(max(mse - bias ** 2, 0.0)))
+    out["crps_c"] = s.get("w_crps_c", 0.0) / ws
+    # the ratios only when defined (one member, or a perfect ensemble mean: none)
+    if m > 1:
+        factor = float(np.sqrt((m + 1.0) / m))
+        if rmse > 0:
+            out["ssr"] = factor * out["spread"] / rmse
+        if crmse > 0:
+            out["ssr_c"] = factor * out["spread"] / crmse
     return out
 
 
@@ -126,7 +147,8 @@ def gridded_sums(members: xr.DataArray, ref: xr.DataArray, dim: str) -> Dict[str
     members = members.transpose(dim, *others)
     ref = ref.transpose(*others)
     if ref.shape != members.shape[1:]:
-        raise ValueError(f"ensemble {dict(members.sizes)} and reference {dict(ref.sizes)} grids differ")
+        raise ValueError(
+            f"ensemble {dict(members.sizes)} and reference {dict(ref.sizes)} grids differ")
     w = _lat_weights(ref)
     x = np.asarray(members.values, dtype=np.float64).reshape(members.shape[0], -1)
     return point_sums(x, np.asarray(ref.values).ravel(), None if w is None else w.ravel())
