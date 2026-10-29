@@ -957,10 +957,12 @@ def _run_class4_with_raw_per_bins(
                                 for name, row in grouped.iterrows():
                                     s = bin_stats[name]
                                     s["w_crps_c"] = s.get("w_crps_c", 0.0) + row["w_crps_c"]
+                                    s["lvl_bias"] = _lvl_bias
                                 del df_agg, grouped
                             else:
                                 s = bin_stats["global"]
                                 s["w_crps_c"] = s.get("w_crps_c", 0.0) + float((w * _crps_c).sum())
+                                s["lvl_bias"] = _lvl_bias
                             del obs_vals, mod_vals, diff, w, _lat_arr, _bin_df, _crps_c
                             gc.collect()
                             if _malloc_trim is not None:
@@ -1065,6 +1067,16 @@ def _run_class4_with_raw_per_bins(
                     res["n_members"] = float(s["n_members"])
                     if "w_crps_c" in s:
                         res["crps_c"] = float(s["w_crps_c"] / ws)
+                    # the bin's ratios (maps); the centred one removes the level's bias, as crps_c
+                    _m = res["n_members"]
+                    if _m > 1:
+                        _f = float(np.sqrt((_m + 1.0) / _m))
+                        if res["rmse"] > 0:
+                            res["ssr"] = _f * res["spread"] / res["rmse"]
+                        _b = s.get("lvl_bias", 0.0)
+                        _msc = res["mse"] - 2.0 * _b * res["bias"] + _b ** 2
+                        if "w_crps_c" in s and _msc > 0:
+                            res["ssr_c"] = _f * res["spread"] / float(np.sqrt(_msc))
                 bin_results.append(res)
 
             # Global aggregation: the scores of all the points, not the mean of the bins' scores

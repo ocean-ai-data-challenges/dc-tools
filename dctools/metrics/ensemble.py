@@ -126,34 +126,6 @@ def scores_from_sums(s: Dict[str, float]) -> Dict[str, float]:
 
 # --------------------------------------------------------------------------- gridded references
 
-def _lat_weights(da: xr.DataArray) -> Optional[np.ndarray]:
-    lat = next((c for c in ("lat", "latitude") if c in da.coords), None)
-    if lat is None:
-        return None
-    w = np.cos(np.deg2rad(np.asarray(da[lat].values, dtype=np.float64)))
-    if da[lat].ndim == 1:
-        shape = [1] * da.ndim
-        shape[da.dims.index(da[lat].dims[0])] = w.size
-        return np.broadcast_to(w.reshape(shape), da.shape)
-    return np.broadcast_to(w, da.shape)
-
-
-def gridded_sums(members: xr.DataArray, ref: xr.DataArray, dim: str) -> Dict[str, float]:
-    """Weighted sums of an ensemble field (``dim`` + the reference's dims) against a gridded one."""
-    ref = ref.squeeze(drop=True)
-    members = members.squeeze([d for d in members.dims if d != dim and members.sizes[d] == 1],
-                              drop=True)
-    others = [d for d in members.dims if d != dim]
-    members = members.transpose(dim, *others)
-    ref = ref.transpose(*others)
-    if ref.shape != members.shape[1:]:
-        raise ValueError(
-            f"ensemble {dict(members.sizes)} and reference {dict(ref.sizes)} grids differ")
-    w = _lat_weights(ref)
-    x = np.asarray(members.values, dtype=np.float64).reshape(members.shape[0], -1)
-    return point_sums(x, np.asarray(ref.values).ravel(), None if w is None else w.ravel())
-
-
 def _find(ds: xr.Dataset, variable: Any, aliases: Dict[str, Any]) -> Optional[str]:
     """The name of ``variable`` (an oceanbench Variable or a name) in ``ds``."""
     if isinstance(variable, str):
@@ -167,23 +139,13 @@ def _find(ds: xr.Dataset, variable: Any, aliases: Dict[str, Any]) -> Optional[st
     return next((raw for raw, v in aliases.items() if v == variable and raw in ds.data_vars), None)
 
 
-def gridded_ensemble_scores(
-    pred: xr.Dataset,
-    ref: xr.Dataset,
-    variables: List[Any],
-    depth_levels: Optional[List[Any]],
-    aliases: Optional[Dict[str, Any]] = None,
-    labels: Optional[Any] = None,
-) -> Dict[str, Dict[str, float]]:
-    """{score: {label: value}} of an ensemble against a gridded reference (e.g. GLORYS).
+def gridded_levels(pred: xr.Dataset, ref: xr.Dataset, variables: List[Any],
+                   depth_levels: Optional[List[Any]], aliases: Optional[Dict[str, Any]] = None):
+    """(variable, level, has_depth, name in pred, pred level, ref level) of each scored level.
 
-    Same variables, depth levels and labels as the deterministic gridded scores (``labels(var,
-    level, has_depth)``), one (member, lat, lon) slice in memory at a time.
+    The variables, depth levels (those of both datasets within 1e-3 m) and the surface of the
+    variables without depth, as the deterministic gridded scores have them.
     """
-    dim = member_dim(pred)
-    out: Dict[str, Dict[str, float]] = {k: {} for k in ENSEMBLE_SCORES}
-    if dim is None:
-        return {}
     aliases = aliases or {}
     for variable in variables:
         p_name, r_name = _find(pred, variable, aliases), _find(ref, variable, aliases)
@@ -202,9 +164,143 @@ def gridded_ensemble_scores(
             else:
                 p_lv = p_da.isel(depth=0) if "depth" in p_da.dims else p_da
                 r_lv = r_da.isel(depth=0) if "depth" in r_da.dims else r_da
-            scores = scores_from_sums(gridded_sums(p_lv, r_lv, dim))
-            label = labels(variable, level, has_depth) if labels else f"{level} {p_name}"
-            for k in ENSEMBLE_SCORES:
-                if k in scores:
-                    out[k][label] = scores[k]
-    return {k: v for k, v in out.items() if v}
+            yield variable, level, has_depth, p_name, p_lv, r_lv
+
+
+def level_arrays(members: xr.DataArray, ref: xr.DataArray, dim: Optional[str]):
+    """(members (M, lat, lon), ref (lat, lon), lat, lon) arrays of one level.
+
+    A deterministic forecast (``dim`` None) is a one-member ensemble.
+    """
+    ref = ref.squeeze(drop=True)
+    if dim is None:
+        members = members.squeeze(drop=True).expand_dims("__member__")
+        dim = "__member__"
+    else:
+        members = members.squeeze([d for d in members.dims if d != dim and members.sizes[d] == 1],
+                                  drop=True)
+    others = [d for d in members.dims if d != dim]
+    members = members.transpose(dim, *others)
+    ref = ref.transpose(*others)
+    if ref.shape != members.shape[1:]:
+        raise ValueError(
+            f"ensemble {dict(members.sizes)} and reference {dict(ref.sizes)} grids differ")
+    lat = next(c for c in ("lat", "latitude") if c in ref.coords)
+    lon = next(c for c in ("lon", "longitude") if c in ref.coords)
+    return (np.asarray(members.values, dtype=np.float64),
+            np.asarray(ref.values, dtype=np.float64),
+            np.asarray(ref[lat].values, dtype=np.float64),
+            np.asarray(ref[lon].values, dtype=np.float64))
+
+
+def gridded_sums(members: xr.DataArray, ref: xr.DataArray, dim: str) -> Dict[str, float]:
+    """Weighted sums of an ensemble field (``dim`` + the reference's dims) against a gridded one."""
+    x, y, lat, _ = level_arrays(members, ref, dim)
+    w = np.broadcast_to(np.cos(np.deg2rad(lat))[:, None], y.shape) if y.ndim == 2 else None
+    return point_sums(x.reshape(x.shape[0], -1), y.ravel(), None if w is None else w.ravel())
+
+
+def ensemble_bins(x: np.ndarray, y: np.ndarray, lat: np.ndarray, lon: np.ndarray,
+                  bin_resolution: float, bias: float) -> List[Dict[str, Any]]:
+    """Per-bin crps, crps_c, spread, ssr, ssr_c of one ensemble level.
+
+    ``x`` (M, lat, lon) against ``y`` (lat, lon), in (lat, lon) bins of ``bin_resolution``
+    degrees; the centred scores remove the level's ``bias`` (that of the pooled scores), the same
+    in every bin.
+    """
+    m = x.shape[0]
+    lat_bins = np.arange(-90, 90 + bin_resolution, bin_resolution)
+    lon_bins = np.arange(-180, 180 + bin_resolution, bin_resolution)
+    n_lon = len(lon_bins) - 1
+    li = np.clip(np.digitize(lat, lat_bins) - 1, 0, len(lat_bins) - 2)
+    lj = np.clip(np.digitize(lon, lon_bins) - 1, 0, n_lon - 1)
+    idx = (li[:, None] * n_lon + lj[None, :]).ravel()
+    xf, yf = x.reshape(m, -1), y.ravel()
+    ok = np.isfinite(yf) & np.all(np.isfinite(xf), axis=0)
+    xf, yf, idx = xf[:, ok], yf[ok], idx[ok]
+    if yf.size == 0:
+        return []
+    err = xf.mean(axis=0) - yf
+    size = len(lat_bins) - 1
+    size *= n_lon
+    count = np.bincount(idx, minlength=size)
+
+    def _sum(v):
+        return np.bincount(idx, weights=v, minlength=size)
+
+    s_crps, s_crps_c = _sum(fair_crps(xf, yf)), _sum(fair_crps(xf - bias, yf))
+    s_var = _sum(xf.var(axis=0, ddof=1)) if m > 1 else np.zeros(size)
+    s_sq, s_sq_c = _sum(err ** 2), _sum((err - bias) ** 2)
+    factor = float(np.sqrt((m + 1.0) / m)) if m > 1 else None
+    out = []
+    for b in np.flatnonzero(count):
+        n = float(count[b])
+        spread = float(np.sqrt(s_var[b] / n))
+        entry: Dict[str, Any] = {
+            "lat_bin": {"left": float(lat_bins[b // n_lon]),
+                        "right": float(lat_bins[b // n_lon + 1])},
+            "lon_bin": {"left": float(lon_bins[b % n_lon]),
+                        "right": float(lon_bins[b % n_lon + 1])},
+            "crps": float(s_crps[b] / n), "crps_c": float(s_crps_c[b] / n), "spread": spread,
+        }
+        rmse, crmse = float(np.sqrt(s_sq[b] / n)), float(np.sqrt(s_sq_c[b] / n))
+        if factor is not None and rmse > 0:
+            entry["ssr"] = factor * spread / rmse
+        if factor is not None and crmse > 0:
+            entry["ssr_c"] = factor * spread / crmse
+        out.append(entry)
+    return out
+
+
+def gridded_ensemble_scores(
+    pred: xr.Dataset,
+    ref: xr.Dataset,
+    variables: List[Any],
+    depth_levels: Optional[List[Any]],
+    aliases: Optional[Dict[str, Any]] = None,
+    labels: Optional[Any] = None,
+    bin_resolution: Optional[float] = None,
+    spectra: bool = True,
+) -> Any:
+    """Scores of a forecast against a gridded reference (e.g. GLORYS), level by level.
+
+    Same variables, depth levels and labels as the deterministic gridded scores (``labels(var,
+    level, has_depth)``), one (member, lat, lon) slice in memory at a time:
+
+    * an ensemble: crps, spread, ssr, crps_c, ssr_c (``ENSEMBLE_SCORES``) and, with
+      ``bin_resolution``, their per-bin maps;
+    * any forecast (a deterministic one as a single member), with ``spectra``: the energy and
+      error by band of scales (``dctools.metrics.spectra``).
+
+    Returns ``{score: {label: value}}``, or ``(scores, {variable: [bins]})`` with
+    ``bin_resolution`` (each bin carries the level's ``depth`` when the variable has one).
+    """
+    from dctools.metrics.spectra import band_scores, band_sums
+
+    dim = member_dim(pred)
+    out: Dict[str, Dict[str, float]] = {}
+    per_bins: Dict[str, List[Dict[str, Any]]] = {}
+    for variable, level, has_depth, p_name, p_lv, r_lv in gridded_levels(
+            pred, ref, variables, depth_levels, aliases):
+        label = labels(variable, level, has_depth) if labels else f"{level} {p_name}"
+        x, y, lat, lon = level_arrays(p_lv, r_lv, dim)
+        scores: Dict[str, float] = {}
+        if dim is not None:
+            w = np.broadcast_to(np.cos(np.deg2rad(lat))[:, None], y.shape)
+            sums = point_sums(x.reshape(x.shape[0], -1), y.ravel(), w.ravel())
+            scores.update({k: v for k, v in scores_from_sums(sums).items() if k in ENSEMBLE_SCORES})
+            if bin_resolution is not None:
+                bias = sums["w_err"] / sums["w_sum"] if sums["w_sum"] > 0 else 0.0
+                bins = ensemble_bins(x, y, lat, lon, bin_resolution, bias)
+                if has_depth and level is not None:
+                    for b in bins:
+                        b["depth"] = float(getattr(level, "value", level))
+                per_bins.setdefault(p_name, []).extend(bins)
+        if spectra and y.ndim == 2:
+            scores.update(band_scores(band_sums(x, y, lat, lon), x.shape[0]))
+        for k, v in scores.items():
+            out.setdefault(k, {})[label] = v
+        del x, y
+    if bin_resolution is not None:
+        return out, per_bins
+    return out

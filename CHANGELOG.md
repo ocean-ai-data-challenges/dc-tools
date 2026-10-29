@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added (2026-10-29)
 
+- **Energy by band of scales** (`metrics/spectra.py`), the probabilistic energy spectra of the
+  DC2 proposal (WeatherBench 2): against a gridded reference, latitude rows cut into 64-point
+  ocean segments, detrended, Hann-windowed, their variance summed per band of wavelengths
+  (>500, 200-500, 100-200, <100 km): `energy_ratio_<band>` (members), `energy_ratio_mean_<band>`
+  (ensemble mean), `err_ratio_<band>`. Any forecast (a deterministic one is a single member).
+- Ensemble maps: the Class 4 bins carry `ssr` / `ssr_c`; against GLORYS, the bins of the gridded
+  levels get `crps`, `crps_c`, `spread`, `ssr`, `ssr_c` (merged into the deterministic bins).
+
 - `crps_c` and `ssr_c`: the ensemble scores once the bias (that of `crmse`, the ensemble mean's
   over the pooled points) is removed, for every variable; a second pass over the observation
   points in the Class 4 runner (~1.5x its time). What SSH reads (its reference-surface offset).

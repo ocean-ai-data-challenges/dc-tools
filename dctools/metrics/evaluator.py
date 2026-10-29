@@ -839,9 +839,11 @@ def _nan_to_none(obj: Any) -> Any:
 
 def _gridded_ensemble_results(
     pred_members: Any, ref_data: Any, metric: MetricComputer,
-) -> Dict[str, Dict[str, float]]:
-    """crps, spread and ssr of an ensemble against a gridded reference, under the labels of the
-    deterministic gridded scores (oceanbench's rmsd: surface, 50, 200, 550 m)."""
+) -> "tuple[Dict[str, Dict[str, float]], Dict[str, list]]":
+    """Scores of a forecast against a gridded reference, under the labels of the deterministic
+    gridded scores (oceanbench's rmsd: surface, 50, 200, 550 m): energy by band of scales for any
+    forecast, crps / spread / ssr (and their maps, with the metric's bin_resolution) for an
+    ensemble. Returns (scores, per-bin maps)."""
     from dctools.metrics.oceanbench_metrics import OCEANBENCH_VARIABLES
     from oceanbench.core.rmsd import DEPTH_LABELS, VARIABLE_LABELS
 
@@ -852,13 +854,39 @@ def _gridded_ensemble_results(
         return (f"{DEPTH_LABELS[level]} {name}" if has_depth else f"surface {name}").capitalize()
 
     has_depth = "depth" in getattr(pred_members, "dims", ()) and "depth" in getattr(ref_data, "dims", ())
-    return gridded_ensemble_scores(
+    bin_resolution = getattr(metric, "bin_resolution", None)
+    out = gridded_ensemble_scores(
         pred_members, ref_data,
         variables=list(metric.oceanbench_eval_variables or metric.eval_variables or []),
         depth_levels=list(DEPTH_LABELS) if has_depth else None,
         aliases=OCEANBENCH_VARIABLES,
         labels=_label,
+        bin_resolution=bin_resolution,
     )
+    return out if bin_resolution is not None else (out, {})
+
+
+def _merge_ensemble_bins(per_bins: Dict[str, list], ensemble_bins: Dict[str, list]) -> None:
+    """Add the ensemble scores of each (variable, lat, lon, level) bin to its deterministic one
+    (the gridded per-bins maps: same bins, the level at the left of their depth interval)."""
+    def _key(lat, lon, depth):
+        return (round(float(lat), 3), round(float(lon), 3),
+                None if depth is None else round(float(depth), 3))
+
+    for var, bins in ensemble_bins.items():
+        det = per_bins.get(var)
+        if not det:
+            continue
+        index = {}
+        for b in det:
+            d = b.get("depth_bin")
+            index[_key(b["lat_bin"]["left"], b["lon_bin"]["left"],
+                       d.get("left") if isinstance(d, dict) else None)] = b
+        for e in bins:
+            target = index.get(_key(e["lat_bin"]["left"], e["lon_bin"]["left"], e.get("depth")))
+            if target is not None:
+                target.update({k: v for k, v in e.items()
+                               if k not in ("lat_bin", "lon_bin", "depth")})
 
 
 def compute_metric(
@@ -2076,10 +2104,15 @@ def compute_metric(
 
                     results[metric.get_metric_name()] = res_dict
 
-            if pred_members is not None and ref_data is not None:
+            # Energy by band of scales (any forecast), ensemble scores and maps (ensembles)
+            if ref_data is not None:
                 with dask.config.set(scheduler='synchronous'):
-                    results.update(_gridded_ensemble_results(
-                        pred_members, ref_data, list_metrics[0]))
+                    _g_scores, _g_bins = _gridded_ensemble_results(
+                        pred_members if pred_members is not None else pred_data,
+                        ref_data, list_metrics[0])
+                results.update(_g_scores)
+                if _g_bins and _per_bins_data:
+                    _merge_ensemble_bins(_per_bins_data, _g_bins)
 
             # Convert from nested Format1 to Format2
             results = convert_format1_to_format2(results)

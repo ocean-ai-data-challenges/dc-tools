@@ -250,3 +250,16 @@ def test_a_nan_score_does_not_drop_its_batch(tmp_path):
     # undefined ratios are not emitted: a perfect ensemble mean has no ssr
     assert "ssr" not in scores_from_sums(point_sums(np.array([[-1.0, 1.0], [1.0, -1.0]]),
                                                     np.zeros(2)))
+
+
+def test_class4_bins_carry_the_spread_skill_ratios():
+    field = _field()
+    obs = _obs(field)
+    rng = np.random.default_rng(8)
+    obs = obs.assign(ssh=obs["ssh"] + 0.1 * rng.standard_normal(obs.sizes["n_points"]))
+    members = _ensemble(field, [0.0] * 6) + 0.1 * rng.standard_normal((6,) + field.shape)
+    _, per_bins = _class4(members + 0.5, obs)
+    bins = [b for b in per_bins["ssh"] if b["count"] >= 5]
+    assert bins and all("ssr" in b and "ssr_c" in b for b in bins)
+    # the offset makes ssr small; removing the level's bias brings it back near the reliable 1
+    assert np.median([b["ssr"] for b in bins]) < 0.5 < np.median([b["ssr_c"] for b in bins])
