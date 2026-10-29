@@ -309,3 +309,12 @@ def test_observation_points_are_kept_within_the_task_window():
     assert out["U"].values.tolist() == [1.0, 2.0, 3.0]
     assert _points_in_time_bounds(ds, "n_points", (pd.Timestamp("2025-01-01"), pd.Timestamp("2025-01-02"))) is None
     assert _points_in_time_bounds(ds, "n_points", None) is ds
+
+
+def test_gridded_and_observation_scores_share_variable_names():
+    from dctools.metrics.evaluator import _canonical_variable_label as name
+    assert name("Surface height") == "Surface ssh"
+    assert name("50m eastward velocity") == "50m u_current"
+    assert name("550m northward velocity") == "550m v_current"
+    assert name("200m temperature") == "200m temperature"
+    assert name("15m u_current") == "15m u_current"          # observation labels unchanged

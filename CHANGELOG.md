@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (2026-10-29)
 
+- **Leaderboard baselines**: they were looked for in `<results_directory>/../../<challenge>/
+  leaderboard_results`, which only holds for the default output directory; elsewhere (a cluster
+  scratch) the dcleaderboard package's demonstration results (noisy synthetic models) were shown
+  as baselines. The challenge declares its root (`PROJECT_ROOT`, `leaderboard_root` in the YAML
+  for a test run), and demonstration data are never used.
+- The gridded scores' variables are named as the observation scores' ("Surface height" ->
+  "Surface ssh", "50m eastward velocity" -> "50m u_current"): one name per variable in every table.
+
 - **A NaN score dropped its whole batch**: `json.dump` wrote a NaN token, the consolidation's
   orjson rejected the file and skipped it as corrupted (all of a reference's results lost for a
   one-point level with a perfect ensemble mean). Batches are written with NaN as null, read back

@@ -826,6 +826,33 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
             pass
 
 
+# oceanbench's names of the gridded scores' variables -> those of the observation scores (the
+# evaluation variables), so that a variable has one name in every table: "Surface height" and
+# "Surface ssh" were the same SSH, "50m eastward velocity" and "50m u_current" the same U.
+_GRIDDED_VARIABLE_NAMES = {
+    "height": "ssh", "surface height": "ssh", "sea surface height": "ssh",
+    "eastward velocity": "u_current", "northward velocity": "v_current",
+    "temperature": "temperature", "salinity": "salinity",
+    "sea surface temperature": "sst", "sea surface salinity": "sss",
+    "mixed layer thickness": "mld",
+}
+
+
+def _canonical_variable_label(label: Any) -> Any:
+    """"Surface height" -> "Surface ssh", "50m eastward velocity" -> "50m u_current"."""
+    if not isinstance(label, str):
+        return label
+    import re as _re
+    m = _re.match(r"^(surface|\d+(?:\.\d+)?m)\s+(.+)$", label.strip(), flags=_re.IGNORECASE)
+    depth, name = (m.group(1), m.group(2)) if m else ("Surface", label.strip())
+    while name.lower().startswith("surface ") and name.lower() not in _GRIDDED_VARIABLE_NAMES:
+        name = name[len("surface "):]
+    short = _GRIDDED_VARIABLE_NAMES.get(name.lower())
+    if short is None:
+        return label
+    return f"{depth[0].upper()}{depth[1:]} {short}"
+
+
 def _nan_to_none(obj: Any) -> Any:
     """``obj`` with its float NaN/inf replaced by None (strict JSON)."""
     if isinstance(obj, float):
@@ -2116,6 +2143,9 @@ def compute_metric(
 
             # Convert from nested Format1 to Format2
             results = convert_format1_to_format2(results)
+            for _row in results:
+                if isinstance(_row, dict) and "Variable" in _row:
+                    _row["Variable"] = _canonical_variable_label(_row["Variable"])
             t_end = time.perf_counter()
             duration = t_end - t_start
             # logger.debug(f"Fcast {forecast_reference_time} (LT {lead_time}): {duration:.2f}s")

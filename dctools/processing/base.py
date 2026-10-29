@@ -1928,7 +1928,16 @@ class BaseDCEvaluation:
             # installed as a *separate* package (its own repo) so __file__ would
             # resolve to the dctools source tree instead of the user's DC project.
             # results_directory --> dc2_output/ --> project root (parents[1]).
-            _repo_root = Path(self.results_directory).resolve().parents[1]
+            # A challenge may declare its root (DC2Evaluation.PROJECT_ROOT): the output directory
+            # can then be anywhere (a cluster's scratch) and the baselines and the site are
+            # still the repository's.
+            # (``leaderboard_root`` in the YAML overrides it: a test run writing elsewhere)
+            _declared_root = (getattr(self.args, "leaderboard_root", None)
+                              or getattr(self, "PROJECT_ROOT", None))
+            _repo_root = (
+                Path(_declared_root).resolve() if _declared_root
+                else Path(self.results_directory).resolve().parents[1]
+            )
             _docs_leaderboard = _repo_root / "docs" / "source" / "_extra" / "leaderboard"
             if (_repo_root / "docs").is_dir():
                 _leaderboard_dir = str(_docs_leaderboard)
@@ -1967,11 +1976,15 @@ class BaseDCEvaluation:
                     f" Using {_challenge_pkg_name}/leaderboard_results/  ->  {_local_lb_dir}"
                 )
             else:
-                _ref_results_src = os.path.join(
-                    os.path.dirname(_dcleaderboard.__file__), "results"
+                # Never the dcleaderboard package's results/: they are demonstration data
+                # (noisy synthetic models), which were shown as baselines.
+                _ref_results_src = ""
+                logger.warning(
+                    f"  No baseline results ({_local_lb_dir} not found): the leaderboard "
+                    "shows this run's models only."
                 )
-                logger.debug(f" Using dcleaderboard package results/  ->  {_ref_results_src}")
-            _ref_jsons = glob(os.path.join(_ref_results_src, "results_*.json"))
+            _ref_jsons = (glob(os.path.join(_ref_results_src, "results_*.json"))
+                          if _ref_results_src else [])
             for _ref_json in _ref_jsons:
                 _shutil.copy2(
                     _ref_json,
@@ -1982,7 +1995,7 @@ class BaseDCEvaluation:
             )
             # Also copy leaderboard_config.yaml from the reference source if present.
             _lb_config_src = os.path.join(_ref_results_src, "leaderboard_config.yaml")
-            if os.path.isfile(_lb_config_src):
+            if _ref_results_src and os.path.isfile(_lb_config_src):
                 _shutil.copy2(
                     _lb_config_src,
                     os.path.join(_leaderboard_input_dir, "leaderboard_config.yaml"),
