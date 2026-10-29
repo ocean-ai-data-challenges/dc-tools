@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-10-29, branch `dc2-optimisation`: probabilistic forecasts)
+
+- **Ensemble forecasts** (`metrics/ensemble.py`): a forecast with a `member` dimension (or `ens`,
+  `realization`, `number`) gets the deterministic scores on its ensemble mean, and `crps` (fair
+  CRPS, Ferro 2014), `spread` and `ssr` (spread-skill ratio, Fortin et al. 2014) on its members,
+  cos(latitude)-weighted. Against observations (`_run_class4_with_raw_per_bins`) every member is
+  interpolated to the points, bins carry `crps`/`ens_var`/`n_members`, pooled by oceanbench's
+  `pool_bins`; against GLORYS (`compute_metric`), at the gridded levels under the deterministic
+  labels. The members stay lazy and are read one level at a time (50 members x 21 levels do not
+  fit a worker). DC2's probabilistic baseline is Mercator's GLO4ENS (50 members).
+- `config: local` sources (`get_dataset_from_config`): the source `dctools.submission` writes for
+  a submitted model; it was missing from the port of the submission module, so `submit run` raised
+  "Unknown dataset config name: local".
+
+### Fixed (2026-10-29)
+
+- **Forecasts as long as the horizon were never evaluated** (`build_forecast_index_from_catalog`):
+  a file covered a lead day only when its `date_end` (its last daily stamp, 00:00) was at least
+  a day after it, so the last lead day of every forecast was missing and a 10-day GloNet forecast
+  with `n_days_forecast: 10` gave no forecast at all (also on `main`). A file now covers the days
+  it holds.
+
+- The submission validator required the variables a challenge derives (DC2's `sst`/`sss`, first
+  level of `thetao`/`so`), failing every submission: the required ones are the source's
+  `keep_variables`.
+- `OCEANBENCH_VARIABLES` mapped `u_current` to the northward velocity and `v_current` to the
+  eastward one (only a fallback for datasets without standard names: GLORYS and GloNet have them).
+- Tests: `tests/test_ensemble_scores.py` (exact fair CRPS, independent of the ensemble size for a
+  reliable ensemble, ssr ~1 reliable and < 1 narrow, Class 4 and gridded paths).
+
 ### Fixed (2026-10-28, branch `dc2-optimisation`: found by a real DC2 run)
 
 A one-forecast DC2 run (GloNet 2024-01-03, two lead times, SWOT, Argo profiles and velocities,

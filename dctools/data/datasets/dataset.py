@@ -647,6 +647,31 @@ def get_dataset_from_config(
         init_type = "from_json"
 
     match config_name:
+        case "local":
+            # Local filesystem dataset: a submitted model's forecasts (dctools.submission writes
+            # this source), or a reference built locally before its upload.
+            connect_config_params = {
+                "dataset_processor": dataset_processor,
+                "init_type": init_type,
+                "local_root": source.get("root_path", data_root),
+                "max_samples": max_samples,
+                "file_pattern": file_pattern,
+                "keep_variables": keep_variables,
+                "file_cache": file_cache,
+                "filter_values": filter_values,
+                "full_day_data": full_day_data,
+                "groups": source.get("groups"),
+            }
+            dataset = RemoteDataset(DatasetConfig(
+                alias=dataset_name,
+                connection_config=LocalConnectionConfig(connect_config_params),
+                catalog_options={"catalog_path": catalog_path},
+                keep_variables=keep_variables,
+                eval_variables=eval_variables,
+                observation_dataset=observation_dataset,
+                use_catalog=use_catalog,
+                ignore_geometry=ignore_geometry,
+            ))
         case "cmems":
             connect_config_params = {
                 "dataset_processor": dataset_processor,

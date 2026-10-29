@@ -108,6 +108,7 @@ _PB_METRIC_DP: int = 6  # decimal places for metric values
 _PB_SKIP: frozenset = frozenset({
     "lat_bin", "lon_bin", "depth_bin",
     "count", "n", "n_points", "time_bin", "w_sum",
+    "ens_var", "n_members",   # pooling inputs of the ensemble scores (crps and spread are maps)
 })
 
 _GEO_LABEL_PAT = re.compile(r'^(\d+(?:\.\d+)?[SNWEsnwe]|0)-(\d+(?:\.\d+)?[SNWEsnwe]|0)$')

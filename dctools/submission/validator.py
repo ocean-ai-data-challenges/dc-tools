@@ -261,7 +261,9 @@ class SubmissionValidator:
             is_obs = source.get("observation_dataset", False)
             if is_obs:
                 continue
-            eval_vars = source.get("eval_variables") or source.get("keep_variables") or []
+            # what the files must hold: keep_variables (eval_variables also lists quantities
+            # derived from them, e.g. DC2's sst/sss, the first level of thetao/so)
+            eval_vars = source.get("keep_variables") or source.get("eval_variables") or []
             # Filter out coordinate names
             coord_names = {"time", "lat", "lon", "depth", "latitude", "longitude"}
             data_vars = [v for v in eval_vars if v.lower() not in coord_names]

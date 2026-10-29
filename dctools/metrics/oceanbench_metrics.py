@@ -39,6 +39,7 @@ import numpy as np   # noqa: E402
 import xarray as xr  # noqa: E402
 from loguru import logger  # noqa: E402
 
+from dctools.metrics.ensemble import ensemble_mean, fair_crps, member_dim  # noqa: E402
 from dctools.data.coordinates import (  # noqa: E402
     COORD_ALIASES,
     EVAL_VARIABLES_GLONET,
@@ -56,8 +57,8 @@ if OCEANBENCH_AVAILABLE:
         "ssh": Variable.SEA_SURFACE_HEIGHT_ABOVE_GEOID,
         "temperature": Variable.SEA_WATER_POTENTIAL_TEMPERATURE,
         "salinity": Variable.SEA_WATER_SALINITY,
-        "u_current": Variable.NORTHWARD_SEA_WATER_VELOCITY,
-        "v_current": Variable.EASTWARD_SEA_WATER_VELOCITY,
+        "u_current": Variable.EASTWARD_SEA_WATER_VELOCITY,
+        "v_current": Variable.NORTHWARD_SEA_WATER_VELOCITY,
         "w_current": Variable.UPWARD_SEA_WATER_VELOCITY,
         "mld": Variable.MIXED_LAYER_THICKNESS,
         "mdt": Variable.MEAN_DYNAMIC_TOPOGRAPHY,
@@ -497,6 +498,9 @@ def _run_class4_with_raw_per_bins(
     for var in variables:
         obs_da = obs_ds[var]
         model_da = model_ds[var]
+        # Ensemble forecast: every member interpolated to the observations; the deterministic
+        # scores are those of the ensemble mean, crps and the ensemble variance are added.
+        _mdim = member_dim(model_da)
 
         if getattr(evaluator, "apply_qc", False):
             obs_da = oceanbench_class4_module.filter_observations_by_qc(
@@ -662,6 +666,7 @@ def _run_class4_with_raw_per_bins(
                 # model_da_active is (lat, lon) after depth slicing — Grid2D
                 # can always be built successfully here.
                 _grid2d = None
+                _member_grids = None
                 try:
                     import pyinterp
 
@@ -676,16 +681,30 @@ def _run_class4_with_raw_per_bins(
                     if _lat_dim and _lon_dim:
                         _src_lat = model_da_active[_lat_dim].values.astype(np.float64)
                         _src_lon = model_da_active[_lon_dim].values.astype(np.float64)
-                        _model_vals = np.asarray(model_da_active.values, dtype=np.float64)
-                        # Remove any remaining singleton dims (e.g. time=1)
-                        _model_vals = _model_vals.squeeze()
-                        # pyinterp Grid2D expects (lon, lat) C-order
-                        if _model_vals.shape == (len(_src_lat), len(_src_lon)):
-                            _model_vals = _model_vals.T  # (lon, lat)
                         _x_axis = pyinterp.Axis(_src_lon)
                         _y_axis = pyinterp.Axis(_src_lat)
-                        _grid2d = pyinterp.Grid2D(_x_axis, _y_axis, _model_vals)
-                        del _model_vals  # Grid2D holds its own copy
+                        if _mdim is not None:
+                            # one (lon, lat) grid per member
+                            _ens_da = model_da_active.squeeze(
+                                [d for d in model_da_active.dims
+                                 if d not in (_mdim, _lat_dim, _lon_dim)], drop=True,
+                            ).transpose(_mdim, _lat_dim, _lon_dim)
+                            _member_grids = [
+                                pyinterp.Grid2D(_x_axis, _y_axis, np.asarray(
+                                    _ens_da.isel({_mdim: _k}).values, dtype=np.float64).T)
+                                for _k in range(_ens_da.sizes[_mdim])
+                            ]
+                            _grid2d = _member_grids[0]
+                            del _ens_da
+                        else:
+                            _model_vals = np.asarray(model_da_active.values, dtype=np.float64)
+                            # Remove any remaining singleton dims (e.g. time=1)
+                            _model_vals = _model_vals.squeeze()
+                            # pyinterp Grid2D expects (lon, lat) C-order
+                            if _model_vals.shape == (len(_src_lat), len(_src_lon)):
+                                _model_vals = _model_vals.T  # (lon, lat)
+                            _grid2d = pyinterp.Grid2D(_x_axis, _y_axis, _model_vals)
+                            del _model_vals  # Grid2D holds its own copy
                         logger.debug(
                             f"[perf] Pre-built Grid2D for '{var}' d_idx={_d_idx}: "
                             f"lat={len(_src_lat)} lon={len(_src_lon)}"
@@ -805,11 +824,21 @@ def _run_class4_with_raw_per_bins(
                         # Fast path: direct pyinterp call (no xarray overhead)
                         _obs_lon = chunk_df["lon"].values.astype(np.float64)
                         _obs_lat = chunk_df["lat"].values.astype(np.float64)
-                        _interp_vals = pyinterp.bivariate(
-                            _grid2d, _obs_lon, _obs_lat,
-                            interpolator="bilinear",
-                            num_threads=1,
-                        )
+                        _members_vals = None
+                        if _member_grids is not None:
+                            _members_vals = np.stack([
+                                pyinterp.bivariate(_g, _obs_lon, _obs_lat,
+                                                   interpolator="bilinear", num_threads=1)
+                                for _g in _member_grids
+                            ])
+                            # NaN when a member is (an ensemble mean of all the members)
+                            _interp_vals = _members_vals.mean(axis=0)
+                        else:
+                            _interp_vals = pyinterp.bivariate(
+                                _grid2d, _obs_lon, _obs_lat,
+                                interpolator="bilinear",
+                                num_threads=1,
+                            )
                         # Build minimal arrays for error computation
                         obs_vals = chunk_df[var].values.astype(np.float64)
                         mod_vals = _interp_vals
@@ -819,6 +848,8 @@ def _run_class4_with_raw_per_bins(
                         if not _valid.all():
                             obs_vals = obs_vals[_valid]
                             mod_vals = mod_vals[_valid]
+                            if _members_vals is not None:
+                                _members_vals = _members_vals[:, _valid]
                             # Need lat for weights and bin cols for grouping
                             _lat_arr = (
                                 chunk_df["lat"].values[_valid]
@@ -845,6 +876,12 @@ def _run_class4_with_raw_per_bins(
                             )
                         del _obs_lon, _obs_lat, _interp_vals, _valid
                     else:
+                        if _mdim is not None:
+                            raise RuntimeError(
+                                f"ensemble forecast: no (lat, lon) grid for '{var}' to interpolate "
+                                "its members to the observations"
+                            )
+                        _members_vals = None
                         # Fallback: original xarray-based interpolation
                         chunk_df = chunk_df.rename(columns={var: obs_col})
                         chunk_df = oceanbench_class4_module.interpolate_model_on_obs(
@@ -881,6 +918,12 @@ def _run_class4_with_raw_per_bins(
                         continue
 
                     diff = mod_vals - obs_vals
+                    if _members_vals is not None:
+                        _crps = fair_crps(_members_vals, obs_vals)
+                        _var = (_members_vals.var(axis=0, ddof=1) if _members_vals.shape[0] > 1
+                                else np.zeros_like(diff))
+                        _n_members = float(_members_vals.shape[0])
+                        del _members_vals
 
                     if _lat_arr is not None:
                         w = np.cos(np.deg2rad(_lat_arr.astype(np.float64)))
@@ -897,6 +940,9 @@ def _run_class4_with_raw_per_bins(
                         df_agg["w_err"] = w * diff
                         df_agg["w_sum"] = w
                         df_agg["count"] = 1.0
+                        if _mdim is not None:
+                            df_agg["w_crps"] = w * _crps
+                            df_agg["w_var"] = w * _var
 
                         grouped = df_agg.groupby(
                             agg_cols, observed=True, dropna=True,
@@ -914,6 +960,10 @@ def _run_class4_with_raw_per_bins(
                             s["w_sq"] += row["w_sq_err"]
                             s["w_abs"] += row["w_abs_err"]
                             s["w_err"] += row["w_err"]
+                            if _mdim is not None:
+                                s["w_crps"] = s.get("w_crps", 0.0) + row["w_crps"]
+                                s["w_var"] = s.get("w_var", 0.0) + row["w_var"]
+                                s["n_members"] = _n_members
 
                         del df_agg, grouped
                     else:
@@ -929,6 +979,10 @@ def _run_class4_with_raw_per_bins(
                         s["w_sq"] += float((w * diff ** 2).sum())
                         s["w_abs"] += float((w * np.abs(diff)).sum())
                         s["w_err"] += float((w * diff).sum())
+                        if _mdim is not None:
+                            s["w_crps"] = s.get("w_crps", 0.0) + float((w * _crps).sum())
+                            s["w_var"] = s.get("w_var", 0.0) + float((w * _var).sum())
+                            s["n_members"] = _n_members
 
                     del obs_vals, mod_vals, diff, w, _lat_arr, _bin_df
                     _chunk_count += 1
@@ -940,7 +994,7 @@ def _run_class4_with_raw_per_bins(
                         _malloc_trim(0)
 
                 # Clean up this depth level
-                del _grid2d
+                del _grid2d, _member_grids
                 if interp_cache:
                     interp_cache.clear()
                 del interp_cache
@@ -968,6 +1022,11 @@ def _run_class4_with_raw_per_bins(
                 res["me"] = res["bias"]
                 res["count"] = float(n)
                 res["w_sum"] = float(ws)   # what the bin weighs when bins are pooled
+                if "w_crps" in s:
+                    res["crps"] = float(s["w_crps"] / ws)
+                    res["ens_var"] = float(s["w_var"] / ws)
+                    res["spread"] = float(np.sqrt(res["ens_var"]))
+                    res["n_members"] = float(s["n_members"])
                 bin_results.append(res)
 
             # Global aggregation: the scores of all the points, not the mean of the bins' scores
@@ -1364,6 +1423,12 @@ class OceanbenchMetrics(DCMetric):
                         matching_type=matching_type,
                     )
                 else:
+                    if member_dim(pred_data) is not None:
+                        logger.warning(
+                            "ensemble forecast without per-bins streaming (bin_resolution unset): "
+                            "only its ensemble mean is scored"
+                        )
+                        pred_data = ensemble_mean(pred_data)
                     res = self.class4_evaluator.run(
                         model_ds=pred_data,
                         obs_ds=ref_data,

@@ -89,19 +89,20 @@ def build_forecast_index_from_catalog(
         for lead_time in range(n_days_forecast):
             if lead_time_unit == "days":
                 valid_time = init_time + pd.Timedelta(days=lead_time)
-                valid_time_plus1 = valid_time + pd.Timedelta(days=1)
                 lead_time_value = lead_time
             elif lead_time_unit == "hours":
                 valid_time = init_time + pd.Timedelta(hours=lead_time)
-                valid_time_plus1 = valid_time + pd.Timedelta(hours=1)
                 lead_time_value = lead_time
             else:
                 raise ValueError("lead_time_unit must be 'days' or 'hours'")
 
-            # Selection of files containing valid_time
+            # Selection of files containing valid_time: a forecast file's date_end is its last
+            # time stamp (a daily mean at 00:00), so a file covers valid_time up to date_end
+            # (requiring date_end >= valid_time + 1 day dropped the last lead day of every
+            # forecast, and so every forecast as long as the horizon)
             matching_files = catalog[
                 (catalog[start_time_col] <= valid_time)
-                & (catalog[end_time_col] >= valid_time_plus1)
+                & (catalog[end_time_col] >= valid_time)
             ]
 
             if matching_files.empty:

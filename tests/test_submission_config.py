@@ -43,3 +43,32 @@ def test_config_dir_from_the_environment(tmp_path, monkeypatch):
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
     monkeypatch.chdir(tmp_path.parent)
     assert resolve_dc_config("elsewhere") == cfg.resolve()
+
+
+def test_required_variables_are_the_stored_ones(tmp_path, monkeypatch):
+    # sst/sss are derived by DC2 from thetao/so: a submission does not have to hold them
+    cfg = tmp_path / "dc.yaml"
+    cfg.write_text(
+        "n_days_forecast: 2\n"
+        "sources:\n"
+        "  - dataset: model\n"
+        "    observation_dataset: false\n"
+        "    keep_variables: [so, thetao, zos]\n"
+        "    eval_variables: [so, thetao, zos, sst, sss]\n"
+    )
+    monkeypatch.delenv(CONFIG_DIR_ENV, raising=False)
+    v = SubmissionValidator.from_dc_config(str(cfg))
+    assert v.required_variables == ["so", "thetao", "zos"]
+
+
+def test_a_forecast_as_long_as_the_horizon_is_indexed():
+    import pandas as pd
+
+    from dctools.data.datasets.forecast import build_forecast_index_from_catalog
+    # daily means stamped 2024-01-03 .. 2024-01-12: ten lead days
+    cat = pd.DataFrame({"path": ["f"], "date_start": [pd.Timestamp("2024-01-03")],
+                        "date_end": [pd.Timestamp("2024-01-12")]})
+    idx = build_forecast_index_from_catalog(cat, "2024-01-01", "2024-01-31", n_days_forecast=10)
+    assert list(idx["lead_time"]) == list(range(10))
+    assert build_forecast_index_from_catalog(
+        cat, "2024-01-01", "2024-01-31", n_days_forecast=11).empty

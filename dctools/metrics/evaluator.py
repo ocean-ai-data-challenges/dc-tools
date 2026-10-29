@@ -418,6 +418,11 @@ def _compute_with_timeout(
 
 
 from dctools.data.datasets.dataset_manager import MultiSourceDatasetManager  # noqa: E402
+from dctools.metrics.ensemble import (  # noqa: E402
+    ensemble_mean,
+    gridded_ensemble_scores,
+    member_dim,
+)
 from dctools.metrics.metrics import MetricComputer  # noqa: E402
 from dctools.utilities.format_converter import convert_format1_to_format2  # noqa: E402
 from dctools.utilities.misc_utils import (  # noqa: E402
@@ -819,6 +824,30 @@ def _cap_worker_threads(max_threads: int = 1) -> None:
             _nc_blosc_rt.set_nthreads(_blosc_threads)
         except Exception:
             pass
+
+
+def _gridded_ensemble_results(
+    pred_members: Any, ref_data: Any, metric: MetricComputer,
+) -> Dict[str, Dict[str, float]]:
+    """crps, spread and ssr of an ensemble against a gridded reference, under the labels of the
+    deterministic gridded scores (oceanbench's rmsd: surface, 50, 200, 550 m)."""
+    from dctools.metrics.oceanbench_metrics import OCEANBENCH_VARIABLES
+    from oceanbench.core.rmsd import DEPTH_LABELS, VARIABLE_LABELS
+
+    def _label(variable: Any, level: Any, has_depth: bool) -> str:
+        name = VARIABLE_LABELS.get(variable, str(variable))
+        if level is None:
+            return name.capitalize()
+        return (f"{DEPTH_LABELS[level]} {name}" if has_depth else f"surface {name}").capitalize()
+
+    has_depth = "depth" in getattr(pred_members, "dims", ()) and "depth" in getattr(ref_data, "dims", ())
+    return gridded_ensemble_scores(
+        pred_members, ref_data,
+        variables=list(metric.oceanbench_eval_variables or metric.eval_variables or []),
+        depth_levels=list(DEPTH_LABELS) if has_depth else None,
+        aliases=OCEANBENCH_VARIABLES,
+        labels=_label,
+    )
 
 
 def compute_metric(
@@ -1766,6 +1795,14 @@ def compute_metric(
         ):
             pred_data = pred_data.isel(depth=0)
 
+        # Ensemble forecast: the deterministic scores take its mean; the members stay lazy, read
+        # one level at a time by the ensemble scores (50 members x 21 levels do not fit a worker).
+        pred_members = None
+        _member_dim = member_dim(pred_data)
+        if _member_dim is not None:
+            pred_members = pred_data
+            pred_data = ensemble_mean(pred_data, _member_dim)
+
         # Compute once after transforms (safe & memory-friendlier).
         if hasattr(pred_data, 'chunks') and pred_data.chunks:
             # Use a hard Python-level timeout instead of bare .compute().
@@ -1909,7 +1946,7 @@ def compute_metric(
 
             with dask.config.set(scheduler='synchronous'):
                 results = list_metrics[0].compute(
-                    pred_data, ref_data,
+                    pred_members if pred_members is not None else pred_data, ref_data,
                     pred_coords, ref_coords,
                 )
 
@@ -2027,6 +2064,11 @@ def compute_metric(
                         }
 
                     results[metric.get_metric_name()] = res_dict
+
+            if pred_members is not None and ref_data is not None:
+                with dask.config.set(scheduler='synchronous'):
+                    results.update(_gridded_ensemble_results(
+                        pred_members, ref_data, list_metrics[0]))
 
             # Convert from nested Format1 to Format2
             results = convert_format1_to_format2(results)
