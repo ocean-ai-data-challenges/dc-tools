@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (2026-10-29)
 
+- **`submit run` evaluated nothing**: `run_from_config` imported its default evaluation class from
+  `dc2.evaluation.evaluation`, which does not exist (`dc2.evaluation.dc2`); `ModelSubmission`
+  takes the challenge's `evaluation_cls`. A submission's references are the challenge's
+  `dataset_references` (GLORYS included), not its observation datasets only.
+- The validator reports an ensemble's members ("Ensemble members"); an ensemble's `member`
+  coordinate is no longer warned about as an unknown variable.
+
 - **Forecasts as long as the horizon were never evaluated** (`build_forecast_index_from_catalog`):
   a file covered a lead day only when its `date_end` (its last daily stamp, 00:00) was at least
   a day after it, so the last lead day of every forecast was missing and a 10-day GloNet forecast

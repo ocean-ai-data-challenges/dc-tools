@@ -318,6 +318,10 @@ def get_standardized_var_name(name: str, standard_name: Optional[str] = None) ->
         "id",
         "platform_id",
         "platformid",
+        # member dimension of an ensemble forecast
+        "member",
+        "ens",
+        "realization",
     }
     if name.lower() in _ignorable:
         logger.debug(f"Ignoring non-science variable: {name}.")

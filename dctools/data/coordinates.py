@@ -411,7 +411,8 @@ class CoordinateSystem:
                         found[key] = var_name
                         found_var = True
                         break  # next var_name
-                if not found_var:
+                if not found_var and name not in ("member", "ens", "realization"):
+                    # (an ensemble's member coordinate is no variable)
                     logger.warning(f"Unknown variable alias. Ignoring variable: {var_name}.")
             return dict(found)
         except Exception as exc:

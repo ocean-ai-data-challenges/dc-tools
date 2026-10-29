@@ -86,8 +86,11 @@ class ModelSubmission:
         contact_email: str = "",
         max_nan_fraction: float = 0.10,
         variables: Optional[List[str]] = None,
+        evaluation_cls: Optional[type] = None,
     ) -> None:
         self.model_name = model_name
+        # the challenge's evaluation class (DC2: dc2.evaluation.dc2.DC2Evaluation)
+        self.evaluation_cls = evaluation_cls
         self.data_path = str(data_path)
         self.dc_config = dc_config
         self.model_description = model_description
@@ -306,9 +309,19 @@ class ModelSubmission:
 
             # -- Replace prediction sources with the submitted model ---
             old_sources = config.get("sources", [])
+            # The references the challenge's models are scored against (its
+            # dataset_references), gridded ones (GLORYS) included; without them, its
+            # observation datasets.
+            declared = config.get("dataset_references") or {}
+            ref_names = list(dict.fromkeys(
+                r for refs in declared.values() for r in (refs or [])
+            ))
             obs_sources = [
                 s for s in old_sources
-                if isinstance(s, dict) and s.get("observation_dataset", False)
+                if isinstance(s, dict) and (
+                    s.get("dataset") in ref_names if ref_names
+                    else s.get("observation_dataset", False)
+                )
             ]
             obs_names = [
                 s["dataset"] for s in obs_sources
@@ -494,6 +507,7 @@ class ModelSubmission:
 
             return run_from_config(
                 Path(config_path),
+                evaluation_cls=self.evaluation_cls,
                 cli_args=cli_args,
             )
 

@@ -132,7 +132,7 @@ def run_from_config(
         from dctools.utilities.args_config import load_args_and_config
 
         if evaluation_cls is None:
-            from dc2.evaluation.evaluation import DC2Evaluation as _DefaultEval  # noqa: E402
+            from dc2.evaluation.dc2 import DC2Evaluation as _DefaultEval  # noqa: E402
 
             evaluation_cls = _DefaultEval
 

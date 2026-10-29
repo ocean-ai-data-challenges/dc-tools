@@ -72,3 +72,19 @@ def test_a_forecast_as_long_as_the_horizon_is_indexed():
     assert list(idx["lead_time"]) == list(range(10))
     assert build_forecast_index_from_catalog(
         cat, "2024-01-01", "2024-01-31", n_days_forecast=11).empty
+
+
+def test_ensemble_members_are_reported():
+    import numpy as np
+    import xarray as xr
+
+    from dctools.submission.report import CheckStatus, ValidationReport
+
+    v = SubmissionValidator()
+    for members, status in ((None, CheckStatus.SKIP), (1, CheckStatus.WARN), (5, CheckStatus.PASS)):
+        dims = ("time", "lat") if members is None else ("time", "member", "lat")
+        shape = (2, 3) if members is None else (2, members, 3)
+        ds = xr.Dataset({"zos": (dims, np.zeros(shape))})
+        report = ValidationReport(model_name="m", data_path="x")
+        v._check_ensemble(ds, report)
+        assert report.checks[-1].status == status

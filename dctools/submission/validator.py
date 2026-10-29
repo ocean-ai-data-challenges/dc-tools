@@ -391,6 +391,7 @@ class SubmissionValidator:
 
         # 8. Lead-time (on sample).
         _checks.append(("Lead-time axis", lambda: self._check_lead_time(ds, report)))
+        _checks.append(("Ensemble members", lambda: self._check_ensemble(ds, report)))
 
         # 9. NaN (on sample).
         if not quick:
@@ -1244,6 +1245,38 @@ class SubmissionValidator:
                     "actual_count": len(lead_vals),
                 },
             ))
+
+    def _check_ensemble(
+        self, ds: Any, report: ValidationReport
+    ) -> None:
+        """Check: member dimension of a probabilistic forecast (optional)."""
+        from dctools.metrics.ensemble import MEMBER_DIMS, member_dim
+
+        dim = member_dim(ds)
+        if dim is None:
+            report.add(CheckResult(
+                name="Ensemble members",
+                status=CheckStatus.SKIP,
+                message=f"No member dimension ({', '.join(MEMBER_DIMS)}): deterministic forecast.",
+            ))
+            return
+        n = int(ds.sizes[dim])
+        if n < 2:
+            report.add(CheckResult(
+                name="Ensemble members",
+                status=CheckStatus.WARN,
+                message=f"Dimension '{dim}' has {n} member: scored as a deterministic forecast "
+                        "(crps = mae, no spread).",
+                details={"dimension": dim, "members": n},
+            ))
+            return
+        report.add(CheckResult(
+            name="Ensemble members",
+            status=CheckStatus.PASS,
+            message=f"Probabilistic forecast: {n} members (dimension '{dim}'). Scored on its "
+                    "ensemble mean, and with crps, spread and ssr.",
+            details={"dimension": dim, "members": n},
+        ))
 
     def _check_nan_fraction(
         self, ds: Any, report: ValidationReport
