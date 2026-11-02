@@ -408,9 +408,13 @@ class DatasetCatalog:
         if self.gdf.empty:
             logger.warning("GeoDataFrame is empty, nothing to filter")
             return
+        # the data's own end, before any filter: available_until() tells it from a gap
+        if getattr(self, "_coverage_end", None) is None:
+            self._coverage_end = self.gdf["date_end"].max()
 
         if isinstance(start, datetime) and isinstance(end, datetime):
             mask = (self.gdf["date_end"] >= start) & (self.gdf["date_start"] < end)
+            self._period_end = end
         elif (
             isinstance(start, list)
             and isinstance(end, list)
@@ -426,12 +430,24 @@ class DatasetCatalog:
             for start_el, end_el in zip(start, end, strict=False):
                 in_period = (self.gdf["date_end"] >= start_el) & (self.gdf["date_start"] < end_el)
                 mask = mask | in_period
+            self._period_end = max(end)
 
         else:
             logger.warning("Start and end dates must be datetime objects or lists of datetimes.")
             return
 
         self.gdf = self.gdf.loc[mask]
+
+    def available_until(self) -> Any:
+        """The last date with data: the data's end, or the end of the period filtered on.
+
+        Not the last entry left by the date filter: a gap at the end of a short period (one
+        forecast's window) is not the end of the data.
+        """
+        coverage_end = getattr(self, "_coverage_end", None)
+        if coverage_end is None:
+            return self.gdf["date_end"].max()
+        return min(coverage_end, getattr(self, "_period_end", coverage_end))
 
     def filter_by_region(self, region: Union[gpd.GeoSeries, geometry.base.BaseGeometry]) -> None:
         """

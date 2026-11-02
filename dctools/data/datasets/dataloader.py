@@ -726,8 +726,13 @@ class EvaluationDataloader:
                         ref_catalog = self.ref_catalogs[ref_alias]
                         ref_df = ref_catalog.get_dataframe()
 
-                        # Find max available date in reference data
-                        max_available_date = ref_df["date_end"].max()
+                        # The reference's last date (its end, not a gap at the end of the period:
+                        # the lead days of a gap are skipped one by one, below)
+                        max_available_date = (
+                            ref_catalog.available_until()
+                            if hasattr(ref_catalog, "available_until")
+                            else ref_df["date_end"].max()
+                        )
 
                         # If forecast end > available data, skip this entry
                         if forecast_end_time > max_available_date:
