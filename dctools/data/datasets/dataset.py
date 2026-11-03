@@ -808,7 +808,7 @@ def get_dataset_from_config(
 
 # Source options read when a reference is scored (dctools.metrics.evaluator.compute_metric), carried
 # by the connection parameters, the configuration compute_metric receives.
-EVALUATION_OPTIONS = ("sla_to_adt", "max_abs_sla", "depth_range")
+EVALUATION_OPTIONS = ("sla_to_adt", "max_abs_sla", "depth_range", "model_mdt")
 
 
 def _attach_evaluation_options(dataset: Any, source: Dict[str, Any]) -> None:

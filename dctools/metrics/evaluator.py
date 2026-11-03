@@ -117,8 +117,11 @@ def _mask_invalid_obs_values(
 
 
 # Along-track and swath altimetry give the sea level ANOMALY (above a mean sea surface); a model's
-# zos is the height above the geoid (an absolute dynamic topography). The two are only comparable
-# once the observation's mean dynamic topography is added back: ADT = SLA + MDT.
+# zos is the height above the geoid (an absolute dynamic topography). Two ways to compare them:
+# - the source's ``model_mdt`` (OceanBench >= 0.3, Class 4): the model's anomaly
+#   SLA = zos - (MDT + offset), one MDT for every model, against the observed anomaly;
+# - otherwise the observation's absolute height, ADT = SLA + MDT of the observation. Its MDT
+#   (CNES-CLS) is on another datum than the models' (~0.5 m apart): only the centred scores hold.
 _SSH_ANOMALY_NAMES = {
     "ssha", "ssha_filtered", "ssha_unfiltered", "ssha_noiseless", "sla", "sla_filtered",
     "sla_unfiltered", "data_01__ku__ssha", "ssha_01_ku",
@@ -131,7 +134,9 @@ def _anomaly_to_absolute_height(ds: Any, source_config: Any) -> Any:
 
     Applies when one of the source's ``eval_variables`` is an anomaly (``_SSH_ANOMALY_NAMES``),
     unless the source sets ``sla_to_adt: false``. Anomalies beyond ``max_abs_sla`` (source
-    option, default ``DEFAULT_MAX_ABS_SLA``; ``null`` keeps all) are dropped first.
+    option, default ``DEFAULT_MAX_ABS_SLA``; ``null`` keeps all) are dropped first. With the
+    source's ``model_mdt``, the anomaly is kept (edited) and its MDT dropped: the model is turned
+    into an anomaly instead (``_model_to_sea_level_anomaly``).
     Variables are found by their standardized name
     (``ssh``, ``mean_dynamic_topography``), so this works before or after renaming. The MDT
     variable is dropped once used. Raises when the anomaly is there but its MDT is not: an
@@ -158,14 +163,15 @@ def _anomaly_to_absolute_height(ds: Any, source_config: Any) -> Any:
             f"the source evaluates the sea level anomaly {sorted(eval_vars & _SSH_ANOMALY_NAMES)} but "
             f"the observation has no such variable (has {sorted(map(str, ds.data_vars))})"
         )
-    if ds[ssh_var].attrs.get("dctools_ssh_reference") == "adt":
+    if ds[ssh_var].attrs.get("dctools_ssh_reference") in ("adt", "sla"):
         return ds
     mdt_var = next(
         (v for v in ds.data_vars
          if v != ssh_var and get_standardized_var_name(str(v)) == "mean_dynamic_topography"),
         None,
     )
-    if mdt_var is None:
+    model_mdt = _model_mdt_spec(source_config)
+    if mdt_var is None and model_mdt is None:
         raise ValueError(
             f"'{ssh_var}' is a sea level anomaly but the observation has no mean dynamic "
             "topography to turn it into the absolute height a model's zos is: keep the MDT "
@@ -179,11 +185,110 @@ def _anomaly_to_absolute_height(ds: Any, source_config: Any) -> Any:
     max_abs_sla = getattr(source_config, "max_abs_sla", DEFAULT_MAX_ABS_SLA)
     if max_abs_sla is not None:
         sla = sla.where(np.abs(sla) <= float(max_abs_sla))
+    edited = f", |{ssh_var}| <= {max_abs_sla} m" if max_abs_sla is not None else ""
+    if model_mdt is not None:
+        sla.attrs = {**ds[ssh_var].attrs, "dctools_ssh_reference": "sla",
+                     "comment": f"sea level anomaly {ssh_var}{edited}"}
+        out = ds.assign({ssh_var: sla})
+        return out.drop_vars(mdt_var) if mdt_var is not None else out
     adt = sla + ds[mdt_var]
     adt.attrs = {**ds[ssh_var].attrs, "dctools_ssh_reference": "adt",
-                 "comment": f"absolute dynamic topography: {ssh_var} + {mdt_var}"
-                            + (f", |{ssh_var}| <= {max_abs_sla} m" if max_abs_sla is not None else "")}
+                 "comment": f"absolute dynamic topography: {ssh_var} + {mdt_var}{edited}"}
     return ds.assign({ssh_var: adt}).drop_vars(mdt_var)
+
+
+def _model_mdt_spec(source_config: Any) -> Optional[Dict[str, Any]]:
+    """The source's ``model_mdt`` (a path, or ``{path, endpoint_url, variable, offset}``), or None.
+
+    ``path``: a zarr store, local or ``s3://bucket/key`` (read anonymously at ``endpoint_url``);
+    ``variable``: its MDT variable (default: its only one); ``offset`` (m, default 0): added to
+    the MDT, the shift of the model's datum (OceanBench: -0.1148 for GLO12's MDT).
+    """
+    spec = getattr(source_config, "model_mdt", None)
+    if not spec:
+        return None
+    if isinstance(spec, str):
+        spec = {"path": spec}
+    if not spec.get("path"):
+        raise ValueError(f"model_mdt without a path: {spec}")
+    return dict(spec)
+
+
+_MODEL_MDT_CACHE: Dict[tuple, xr.DataArray] = {}
+
+
+def _load_model_mdt(spec: Dict[str, Any]) -> xr.DataArray:
+    """The MDT plus its offset, (lat, lon), in memory; read once per process."""
+    key = (spec["path"], spec.get("endpoint_url"), spec.get("variable"),
+           float(spec.get("offset", 0.0)))
+    if key not in _MODEL_MDT_CACHE:
+        path = spec["path"]
+        if path.startswith("s3://"):
+            import s3fs
+            fs = s3fs.S3FileSystem(anon=True, client_kwargs=(
+                {"endpoint_url": spec["endpoint_url"]} if spec.get("endpoint_url") else {}))
+            ds = xr.open_zarr(fs.get_mapper(path[len("s3://"):]))
+        else:
+            ds = xr.open_zarr(path)
+        var = spec.get("variable")
+        if var is None:
+            if len(ds.data_vars) != 1:
+                raise ValueError(f"{path}: name the MDT variable among {sorted(ds.data_vars)}")
+            var = next(iter(ds.data_vars))
+        mdt = ds[var].squeeze(drop=True)
+        mdt = mdt.rename({k: v for k, v in (("latitude", "lat"), ("longitude", "lon"))
+                          if k in mdt.dims})
+        _MODEL_MDT_CACHE[key] = (mdt.astype(np.float64) + float(spec.get("offset", 0.0))).load()
+    return _MODEL_MDT_CACHE[key]
+
+
+def _model_to_sea_level_anomaly(pred: Any, source_config: Any) -> Any:
+    """The model's sea level anomaly, zos - (MDT + offset), for a source with ``model_mdt``.
+
+    The MDT is taken at the model's grid points (nearest within a hundredth of a degree: the grid
+    must be the MDT's); a point of the model without MDT becomes NaN. Unchanged without
+    ``model_mdt`` or without an SSH variable.
+    """
+    spec = _model_mdt_spec(source_config)
+    if spec is None or pred is None or not hasattr(pred, "data_vars"):
+        return pred
+    from dctools.data.coordinates import get_standardized_var_name
+
+    ssh_var = next((v for v in pred.data_vars if get_standardized_var_name(str(v)) == "ssh"), None)
+    if ssh_var is None:
+        return pred
+    lat = next(d for d in ("lat", "latitude") if d in pred[ssh_var].dims)
+    lon = next(d for d in ("lon", "longitude") if d in pred[ssh_var].dims)
+    mdt = _load_model_mdt(spec)
+    plon = pred[lon].values
+    # the MDT's longitudes in the model's convention ([-180, 180) or [0, 360))
+    mlon = mdt["lon"].values % 360.0
+    if np.nanmin(plon) < 0:
+        mlon = (mlon + 180.0) % 360.0 - 180.0
+    mdt = mdt.assign_coords(lon=mlon).sortby("lon")
+    mdt = mdt.reindex(lat=pred[lat].values, lon=plon, method="nearest", tolerance=0.01)
+    mdt = mdt.rename({"lat": lat, "lon": lon}).assign_coords({lat: pred[lat], lon: pred[lon]})
+    sla = pred[ssh_var] - mdt.astype(pred[ssh_var].dtype)
+    sla.attrs = {**pred[ssh_var].attrs, "dctools_ssh_reference": "sla",
+                 "comment": f"sea level anomaly: {ssh_var} - (MDT {spec['path']} "
+                            f"+ {float(spec.get('offset', 0.0))} m)"}
+    return pred.assign({ssh_var: sla})
+
+
+def _sla_labels(results: Any, per_bins: Any) -> tuple:
+    """Scores of a model's anomaly are those of the SLA: "Surface ssh" -> "Surface sla"."""
+    import re as _re
+
+    def _rename(label: Any) -> Any:
+        return _re.sub(r"\bssh$", "sla", label) if isinstance(label, str) else label
+
+    if isinstance(results, list):
+        for row in results:
+            if isinstance(row, dict) and "Variable" in row:
+                row["Variable"] = _rename(row["Variable"])
+    if isinstance(per_bins, dict):
+        per_bins = {_rename(k): v for k, v in per_bins.items()}
+    return results, per_bins
 
 
 def _select_point_depths(ds: Any, source_config: Any) -> Any:
@@ -1860,6 +1965,10 @@ def compute_metric(
             and "depth" in getattr(pred_data, "dims", [])
         ):
             pred_data = pred_data.isel(depth=0)
+        # Altimetry scored as anomalies (source's model_mdt): the model's zos minus the MDT;
+        # before the ensemble mean, so members and mean are both anomalies
+        if ref_is_observation:
+            pred_data = _model_to_sea_level_anomaly(pred_data, ref_source_config)
 
         # Ensemble forecast: the deterministic scores take its mean; the members stay lazy, read
         # one level at a time by the ensemble scores (50 members x 21 levels do not fit a worker).
@@ -2030,6 +2139,8 @@ def compute_metric(
                 results = results["results"]
             if isinstance(results, pd.DataFrame):
                 results = results.to_dict('records')
+            if _model_mdt_spec(ref_source_config) is not None:
+                results, _per_bins_data = _sla_labels(results, _per_bins_data)
         else:
             # results = {}
             results = {}

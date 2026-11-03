@@ -1,7 +1,8 @@
 """Observation scores on synthetic data: what is compared, at which depth, pooled how.
 
 A perfect forecast scores 0, a known offset is all bias, an SSH anomaly is turned into the absolute
-height of a model's zos before it is scored, and profile levels are scored separately.
+height of a model's zos before it is scored (or the model into an anomaly, with the source's
+model_mdt), and profile levels are scored separately.
 """
 
 from argparse import Namespace
@@ -11,7 +12,11 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from dctools.metrics.evaluator import _anomaly_to_absolute_height
+from dctools.metrics.evaluator import (
+    _anomaly_to_absolute_height,
+    _model_to_sea_level_anomaly,
+    _sla_labels,
+)
 from dctools.metrics.oceanbench_metrics import (
     _build_class4_bin_specs,
     _model_level,
@@ -123,6 +128,73 @@ def test_absolute_references_are_left_alone():
     ds = _alongtrack()
     assert _anomaly_to_absolute_height(ds, Namespace(eval_variables=["zos"])) is ds
     assert _anomaly_to_absolute_height(ds, Namespace(eval_variables=["ssha"], sla_to_adt=False)) is ds
+
+
+# ── model -> sea level anomaly (model_mdt) ───────────────────────────────────
+
+def _mdt_store(tmp_path, value=0.5, lon=LON):
+    """An MDT on the grid, as the OceanBench stores: latitude/longitude, one variable."""
+    la = np.broadcast_to(LAT[:, None], (LAT.size, lon.size))
+    mdt = xr.Dataset({"sea_surface_height_above_geoid": (("latitude", "longitude"),
+                                                         value + 0.01 * la)},
+                     coords={"latitude": LAT, "longitude": lon})
+    path = tmp_path / "mdt.zarr"
+    mdt.to_zarr(path)
+    return str(path), xr.DataArray(value + 0.01 * la, dims=("lat", "lon"),
+                                   coords={"lat": LAT, "lon": lon})
+
+
+def test_the_model_becomes_an_anomaly_and_the_observation_stays_one(tmp_path):
+    """zos - (MDT + offset) on the model's side; the observed anomaly kept, its MDT dropped."""
+    path, mdt = _mdt_store(tmp_path)
+    cfg = Namespace(eval_variables=["sla_filtered"], model_mdt={"path": path, "offset": -0.1148})
+    zos = _model_field()
+    pred = _model_to_sea_level_anomaly(xr.Dataset({"zos": zos}), cfg)
+    np.testing.assert_allclose(pred["zos"].values, (zos - mdt + 0.1148).values, atol=1e-6)
+    obs = _anomaly_to_absolute_height(_alongtrack(("sla_filtered", "mdt")), cfg)
+    np.testing.assert_allclose(obs["sla_filtered"].values, 0.10)   # the anomaly, not + its mdt
+    assert "mdt" not in obs and obs["sla_filtered"].attrs["dctools_ssh_reference"] == "sla"
+    # no MDT of its own needed
+    assert "sla_filtered" in _anomaly_to_absolute_height(_alongtrack(("sla_filtered",)), cfg)
+    # no model_mdt: the model is left alone
+    plain = xr.Dataset({"zos": zos})
+    assert _model_to_sea_level_anomaly(plain, Namespace(eval_variables=["sla_filtered"])) is plain
+
+
+def test_the_mdt_follows_the_models_longitudes(tmp_path):
+    """An MDT on 0..360 for a model on -180..180."""
+    path, mdt = _mdt_store(tmp_path, lon=np.arange(0.0, 360.0, 0.25))      # 0..360
+    zos = _model_field()                                                    # -180..180
+    pred = _model_to_sea_level_anomaly(xr.Dataset({"zos": zos}), Namespace(model_mdt=path))
+    np.testing.assert_allclose(pred["zos"].values, (zos - mdt.values).values, atol=1e-6)
+
+
+def test_a_model_anomaly_scores_against_the_observed_one(tmp_path):
+    """A perfect anomaly scores 0; a datum offset is all bias."""
+    path, mdt = _mdt_store(tmp_path)
+    cfg = Namespace(eval_variables=["ssh"], model_mdt={"path": path})
+    lat, lon = _points(2000)
+    zos = _model_field()
+    truth = _sample(zos - mdt, lat, lon)                 # the observed anomaly
+    pred = _model_to_sea_level_anomaly(xr.Dataset({"ssh": zos}), cfg)
+    out = _run_class4_with_raw_per_bins(_evaluator(), pred, _surface_obs(truth, lat, lon), ["ssh"])
+    s = _scores(out)
+    assert s[("rmse", "Surface ssh")] < 1e-3
+    # the model's datum 0.1 m higher: all bias, the centred score unchanged
+    s = _scores(_run_class4_with_raw_per_bins(
+        _evaluator(), _model_to_sea_level_anomaly(xr.Dataset({"ssh": zos + 0.1}), cfg),
+        _surface_obs(truth, lat, lon), ["ssh"]))
+    assert s[("bias", "Surface ssh")] == pytest.approx(0.1, abs=1e-3)
+    assert s[("crmse", "Surface ssh")] < 1e-3
+
+
+def test_anomaly_scores_are_labelled_sla():
+    """The scores and the maps of an anomaly are the SLA's."""
+    rows = [{"Metric": "rmse", "Variable": "Surface ssh", "Value": 1.0},
+            {"Metric": "rmse", "Variable": "Surface temperature", "Value": 1.0}]
+    rows, bins = _sla_labels(rows, {"ssh": [1], "temperature": [2]})
+    assert [r["Variable"] for r in rows] == ["Surface sla", "Surface temperature"]
+    assert set(bins) == {"sla", "temperature"}
 
 
 # ── surface (along-track) scores ─────────────────────────────────────────────

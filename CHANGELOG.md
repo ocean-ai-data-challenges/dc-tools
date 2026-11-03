@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (2026-11-03, branch `dc2-optimisation`: altimetry scored as anomalies)
+
+- **A model's sea level anomaly against the observed one** (`metrics/evaluator.py`): a source with
+  `model_mdt` (`{path, endpoint_url, variable, offset}`, a zarr MDT local or on S3) scores the
+  model's `zos - (MDT + offset)` against its anomaly (`sla_filtered`, `ssha_filtered`), edited by
+  `max_abs_sla` and without the observation's MDT; the scores are labelled `sla`. Before, the
+  observation was turned into an absolute height with its own MDT (CNES-CLS), ~47 cm above the
+  datum of the models (GLO12's): the along-track rmse, mae and bias measured that offset (41 to
+  52 cm for GLORYS, GloNet, GLO4ENS), only the crmse held. With GLO12's MDT and OceanBench's offset
+  (-0.1148 m, >= 0.3), the biases are those of each model's datum (GloNet 0, GLORYS +6, GLO4ENS
+  -5 cm) and the rmse 5-8 cm, the order of the Class 4 literature. Without `model_mdt`, unchanged.
+
 ### Added (2026-10-29, branch `dc2-optimisation`: probabilistic forecasts)
 
 - **Ensemble forecasts** (`metrics/ensemble.py`): a forecast with a `member` dimension (or `ens`,
