@@ -5351,6 +5351,27 @@ class Evaluator:
             _TASK_TIMEOUT = 900  # 15 minutes per task
             _MAX_WATCHDOG_RETRIES = 2  # max times a single task can be resubmitted after watchdog cancel (total dead time ≤ (2+2)×600s=2400s)
             _retry_count: Dict[int, int] = {}  # task_index -> number of watchdog retries so far
+            # The workers running the futures a watchdog cancels, noted BEFORE the cancel: once
+            # cancelled, a future's key leaves Client.processing() while its worker thread goes on
+            # running it (Dask cannot interrupt a running task), so its worker could no longer be
+            # found and a resubmitted task would queue behind the frozen one, cancelled in turn.
+            _frozen_workers: set = set()
+            _frozen_lock = _threading_hb.Lock()
+
+            def _note_frozen_workers(futures: List[Any]) -> None:
+                try:
+                    _keys = {f.key for f in futures}
+                    _proc = _client.processing()
+                except Exception as _exc_proc:
+                    logger.warning(
+                        f"{ref_alias}: cannot find the workers of the stuck tasks "
+                        f"({_exc_proc!r}) — they will not be restarted"
+                    )
+                    return
+                with _frozen_lock:
+                    _frozen_workers.update(
+                        w for w, ks in _proc.items() if _keys.intersection(ks)
+                    )
 
             # Log the inevitable "tail" once: when pending tasks <= execution slots,
             # the cluster cannot keep all slots busy (under-subscription).
@@ -5436,6 +5457,7 @@ class Evaluator:
                                     )
                                 _per_task_cancelled.append(_tf)
                         if _per_task_cancelled:
+                            _note_frozen_workers(_per_task_cancelled)
                             for _tf in _per_task_cancelled:
                                 try:
                                     _tf.cancel()
@@ -5466,6 +5488,7 @@ class Evaluator:
                                 f"{len(_active)} stuck futures "
                                 f"({_n_retry} retriable, {_n_exhaust} exhausted)."
                             )
+                            _note_frozen_workers(list(_active.keys()))
                             for _stuck_f in list(_active.keys()):
                                 try:
                                     _stuck_f.cancel()
@@ -5516,26 +5539,27 @@ class Evaluator:
                             # the stuck futures — NOT the entire cluster.
                             # _client.restart() kills ALL workers which then
                             # fail to reconnect within 60 s on large clusters.
+                            # The workers are those the watchdog noted before
+                            # cancelling (_frozen_workers): all of them at the
+                            # first cancelled future collected, in one call.
                             try:
-                                _proc = _client.processing()
-                                _stuck_key = _done.key
-                                _stuck_workers = [
-                                    w for w, keys in _proc.items()
-                                    if _stuck_key in keys
-                                ]
-                                if _stuck_workers:
+                                with _frozen_lock:
+                                    _to_restart = sorted(_frozen_workers)
+                                    _frozen_workers.clear()
+                                if _to_restart:
                                     _result_map = _client.restart_workers(
-                                        _stuck_workers,
+                                        _to_restart,
                                         timeout=120,
                                         raise_for_error=False,
                                     )
                                     logger.info(
                                         f"{ref_alias}: targeted restart of "
-                                        f"{len(_stuck_workers)} worker(s): {_result_map}"
+                                        f"{len(_to_restart)} worker(s): {_result_map}"
                                     )
                                 else:
-                                    # Future already cancelled / unassigned
-                                    # — no worker to restart.  Check whether
+                                    # No worker left to restart (restarted with
+                                    # an earlier task of this cancel, or the
+                                    # task was unassigned).  Check whether
                                     # ALL workers are dead; if so, restart the
                                     # entire cluster so resubmitted tasks can
                                     # actually be scheduled.
@@ -5567,8 +5591,8 @@ class Evaluator:
                                             )
                                     else:
                                         logger.info(
-                                            f"{ref_alias}: stuck task not assigned to "
-                                            f"any worker — skipping restart "
+                                            f"{ref_alias}: no worker left to restart "
+                                            f"for task {_idx} "
                                             f"({len(_live_workers)} worker(s) still alive)"
                                         )
                             except Exception as _restart_exc:
